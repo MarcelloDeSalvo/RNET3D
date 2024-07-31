@@ -1,0 +1,18 @@
+# Byte-compiled / optimized / DLL files
+**/__pycache__/
+*.pyc
+
+old/
+dataset/
+dataset_RARE/
+dataset_MIX/
+dataset_skullstripping/
+dataset_roi/
+dataset_roi_cot/
+other/
+results/
+eval/
+data_fix/
+src/preprocessing/N4/
+src/preprocessing/source/
+.venv/
