@@ -32,7 +32,7 @@ def morphology_refinement_callback(fill_small_holes=True, remove_small_objects=T
     
     return post_process
 
-def ipsi_contra_division_callback(visualize_pca=False, use_centroids=False):
+def ipsi_contra_division_callback(visualize_pca=False, use_centroids=False, default_hemisphere='right', lesion_voxels_threshold=10):
     '''
     Divide the mask into ipsilateral and contralateral regions by using pca to determine the third ventricle's principal axes and minimize the symmetry cost.
     
@@ -52,6 +52,8 @@ def ipsi_contra_division_callback(visualize_pca=False, use_centroids=False):
     Parameters:
     - visualize_pca (bool): visualize the principal components of the third ventricle
     - use_centroids (bool): if True, use the centroids of the ventricle regions to determine the hemisphere, otherwise use a hard split based on the third ventricle's plane of symmetry (useful for rats brain or when the centroids are not reliable)
+    - default_hemisphere (str): default hemisphere to use when no lesion is found (either 'right' or 'left')
+    - lesion_voxels_threshold (int): minimum number of voxels for a lesion to be considered valid
     
     Returns:
     - post_process (function): post-processing function that divides the mask into ipsilateral and contralateral regions
@@ -172,18 +174,28 @@ def ipsi_contra_division_callback(visualize_pca=False, use_centroids=False):
         optimal_normal /= np.linalg.norm(optimal_normal)
         
         # Take biggest lesion blob and its centroid
-        lesion_region = max(lesion_regions, key=lambda x: x.area)
-        lesion_centroid = lesion_region.centroid
+        try:
+            lesion_region = max(lesion_regions, key=lambda x: x.area)
+            lesion_centroid = lesion_region.centroid
+            
+            # if lesion is too small, raise ValueError
+            if lesion_region.area < lesion_voxels_threshold:
+                raise ValueError('Lesion is too small')
 
-        # Determine the lesion hemisphere
-        lesion_in_right_hemisphere = determine_lesion_hemisphere(lesion_centroid, third_ventricle_centroid, optimal_normal)
+            # Determine the lesion hemisphere
+            lesion_in_right_hemisphere = determine_lesion_hemisphere(lesion_centroid, third_ventricle_centroid, optimal_normal)
+            
+            if use_centroids:
+                hemisphere_indices = [determine_lesion_hemisphere(region.centroid, third_ventricle_centroid, optimal_normal) == lesion_in_right_hemisphere for region in ventricle_regions]
+                ipsi_ventricle_mask, contra_ventricle_mask = create_ventricle_masks_with_centroids(labeled_ventricles, ventricle_regions, hemisphere_indices)
+            else:
+                ipsi_ventricle_mask, contra_ventricle_mask = create_ventricle_masks_with_hard_split(ventricles_mask, optimal_normal, lesion_in_right_hemisphere, third_ventricle_centroid)
         
-        if use_centroids:
-            hemisphere_indices = [determine_lesion_hemisphere(region.centroid, third_ventricle_centroid, optimal_normal) == lesion_in_right_hemisphere for region in ventricle_regions]
-            ipsi_ventricle_mask, contra_ventricle_mask = create_ventricle_masks_with_centroids(labeled_ventricles, ventricle_regions, hemisphere_indices)
-        else:
-            ipsi_ventricle_mask, contra_ventricle_mask = create_ventricle_masks_with_hard_split(ventricles_mask, optimal_normal, lesion_in_right_hemisphere, third_ventricle_centroid)
-        
+        except ValueError:
+            # If no lesion is found, default to the right hemisphere
+            print(f'No lesion found, defaulting to the {default_hemisphere} hemisphere with hard split')
+            ipsi_ventricle_mask, contra_ventricle_mask = create_ventricle_masks_with_hard_split(ventricles_mask, optimal_normal, default_hemisphere == 'right', third_ventricle_centroid)
+
         final_roi_mask = update_final_roi_mask(y_roi, ipsi_ventricle_mask, contra_ventricle_mask)
         
         return final_roi_mask
