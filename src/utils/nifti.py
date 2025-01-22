@@ -136,13 +136,17 @@ def create_3d_image_from_dti(nii_img, output_path, name, save=True):
 
     # Get the data from the NIfTI image
     nii_data = nii_img.get_fdata()
-
     # Take the mean of the first slice (b0) and the second slice (b1) of the 4th dimension
-    bo_t0 = nii_data[:, :, :, 0, 0]
-    b0_t1 = nii_data[:, :, :, 0, 1]
+
+    if len(nii_data.shape) == 4:
+        bo_t0 = nii_data[:, :, :, 0]
+        b0_t1 = nii_data[:, :, :, 1]
+
+    else:
+        bo_t0 = nii_data[:, :, :, 0, 0]
+        b0_t1 = nii_data[:, :, :, 0, 1]
 
     anat_data = np.mean([bo_t0, b0_t1], axis=0)
-
     # Create a new NIfTI image with the anatomical data
     anat_img = nib.Nifti1Image(anat_data, nii_img.affine, nii_img.header)
 

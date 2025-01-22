@@ -101,16 +101,17 @@ def save_excel_table(
 
         if y_pred is None:
             print(f"Prediction not found for {case}")
-            return None  # Skip this subject if prediction is missing
+            for i in range(len(name_mapping)):
+                volumes[name_mapping[i].get("name", f"Class_{i}")].append(0)
+        else:
+            # Estimate ROI volumes
+            volumes_dic = estimate_volume(y_pred)
+            num_classes = len(name_mapping)
 
-        # Estimate ROI volumes
-        volumes_dic = estimate_volume(y_pred)
-        num_classes = len(name_mapping)
-
-        for i in range(num_classes):
-            volumes[name_mapping[i].get("name", f"Class_{i}")].append(
-                volumes_dic.get(name_mapping[i].get("value", i), 0)
-            )
+            for i in range(num_classes):
+                volumes[name_mapping[i].get("name", f"Class_{i}")].append(
+                    volumes_dic.get(name_mapping[i].get("value", i), 0)
+                )
 
         # Load the brain mask prediction
         brain_mask = load_prediction(brain_mask_path)
