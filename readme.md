@@ -12,6 +12,8 @@ This project was started in collaboration with Politecnico di Milano and the Mar
   - [:wrench: Project setup](#wrench-project-setup)
     - [1. Clone the Repository](#1-clone-the-repository)
     - [2. Set Up a Virtual Environment](#2-set-up-a-virtual-environment)
+      - [Venv environment](#venv-environment)
+      - [Conda Environment with GPU support for TF 2.10 (Recommended)](#conda-environment-with-gpu-support-for-tf-210-recommended)
     - [3. Configure VS Code for Jupyter Notebook](#3-configure-vs-code-for-jupyter-notebook)
     - [4. Open and Run Jupyter Notebook](#4-open-and-run-jupyter-notebook)
     - [5. Verify TensorFlow with CUDA](#5-verify-tensorflow-with-cuda)
@@ -36,7 +38,7 @@ Our proposed multi-task 3D U-Net architecture features:
 
 ## :milky_way: Project environment and prerequisites
 Before you begin, ensure you have the following installed on your system:
-- Python 3.8+
+- Python 3.8+ (recommended: 3.10.13)
 - Git
 - Visual Studio Code
 - TensorFlow 2.10 (Windows)
@@ -65,6 +67,7 @@ cd your-repo-name
 ```
 
 ### 2. Set Up a Virtual Environment
+#### Venv environment
 Create and activate a virtual environment using VS Code commands.
 
 1. Open VS Code and navigate to the cloned repository folder.
@@ -74,6 +77,20 @@ Create and activate a virtual environment using VS Code commands.
     - Choose `Venv`
     - Select `requirements.txt` to automatically install dependencies
 
+#### Conda Environment with GPU support for TF 2.10 (Recommended)
+To create a Conda environment with GPU support for TensorFlow 2.10, follow these steps:
+
+1. **Install Conda or Miniconda**:  
+   Ensure you have Conda or Miniconda installed on your system.<br>
+   You can download Miniconda from [miniconda download page](https://docs.conda.io/en/latest/miniconda.html).
+
+2. **Create and Set Up the Environment**:  
+   Open a terminal or command prompt and run the following commands:
+```python
+conda create --name your_env python==3.10.13
+conda install -c conda-forge cudatoolkit=11.2 cudnn=8.1
+pip install -r requirements.txt
+```
 ### 3. Configure VS Code for Jupyter Notebook
 Ensure you have the necessary extensions in VS Code:
 - Python
