@@ -79,7 +79,7 @@ Pygments==2.18.0
 pyparsing==3.1.2
 python-dateutil==2.9.0
 pytz==2024.1
-pywin32==305.1
+pywin32==305
 PyYAML==6.0.1
 pyzmq==24.0.1
 requests==2.31.0
