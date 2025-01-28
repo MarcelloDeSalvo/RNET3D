@@ -88,6 +88,7 @@ To create a Conda environment with GPU support for TensorFlow 2.10, follow these
    Open a terminal or command prompt and run the following commands:
 ```python
 conda create --name your_env python==3.10.13
+conda activate your_env
 conda install -c conda-forge cudatoolkit=11.2 cudnn=8.1
 pip install -r requirements.txt
 ```
