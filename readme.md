@@ -90,7 +90,7 @@ To create a Conda environment with GPU support for TensorFlow 2.10, follow these
 conda create --name your_env python==3.10.13
 conda activate your_env
 conda install -c conda-forge cudatoolkit=11.2 cudnn=8.1
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 ### 3. Configure VS Code for Jupyter Notebook
 Ensure you have the necessary extensions in VS Code:
