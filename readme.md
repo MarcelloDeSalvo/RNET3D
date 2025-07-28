@@ -127,8 +127,9 @@ Models/         # Contains pre-trained models for various experimental setups
 └── rnet_da.h5/        # Trained on TBI mice with domain adaptation (lesion + 3 ventricles + cortex + corpus callosum)
  
 Src/            # The main folder of the project containing all the source code
-├── main_script.py
-├── utils.py
-└── other_script.py
+├── project_folders
+├── 3DRNET_Inference.ipynb    # Tutorial on how to make predictions using the pre-trained models
+├── 3DRNET_Training.ipynb     # Tutorial on how to train the 3D RNET
+└── DA_3DRNET_Training.ipynb  # Tutorial on how to train the 3D RNET with domain adaptation
 </pre>
 
