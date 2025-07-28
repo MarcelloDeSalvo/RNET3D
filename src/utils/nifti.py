@@ -120,7 +120,7 @@ def estimate_volume(image, resolution=None, verbose=False):
         # calculate volume for each class in mm^3
         _volume = n_voxels * resolution[0] * resolution[1] * resolution[2]
         if verbose:
-            print(f"Class {i} has {n_voxels} voxels and a volume of {_volume} mm^3")
+            print(f"Class {i} has {n_voxels} voxels and a volume of {_volume:.3f} mm^3")
         volume[i] = _volume
 
     return volume

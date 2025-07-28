@@ -135,7 +135,7 @@ def save_excel_table(
 
     # Main logic starts here
     subjects = get_subjects_list(modality_folder)
-    print(f"Processing {len(subjects)} subjects...")
+    print(f"Processing {len(subjects)} subjects fot the excel table...")
 
     # Initialize volumes dictionary for each class and brain mask
     num_classes = len(name_mapping)
