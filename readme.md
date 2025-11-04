@@ -90,7 +90,7 @@ To create a Conda environment with GPU support for TensorFlow 2.10, follow these
 conda create --name your_env python==3.10.13
 conda activate your_env
 conda install -c conda-forge cudatoolkit=11.2 cudnn=8.1
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 ### 3. Configure VS Code for Jupyter Notebook
 Ensure you have the necessary extensions in VS Code:
@@ -127,8 +127,9 @@ Models/         # Contains pre-trained models for various experimental setups
 └── rnet_da.h5/        # Trained on TBI mice with domain adaptation (lesion + 3 ventricles + cortex + corpus callosum)
  
 Src/            # The main folder of the project containing all the source code
-├── main_script.py
-├── utils.py
-└── other_script.py
+├── project_folders
+├── 3DRNET_Inference.ipynb    # Tutorial on how to make predictions using the pre-trained models
+├── 3DRNET_Training.ipynb     # Tutorial on how to train the 3D RNET
+└── DA_3DRNET_Training.ipynb  # Tutorial on how to train the 3D RNET with domain adaptation
 </pre>
 
