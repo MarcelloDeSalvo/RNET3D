@@ -666,7 +666,7 @@ class SaveNifti(PreprocessingStep):
             if self.replace is not None:
                 cur_path = cur_path.replace(self.replace, self.postfix)
             else:
-                cur_path = cur_path.replace(".nii", f"{self.postfix}.nii")
+                cur_path = cur_path.replace(".nii.gz", f"{self.postfix}.nii.gz")
 
         if self.reference is None:
             if self.verbose:
