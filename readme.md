@@ -22,7 +22,6 @@ This project was started in collaboration with Politecnico di Milano and the Mar
 ## :page_with_curl: Intro
 Rodent models of traumatic brain injury (TBI) are crucial for studying the mechanisms underlying brain injury evolution and long-term outcomes. Magnetic resonance imaging (MRI) is increasingly used in preclinical settings to monitor in-vivo structural damage, as it allows direct comparisons to human data. However, automatic segmentation of brain volumes remains challenging due to the scarcity of rodent brain segmentation methods, making the procedure highly time-consuming and operator-dependent
 
-![](/images/U-Net%20-%20Pipeline.png)
 By using Convolutional Neural Networks (CNNs), this study aims to develop an efficient tool for enhancing segmentation quality while minimizing analysis time. We explore the effectiveness of 3D CNN architectures across different species, strains, injury sites, and MRI sequences: using a dataset of rodents with TBI from the controlled cortical impact (CCI) model, we trained and evaluated a multi-task CNN incorporating multi-scale inputs, deep supervision, and attention mechanisms to enhance segmentation performance.
 
 ## :mouse: 3D R-Net Architecture
@@ -34,7 +33,7 @@ Our proposed multi-task 3D U-Net architecture features:
 - **Deep Supervision**: Intermediate results are summed up separately for each task, ensuring precise and fine-grained 3D segmentation.
 - **Multi-scale inputs**: Preserves small or subtle image details that are frequently lost during max-pooling by gradually incorporating multi-scale inputs into the encoder layers.
 
-![](/images/U-Net%20-%20Architecture.png)
+![](/images/U-Net%20-%20Architecture.jpg)
 
 ## :milky_way: Project environment and prerequisites
 Before you begin, ensure you have the following installed on your system:
