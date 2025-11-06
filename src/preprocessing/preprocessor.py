@@ -270,7 +270,11 @@ class Resample(PreprocessingStep):
         if self.verbose:
             print("\t|- Resampled image shape: ", resampled_data.shape)
 
-        return nib.Nifti1Image(resampled_data, affine, image.header, dtype=np.float64)
+        # Make qform/sform explicit & identical (newer version ITK-SNAP require this)
+        resampled = nib.Nifti1Image(resampled_data, affine, None)
+        resampled.set_qform(affine, code=1)
+        resampled.set_sform(affine, code=1)
+        return resampled
 
 
 class CorrectX10(PreprocessingStep):
