@@ -252,6 +252,8 @@ class Resample(PreprocessingStep):
                 print(
                     "\t|- Voxel dimensions are already close to the target resolution."
                 )
+            image.set_qform(affine, code=1)
+            image.set_sform(affine, code=1)
             return image
 
         scale_factors = [
