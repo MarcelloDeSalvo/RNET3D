@@ -106,3 +106,41 @@ def test_plotting_between_ten_and_twenty_thousand_points(monkeypatch):
 def test_invalid_split_settings_fail_early(kwargs):
     with pytest.raises(ValueError):
         ipsi_contra_division_callback(**kwargs)
+
+
+@pytest.mark.parametrize('centroids', [False, True])
+def test_component_and_voxel_modes_keep_distinct_plane_rules(monkeypatch, centroids):
+    """A connected ventricle crossing the plane is split only in voxel mode."""
+    from src.evaluation.postprocessing import _SymmetryPlane
+
+    point = np.array([3., 0., 0.])
+    normal = np.array([1., 0., 0.])
+    plane = _SymmetryPlane(point, normal)
+    monkeypatch.setattr(_SymmetryPlane, 'fit', staticmethod(lambda mask, visualize: plane))
+    mask = np.zeros((7, 3, 3), dtype=np.uint8)
+    mask[1:6, 1, 1] = 2
+    mask[3, 0, :] = 3
+    mask[5, 2, 2] = 1
+    callback = ipsi_contra_division_callback(use_centroids=centroids, lesion_voxels_threshold=1)
+    result = callback(mask)
+
+    if centroids:
+        assert np.all(result[1:6, 1, 1] == 2)
+    else:
+        np.testing.assert_array_equal(result[1:6, 1, 1], [2, 2, 2, 3, 3])
+    assert np.all(result[3, 0, :] == 4)
+
+
+def test_vector_assignment_accepts_no_ipsilateral_voxels(monkeypatch):
+    """An empty indexed assignment must preserve all contralateral labels."""
+    from src.evaluation.postprocessing import _SymmetryPlane
+
+    plane = _SymmetryPlane(np.array([3., 0., 0.]), np.array([1., 0., 0.]))
+    monkeypatch.setattr(_SymmetryPlane, 'fit', staticmethod(lambda mask, visualize: plane))
+    mask = np.zeros((7, 3, 3), dtype=np.uint8)
+    mask[1:3, 1, 1] = 2
+    mask[3, 0, :] = 3
+    mask[5, 2, 2] = 1
+    callback = ipsi_contra_division_callback(lesion_voxels_threshold=1)
+    result = callback(mask)
+    assert np.all(result[mask == 2] == 2)

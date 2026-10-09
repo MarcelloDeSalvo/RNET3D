@@ -29,6 +29,21 @@ Small fixes:
 - With no lateral ventricles, plane fitting is unnecessary: return a copy with
   third-ventricle label 3 changed to 4. No missing plane is invented.
 
-Verification: 15 focused tests and direct exact-output comparison against the
-pre-refactor implementation for four normal/default cases. No inference or
+## Simplified structure
+
+The callback retains its public signature and now has one nested function.
+A private `_SymmetryPlane` dataclass groups the fitted origin, normal, plane
+fitting and point-side calculation. Plotting and the symmetry objective are
+separate helpers, and a shared largest-component helper serves both masks.
+
+Voxel assignment uses array indexing instead of a Python loop over every voxel.
+Labels are written directly into an input copy, eliminating separate ipsilateral
+and contralateral output masks and repeated split calls. Ventricular connected
+components are computed only when centroid-based assignment is actually used.
+The hard split still applies to missing/undersized lesions in either mode.
+
+Verification: 18 focused tests, including crossing components, on-plane points
+and empty ipsilateral selections. Exact output comparison against the previous
+committed version passed for 96 synthetic cases spanning both split modes,
+both fallback hemispheres and absent/tiny/valid lesions. No inference or
 training notebooks were changed.
