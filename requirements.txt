@@ -50,6 +50,7 @@ MarkupSafe==2.1.5
 matplotlib==3.8.1
 matplotlib-inline==0.1.7
 msgpack==1.0.8
+nbformat==5.11.1
 nest_asyncio==1.6.0
 networkx==3.3
 nibabel==5.1.0
