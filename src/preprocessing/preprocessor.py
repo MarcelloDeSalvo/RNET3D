@@ -1,1055 +1,1113 @@
+"""Composable, geometry-aware preprocessing for 3D NIfTI images and masks."""
+
+from __future__ import annotations
+
 import abc
+import json
+import warnings
+from collections.abc import Callable, Sequence
+from pathlib import Path
+from typing import Any, TypeAlias
+
 import ants
-import numpy as np
 import nibabel as nib
-from scipy.ndimage import zoom, rotate
-from scipy.stats import truncnorm
-from nibabel.processing import *
-from nibabel.orientations import *
-from preprocessing.n4_bias import ants_n4_bias_field_wrapper
-from scipy import ndimage
+import numpy as np
 import SimpleITK as sitk
+from nibabel.orientations import io_orientation, ornt_transform
+from nibabel.processing import resample_from_to
+from numpy.typing import NDArray
+from scipy.ndimage import gaussian_filter
+from scipy.stats import truncnorm
+
+NiftiImage: TypeAlias = nib.Nifti1Image | nib.Nifti2Image
+ImageInput: TypeAlias = NiftiImage | list[NiftiImage] | None
+PreprocessResult: TypeAlias = ImageInput | tuple[ImageInput, ImageInput]
+Coordinates: TypeAlias = tuple[int, int, int]
+Padding: TypeAlias = tuple[tuple[int, int], tuple[int, int], tuple[int, int]]
+
+
+def _shape(values: Sequence[int]) -> Coordinates:
+    """Validate a positive, three-dimensional array shape."""
+    if len(values) != 3 or any(not isinstance(v, (int, np.integer)) or v <= 0 for v in values):
+        raise ValueError("Shape must contain three positive integers")
+
+    return tuple(int(v) for v in values)
+
+
+def _vector(values: float | Sequence[float], name: str) -> NDArray[np.float64]:
+    """Validate positive finite scalar or three-axis physical parameters."""
+    vector = np.broadcast_to(np.asarray(values, dtype=float), (3,)).copy()
+
+    if not np.all(np.isfinite(vector)) or np.any(vector <= 0):
+        raise ValueError(f"{name} must contain positive finite values")
+
+    return vector
+
+
+def _range(values: Sequence[float], name: str, minimum: float | None = None) -> tuple[float, float]:
+    """Validate a finite, ordered pair of sampling bounds."""
+    if len(values) != 2 or not np.all(np.isfinite(values)) or values[0] > values[1]:
+        raise ValueError(f"{name} must contain two finite ordered bounds")
+
+    if minimum is not None and values[0] < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+
+    return float(values[0]), float(values[1])
+
+
+def _images(value: ImageInput) -> list[NiftiImage]:
+    """Return a fresh list while leaving caller-owned lists untouched."""
+    return [] if value is None else list(value) if isinstance(value, list) else [value]
+
+
+def _check_image(image: NiftiImage) -> None:
+    """Require a nonempty 3D image with a finite, invertible affine."""
+    _shape(image.shape)
+
+    if not np.all(np.isfinite(image.affine)) or abs(np.linalg.det(image.affine[:3, :3])) < 1e-12:
+        raise ValueError("Image affine must be finite and invertible")
+
+
+def _same_grid(a: NiftiImage, b: NiftiImage) -> bool:
+    """Compare both array shape and physical voxel coordinates."""
+    return a.shape == b.shape and np.allclose(a.affine, b.affine, rtol=0, atol=1e-6)
+
+
+def _new_image(data: NDArray, reference: NiftiImage, affine: NDArray | None = None) -> NiftiImage:
+    """Build an image without changing the source data or header."""
+    affine = reference.affine if affine is None else affine
+    header = reference.header.copy()
+    image = reference.__class__(data, affine, header, dtype=data.dtype)
+
+    # NIfTI-1 stores forms in float32. Update the copied header directly so the
+    # in-memory float64 affine is not replaced by its rounded header encoding.
+    sform_code: int = int(reference.header["sform_code"]) or 1
+    qform_code: int = int(reference.header["qform_code"]) or 1
+    image.header.set_sform(affine, code=sform_code)
+    image.header.set_qform(affine, code=qform_code)
+
+    return image
+
+
+def _shift_affine(affine: NDArray, offset: Sequence[int]) -> NDArray[np.float64]:
+    """Translate the voxel origin, preserving physical coordinates of retained voxels."""
+    result = affine.copy()
+    result[:3, 3] = nib.affines.apply_affine(affine, offset)
+
+    return result
+
+
+def _padding(shape: Sequence[int], target: Sequence[int], random: bool = False) -> Padding:
+    """Compute per-axis padding widths; never shrink an image."""
+    widths = []
+
+    for size, wanted in zip(_shape(shape), _shape(target)):
+        difference = max(0, wanted - size)
+        before = int(np.random.randint(difference + 1)) if random else difference // 2
+        widths.append((before, difference - before))
+
+    return tuple(widths)
+
+
+def _pad(image: NiftiImage, widths: Padding, mode: str) -> NiftiImage:
+    """Pad data and shift its affine by the amount added before each axis."""
+    source_data: NDArray = image.get_fdata()
+    data = np.pad(source_data, widths, mode=mode)
+
+    offset: list[int] = [-before for before, _ in widths]
+    affine = _shift_affine(image.affine, offset)
+
+    return _new_image(data, image, affine)
+
+
+def _resample(image: NiftiImage, reference: NiftiImage, is_mask: bool, order: int = 1) -> NiftiImage:
+    """Resample to an exact reference grid, using discrete interpolation for masks."""
+    _check_image(image)
+    _check_image(reference)
+
+    source_data: NDArray = image.get_fdata()
+
+    if _same_grid(image, reference):
+        return _new_image(source_data, reference)
+
+    floating_image = _new_image(source_data, image)
+    target_grid = (reference.shape, reference.affine)
+    interpolation_order: int = 0 if is_mask else order
+    result = resample_from_to(floating_image, target_grid, order=interpolation_order)
+
+    result_data: NDArray = result.get_fdata()
+
+    return _new_image(result_data, reference)
+
+
+def _resize_grid(image: NiftiImage, shape: Coordinates, spacing: Sequence[float], order: int) -> NiftiImage:
+    """Resample onto a new grid sharing the source orientation and physical center."""
+    affine = image.affine.copy()
+    affine[:3, :3] *= np.asarray(spacing) / nib.affines.voxel_sizes(image.affine)
+
+    source_center: NDArray = (np.asarray(image.shape) - 1) / 2
+    center = nib.affines.apply_affine(image.affine, source_center)
+    affine[:3, 3] = center - affine[:3, :3] @ ((np.asarray(shape) - 1) / 2)
+
+    # Edge extension represents the outer half-voxel without inventing a zero border.
+    source_data: NDArray = image.get_fdata()
+    floating_image = _new_image(source_data, image)
+    target_grid = (shape, affine)
+    result = resample_from_to(floating_image, target_grid, order=order, mode="nearest")
+
+    result_data: NDArray = result.get_fdata()
+
+    return _new_image(result_data, image, affine)
+
+
+def _lps_geometry(image: NiftiImage) -> tuple[tuple, tuple, NDArray[np.float64]]:
+    """Convert NIfTI RAS geometry to ITK/ANTs LPS; reject unsupported shear."""
+    _check_image(image)
+
+    affine = np.diag([-1.0, -1.0, 1.0, 1.0]) @ image.affine
+    spacing = nib.affines.voxel_sizes(affine)
+    direction = affine[:3, :3] / spacing
+
+    if not np.allclose(direction.T @ direction, np.eye(3), atol=1e-5):
+        raise ValueError("ITK/ANTs transforms require an orthogonal grid; resample sheared images first")
+
+    return tuple(affine[:3, 3]), tuple(spacing), direction
+
+
+def _configuration(value: Any) -> Any:
+    """Convert configuration values to JSON without exporting image voxel data."""
+    if isinstance(value, (nib.Nifti1Image, nib.Nifti2Image)):
+        return {"shape": list(value.shape), "affine": value.affine.tolist()}
+
+    if isinstance(value, dict):
+        return {str(k): _configuration(v) for k, v in value.items()}
+
+    if isinstance(value, (list, tuple, np.ndarray)):
+        return [_configuration(v) for v in value]
+
+    if isinstance(value, np.generic):
+        return value.item()
+
+    return str(value) if isinstance(value, Path) else value
 
 
 class PreprocessingStep(abc.ABC):
-    """
-    Base class for processing steps applied to images and masks.
+    """Apply one transform to a single image or list, optionally paired with masks."""
 
-    Attributes:
-    - function: Function to apply to the image.
-    - verbose: Print the information about the process.
-    - probability: Probability to apply the step.
-    """
+    spatial = False
 
-    def __init__(self, verbose=False, probability=1, global_probability=False):
-        self.name = self.__class__.__name__
-        self.probability = probability
-        self.global_probability = global_probability
-        self.verbose = verbose
-        self.current_path = None
+    def __init__(self, verbose: bool = False, probability: float = 1, global_probability: bool = False) -> None:
+        """
+        Store execution options without retaining an input image.
+        The probability parameter controls the chance of applying this step to each image/mask group.
+        The global_probability flag indicates whether this step should be affected by the pipeline-wide probability setting.
+        """
+        self.name: str = self.__class__.__name__
+        self.verbose: bool = verbose
+        self.global_probability: bool = global_probability
+        self.current_path: str | None = None
+        self.set_probability(probability)
 
     @abc.abstractmethod
-    def execute(self, image, is_mask=False):
-        pass
+    def execute(self, image: NiftiImage, is_mask: bool = False, **parameters: Any) -> NiftiImage:
+        """Transform one image using parameters sampled for its image/mask group."""
+        raise NotImplementedError
 
-    def apply(self, imgs=None, masks=None, path=None):
-        """
-        Apply the function to the images and the masks based on their type.
-        """
-        if path is not None:
-            self.current_path = path
-        if np.random.rand() > self.probability:
+    def sample_parameters(self, image: NiftiImage) -> dict[str, Any]:
+        """Return parameters shared by every aligned image and mask."""
+        return {}
+
+    def apply(self, imgs: ImageInput = None, masks: ImageInput = None, path: str | None = None) -> PreprocessResult:
+        """Validate inputs, reset the current path, and probabilistically apply the step."""
+        self.current_path = str(path) if path is not None else None
+        images = _images(imgs) + _images(masks)
+
+        if not images:
+            raise ValueError("Provide at least one image or mask")
+
+        for image in images:
+            _check_image(image)
+
+        if self.spatial and any(not _same_grid(images[0], image) for image in images[1:]):
+            raise ValueError(f"{self.name} requires aligned image/mask shapes and affines")
+
+        if np.random.random() >= self.probability:
             return self.return_processed(imgs, masks)
+
         return self.iterate(imgs, masks)
 
-    def iterate(self, imgs, masks):
-        if imgs is not None:
-            imgs = self.iterate_list(imgs, self.execute, False)
-        if masks is not None:
-            masks = self.iterate_list(masks, self.execute, True)
+    def iterate(self, imgs: ImageInput, masks: ImageInput) -> PreprocessResult:
+        """Sample once and transform each image/mask without mutating input lists."""
+        reference = (_images(imgs) + _images(masks))[0]
+        parameters = self.sample_parameters(reference)
 
-        return self.return_processed(imgs, masks)
+        def transform(value: ImageInput, is_mask: bool) -> ImageInput:
+            """Apply shared parameters while preserving single-image/list structure."""
+            if value is None:
+                return None
 
-    def iterate_list(self, input, callback, *args):
-        """
-        Utils function to iterate through a list and apply a function to each element.\n
-        Checks if the input is a list or a single element.\n
-        Return the transformed list or the transformed element.
-        """
-        if isinstance(input, list):
-            for i in range(len(input)):
-                input[i] = callback(input[i], *args)
-            return input
-        else:
-            return callback(input, *args)
+            result = [self.execute(image, is_mask=is_mask, **parameters) for image in _images(value)]
 
-    def return_processed(self, imgs, masks):
-        if masks is not None and imgs is not None:
-            return imgs, masks
+            return result if isinstance(value, list) else result[0]
 
-        if masks is not None:
-            return masks
-        return imgs
+        processed_images: ImageInput = transform(imgs, False)
+        processed_masks: ImageInput = transform(masks, True)
 
-    def get_global_probability(self):
+        return self.return_processed(processed_images, processed_masks)
+
+    def iterate_list(self, input: NiftiImage | list[NiftiImage], callback: Callable, *args: Any) -> NiftiImage | list[NiftiImage]:
+        """Compatibility helper: transform one image or a fresh list."""
+        return [callback(image, *args) for image in input] if isinstance(input, list) else callback(input, *args)
+
+    @staticmethod
+    def return_processed(imgs: ImageInput, masks: ImageInput) -> PreprocessResult:
+        """Preserve the historical single-input or image/mask-pair return format."""
+        return (imgs, masks) if imgs is not None and masks is not None else masks if masks is not None else imgs
+
+    def get_global_probability(self) -> bool:
+        """Return whether pipeline-wide probability updates affect this step."""
         return self.global_probability
 
-    def set_probability(self, probability):
-        self.probability = probability
+    def set_probability(self, probability: float) -> None:
+        """Require a finite probability between zero and one."""
+        if not np.isfinite(probability) or not 0 <= probability <= 1:
+            raise ValueError("Probability must be between zero and one")
 
-    def get_configuration(self):
-        configuration = f"\n> Pre-processing step: {self.name}\n"
-        configuration += f"\t- name: {self.name}"
+        self.probability: float = float(probability)
 
-        # Add the attributes of the class with their values
-        for key, value in self.__dict__.items():
-            if isinstance(value, (int, float, str, list, tuple)):
-                configuration += f"\n\t- {key}: {value}"
-            else:
-                configuration += f"\n\t- {key}: {type(value)}"
+    def get_configuration(self) -> str:
+        """Serialize parameters, including label mappings and reference geometry."""
+        parameters: dict[str, Any] = {k: v for k, v in vars(self).items() if k != "current_path"}
+        configuration = _configuration(parameters)
 
-        return configuration
+        return json.dumps(configuration, indent=2)
 
 
 class Preprocessor:
-    """
-    PreprocessorMRI class is used to preprocess MRI images in an ordered pipeline.
+    """Compose ordered steps while preserving the existing notebook-facing API."""
 
-    Parameters:
-    - steps: list, list of preprocessing steps.
-    - verbose: bool, print the information about the preprocessing steps.
+    def __init__(self, steps: Sequence[PreprocessingStep], verbose: bool = False) -> None:
+        """Validate and store the settings for this preprocessing step."""
+        self.steps: list[PreprocessingStep] = list(steps)
+        self.verbose: bool = verbose
+        self.global_probability: float = 0
 
-    Methods:
-    - preprocess: Apply the preprocessing steps to the image and the mask.
-    - deprocess: Deprocess the data by reversing the preprocessing steps given a prediction and the original image.
-    - get_configuration: Get the configuration of the preprocessing steps.
-    - save_configuration: Save the configuration of the preprocessing steps to a file.
-
-    example:
-    ```
-    # The order of the steps is important!
-    steps = [
-        Reorient(ref_img),
-        CorrectX10(),
-        Resample(target_resolution),
-        N4BiasFieldCorrection(),
-        Normalize(mode='minmax')
-    ]
-
-    preprocessor = Preprocessor(steps, verbose=True)
-    preprocessor.preprocess(image, mask)
-    ```
-    """
-
-    def __init__(self, steps, verbose=False):
-        self.steps = steps
-        self.verbose = verbose
-        self.global_probability = 0
-
-    def preprocess(self, imgs=None, masks=None, path=None):
-        if self.verbose:
-            print("Preprocessing steps{\n")
+    def preprocess(self, imgs: ImageInput = None, masks: ImageInput = None, path: str | None = None) -> PreprocessResult:
+        """Run steps, preserving single-image/list and paired-input return formats."""
+        if not _images(imgs) + _images(masks):
+            raise ValueError("Provide at least one image or mask")
 
         for step in self.steps:
             if self.verbose:
                 print(step.get_configuration())
-            if imgs is not None:
-                if masks is not None:
-                    imgs, masks = step.apply(imgs, masks, path)
-                else:
-                    imgs = step.apply(imgs=imgs, path=path)
+
+            result = step.apply(imgs, masks, path)
+
+            if imgs is not None and masks is not None:
+                imgs, masks = result
+            elif imgs is not None:
+                imgs = result
             else:
-                masks = step.apply(masks=masks, path=path)
+                masks = result
 
-        if self.verbose:
-            print("}>\n")
-
-        if masks is not None and imgs is not None:
-            return imgs, masks
-
-        if masks is not None:
-            return masks
-        return imgs
+        return PreprocessingStep.return_processed(imgs, masks)
 
     def deprocess(
-        self,
-        prediction,
-        original_image,
-        mapping,
-        save_path=None,
-        verbose=False,
-        reference_resolution=(0.1, 0.1, 0.1),
-        flip_axis=None,
-        scale_factor=None,
-    ):
-        """
-        Reverses the preprocessing steps given the original image as reference.
+        self, prediction: NiftiImage, original_image: NiftiImage, mapping: dict[int, int],
+        save_path: str | None = None, verbose: bool = False,
+        reference_resolution: Sequence[float] | None = None,
+        flip_axis: Sequence[int] | None = None, scale_factor: float | Sequence[float] | None = None,
+    ) -> NiftiImage:
+        """Restore a discrete prediction onto the original voxel grid.
+
+        This uses affine resampling, not shape matching. An explicit flip undoes
+        array augmentation on the prediction grid. CorrectX10 is matched to the
+        configured pipeline (or the explicitly supplied reference resolution).
         """
         if scale_factor is not None:
-            prediction = Scale(scale_factor, verbose=verbose).execute(
-                prediction, is_mask=True
-            )
+            prediction = Scale(scale_factor).execute(prediction, is_mask=True)
 
-        reoriented_prediction = Reorient(original_image, verbose=verbose).execute(
-            prediction
-        )
-        corrected_original = CorrectX10(reference_resolution, verbose=verbose).execute(
-            original_image
-        )
-        corrected_resolution = corrected_original.header.get_zooms()
-        resampled_prediction = Resample(corrected_resolution, verbose=verbose).execute(
-            reoriented_prediction, is_mask=True
-        )
-        matched_prediction = PadderCutter(
-            original_image.shape, verbose=verbose
-        ).execute(resampled_prediction)
-        remapped_prediction = MapLabels(mapping=mapping, verbose=verbose).execute(
-            matched_prediction, is_mask=True
-        )
+        for axis in flip_axis or ():
+            prediction = Flip([axis]).execute(prediction, is_mask=True, axis=axis)
 
-        if flip_axis is not None:
-            remapped_prediction = Flip(flip_axis, verbose=verbose).execute(
-                remapped_prediction
-            )
+        target = original_image
+
+        if reference_resolution is not None:
+            target = CorrectX10(reference_resolution).execute(target)
+        else:
+            for step in self.steps:
+                if isinstance(step, CorrectX10):
+                    target = step.execute(target)
+
+        restored = _resample(prediction, target, is_mask=True)
+        restored = MapLabels(mapping=mapping).execute(restored, is_mask=True)
+        # CorrectX10 changes units, not voxel indices: restore the original header
+        # only after resampling in the corrected coordinate system.
+        restored_data: NDArray = restored.get_fdata()
+        restored = _new_image(restored_data, original_image)
 
         if save_path is not None:
-            SaveNifti(
-                path=save_path, reference=original_image, verbose=verbose
-            ).execute(remapped_prediction)
+            SaveNifti(path=save_path, verbose=verbose).execute(restored, is_mask=True)
 
-        return remapped_prediction
+        return restored
 
-    def get_configuration(self):
-        configuration = "Preprocessor class:"
+    def get_configuration(self) -> str:
+        """Return complete, parseable JSON for the ordered pipeline."""
+        configuration: list[Any] = []
+
         for step in self.steps:
-            configuration += step.get_configuration()
-        return configuration
+            step_json: str = step.get_configuration()
+            step_configuration = json.loads(step_json)
+            configuration.append(step_configuration)
 
-    def save_configuration(self, path):
-        with open(path, "w") as file:
-            file.write(self.get_configuration())
-        print(f"Configuration saved to {path}")
+        return json.dumps(configuration, indent=2)
 
-    def set_global_probability(self, probability):
-        self.global_probability = probability
+    def save_configuration(self, path: str) -> None:
+        """Write the complete pipeline configuration as JSON."""
+        output_path: Path = Path(path)
+        configuration: str = self.get_configuration()
+        output_path.write_text(configuration, encoding="utf-8")
+
+    def set_global_probability(self, probability: float) -> None:
+        """Set the application probability for augmentation steps that opted in."""
+        if not np.isfinite(probability) or not 0 <= probability <= 1:
+            raise ValueError("Probability must be between zero and one")
+
+        self.global_probability = float(probability)
+
         for step in self.steps:
             if step.get_global_probability():
                 step.set_probability(probability)
 
 
-# Pre-processing steps
 class Resample(PreprocessingStep):
-    """
-    Resample class is used to resample the image to a target resolution.
+    """Change voxel spacing: linear for images, nearest-neighbor for masks."""
 
-    Parameters:
-    - target_resolution: tuple, target resolution of the image.
-    - interpolation: int, interpolation method used for resampling.
-    - verbose: bool, print the information about the resampling process.
-    """
+    spatial = True
 
-    def __init__(self, target_resolution, interpolation=1, verbose=False):
+    def __init__(self, target_resolution: Sequence[float], interpolation: int = 1, verbose: bool = False) -> None:
+        """Validate and store the settings for this preprocessing step."""
         super().__init__(verbose)
-        self.target_resolution = target_resolution
-        self.interpolation = interpolation
 
-    def execute(self, image, is_mask=False):
-        """
-        Apply the resampling to the image based on the target resolution and the interpolation method.
-        """
+        self.target_resolution: NDArray[np.float64] = _vector(target_resolution, "Target resolution")
 
-        affine = nib.affines.rescale_affine(
-            image.affine, shape=image.shape, zooms=self.target_resolution
-        )
+        if interpolation not in (0, 1, 2, 3, 4, 5):
+            raise ValueError("Interpolation must be 0 (nearest) or 1-5 (linear to quintic). See scipy.ndimage.affine_transform for details.")
 
-        voxel_dims = image.header.get_zooms()
-        if self.verbose:
-            print("\t|- Original voxel dimensions: ", voxel_dims)
+        self.interpolation: int = interpolation
 
-        # if they are close to the target resolution, skip resampling
-        if np.allclose(voxel_dims, self.target_resolution, atol=1e-2):
-            if self.verbose:
-                print(
-                    "\t|- Voxel dimensions are already close to the target resolution."
-                )
-            image.set_qform(affine, code=1)
-            image.set_sform(affine, code=1)
-            return image
+    def execute(self, image: NiftiImage, is_mask: bool = False, **parameters: Any) -> NiftiImage:
+        """Resample around the physical center without modifying the input."""
+        _check_image(image)
 
-        scale_factors = [
-            current_dim / target_dim
-            for current_dim, target_dim in zip(voxel_dims, self.target_resolution)
-        ]
-        if self.verbose:
-            print("\t|- Scale factors: ", scale_factors)
+        spacing = nib.affines.voxel_sizes(image.affine)
 
-        _order = 0 if is_mask else self.interpolation
-        _mode = "nearest" if is_mask else "constant"
-        resampled_data = zoom(
-            image.get_fdata(), scale_factors, order=_order, mode=_mode
-        )
+        if np.allclose(spacing, self.target_resolution, rtol=0, atol=1e-8):
+            source_data: NDArray = image.get_fdata()
 
-        if self.verbose:
-            print("\t|- Resampled image shape: ", resampled_data.shape)
+            return _new_image(source_data, image)
 
-        # Make qform/sform explicit & identical (newer version ITK-SNAP require this)
-        resampled = nib.Nifti1Image(resampled_data, affine, None)
-        resampled.set_qform(affine, code=1)
-        resampled.set_sform(affine, code=1)
-        return resampled
+        extent = np.asarray(image.shape) * spacing / self.target_resolution
+
+        # Header float32 rounding must not add a whole voxel on unchanged axes.
+        rounded_extent: NDArray = np.rint(extent)
+        near_integer: NDArray = np.isclose(extent, rounded_extent, rtol=1e-6, atol=0)
+        extent = np.where(near_integer, rounded_extent, extent)
+
+        covering_shape: NDArray = np.ceil(extent)
+        shape_values: NDArray = np.maximum(1, covering_shape).astype(int)
+        shape: Coordinates = tuple(shape_values)
+
+        interpolation_order: int = 0 if is_mask else self.interpolation
+
+        return _resize_grid(image, shape, self.target_resolution, interpolation_order)
 
 
 class CorrectX10(PreprocessingStep):
-    """
-    CorrectX10 class is used to correct the voxel dimensions that were wrongly scaled by factors of 10 based on the reference resolution.
+    """Correct only axes whose spacing is close to ten times a known reference.
+
+    This is a dataset-specific units heuristic, not a general resampling step.
+    Omit it for data whose physical spacing has already been verified.
     """
 
-    def __init__(
-        self, reference_resolution=(0.1, 0.1, 0.1), threshold=5, verbose=False
-    ):
+    def __init__(self, reference_resolution: Sequence[float] = (0.1, 0.1, 0.1), threshold: float = 0.5, verbose: bool = False) -> None:
+        """Validate and store the settings for this preprocessing step."""
         super().__init__(verbose)
-        self.reference_resolution = reference_resolution
-        self.threshold = threshold
 
-    def execute(self, image, is_mask=False):
-        """
-        Correct the voxel dimensions that were wrongly scaled by factors of 10 based on the reference resolution.
-        """
-        voxel_dims = image.header.get_zooms()
-        if self.verbose:
-            print("\t|- Original voxel dimensions: ", voxel_dims)
+        self.reference_resolution: NDArray[np.float64] = _vector(reference_resolution, "Reference resolution")
 
-        # Detect factors of 10
-        detected_factors = [
-            np.round(dim / ref_dim)
-            for dim, ref_dim in zip(voxel_dims, self.reference_resolution)
-        ]
-        if self.verbose:
-            print("\t|- Detected factors: ", detected_factors)
+        if not np.isfinite(threshold) or not 0 < threshold <= 5:
+            raise ValueError("Factor tolerance must be positive and at most five")
 
-        # Divide by a factor of 10 if one of the factors is close to a factor of 10
-        if np.any(
-            [np.abs(factor - 10) < self.threshold for factor in detected_factors]
-        ):
-            voxel_dims = [dim / 10 for dim in voxel_dims]
+        self.threshold: float = threshold
 
-        if self.verbose:
-            print("\t|- Corrected factors: ", voxel_dims)
-        new_affine = nib.affines.rescale_affine(
-            image.affine, shape=image.shape, zooms=voxel_dims
-        )
+    def execute(self, image: NiftiImage, is_mask: bool = False, **parameters: Any) -> NiftiImage:
+        """Correct qualifying axes, preserving data and the physical grid center."""
+        _check_image(image)
 
-        return nib.Nifti1Image(
-            image.get_fdata(), affine=new_affine, header=image.header, dtype=np.float64
-        )
+        spacing = nib.affines.voxel_sizes(image.affine)
+        ratio_error: NDArray = spacing / self.reference_resolution - 10
+        needs_correction: NDArray = np.abs(ratio_error) < self.threshold
+        factors = np.where(needs_correction, 10, 1)
+
+        affine = image.affine.copy()
+        affine[:3, :3] /= factors
+        center = (np.asarray(image.shape) - 1) / 2
+        affine[:3, 3] = nib.affines.apply_affine(image.affine, center) - affine[:3, :3] @ center
+
+        source_data: NDArray = image.get_fdata()
+
+        return _new_image(source_data, image, affine)
 
 
 class MapLabels(PreprocessingStep):
-    """
-    MapLabels class is used to map the labels to a new set of labels.
-    """
+    """Map discrete label values with an explicit policy for unknown values."""
 
-    def __init__(self, labels=None, mapping=None, reverse=None, verbose=False):
-        """
-        Map the labels to a new set of labels by providing a mapping dictionary or a list of labels.
-        If only a list of labels is provided, the mapping will be done automatically by enumerating the labels starting from 0.
-        """
+    def __init__(self, labels: Sequence[int] | None = None, mapping: dict[int, int] | None = None,
+                 reverse: bool | None = None, verbose: bool = False, *, unknown: str = "error") -> None:
+        """Validate and store the settings for this preprocessing step."""
         super().__init__(verbose)
-        self.labels = labels
 
         if mapping is None:
-            self.mapping = {
-                old_label: new_label for new_label, old_label in enumerate(labels)
-            }
-        elif reverse:
-            if self.verbose:
-                print("\t|- Reversing mapping...")
-            self.mapping = {
-                new_label: old_label for old_label, new_label in mapping.items()
-            }
-        else:
-            self.mapping = mapping
+            if labels is None or len(set(labels)) != len(labels):
+                raise ValueError("Supply a mapping or a list of distinct labels")
 
-        if self.verbose:
-            print("\t|- Mapping labels: ", self.mapping)
+            mapping = {label: index for index, label in enumerate(labels)}
 
-    def execute(self, image, is_mask=False):
-        """
-        Apply the mapping to the image based on the mapping dictionary.\n
-        If the image is not a mask, return the image as it is.
-        """
+        if not mapping or any(not isinstance(value, (int, np.integer)) for pair in mapping.items() for value in pair):
+            raise ValueError("Label mapping must contain integer keys and values")
+
+        if reverse:
+            if len(set(mapping.values())) != len(mapping):
+                raise ValueError("Cannot reverse a many-to-one label mapping")
+
+            mapping = {value: key for key, value in mapping.items()}
+
+        if unknown not in ("error", "background"):
+            raise ValueError("Unknown-label policy must be 'error' or 'background'")
+
+        self.labels: list[int] | None = list(labels) if labels is not None else None
+        self.mapping: dict[int, int] = dict(mapping)
+        self.unknown: str = unknown
+
+    def execute(self, image: NiftiImage, is_mask: bool = False, **parameters: Any) -> NiftiImage:
+        """Map masks only; unlisted labels fail unless background mapping is explicit."""
         if not is_mask:
             return image
 
         data = image.get_fdata()
-        if self.verbose:
-            print("\t|- Unique labels: ", np.unique(data))
-        if self.verbose:
-            print("\t|- Data type: ", data.dtype)
 
-        tmp_data = np.zeros(data.shape)
-        for old_label, new_label in self.mapping.items():
-            tmp_data[data == old_label] = new_label
-            if self.verbose:
-                print(f"\t|- Mapping label {old_label} to {new_label}")
-        if self.verbose:
-            print("\t|- Unique labels: ", np.unique(tmp_data))
-        return nib.Nifti1Image(tmp_data, image.affine, image.header, dtype=np.float64)
+        if not np.all(np.isfinite(data)) or np.any(data != np.rint(data)):
+            raise ValueError("Masks must contain finite integer label values")
+
+        unknown = set(np.unique(data)) - self.mapping.keys()
+
+        if unknown and self.unknown == "error":
+            raise ValueError(f"Unmapped mask labels: {sorted(unknown)}")
+
+        result = np.zeros_like(data)
+
+        for source, target in self.mapping.items():
+            result[data == source] = target
+
+        return _new_image(result, image)
 
 
 class Reorient(PreprocessingStep):
-    """
-    Reorient class is used to reorient the image based on the reference image.
-    """
+    """Match reference axis orientation while retaining world coordinates."""
 
-    def __init__(self, ref_img, verbose=False):
+    def __init__(self, ref_img: NiftiImage, verbose: bool = False) -> None:
+        """Validate and store the settings for this preprocessing step."""
         super().__init__(verbose)
-        self.ref_img = ref_img
 
-    def execute(self, image, is_mask=False):
-        """
-        Reorient the image based on the reference image.
-        """
-        old_ornt = nib.io_orientation(image.affine)
-        if self.verbose:
-            print("\t|- Old orientation: ", nib.orientations.ornt2axcodes(old_ornt))
+        self.ref_img: NiftiImage = ref_img
 
-        copied_ort = nib.io_orientation(self.ref_img.affine)
-        copied_codes = nib.orientations.ornt2axcodes(copied_ort)
-        new_ornt = axcodes2ornt(copied_codes)
-        if self.verbose:
-            print("\t|- New orientation: ", copied_codes)
+    def execute(self, image: NiftiImage, is_mask: bool = False, **parameters: Any) -> NiftiImage:
+        """Permute/flip voxel axes and update the affine consistently."""
+        source_orientation: NDArray = io_orientation(image.affine)
+        reference_orientation: NDArray = io_orientation(self.ref_img.affine)
+        transform = ornt_transform(source_orientation, reference_orientation)
 
-        transform = ornt_transform(old_ornt, new_ornt)
+        result = image.as_reoriented(transform)
+        result_data: NDArray = result.get_fdata()
 
-        image = image.as_reoriented(transform)
-
-        return nib.Nifti1Image(
-            image.get_fdata(), image.affine, image.header, dtype=np.float64
-        )
+        return _new_image(result_data, result)
 
 
 class N4BiasFieldCorrection(PreprocessingStep):
-    """
-    N4BiasFieldCorrection class is used to apply N4 bias field correction to the image.
-    """
+    """Apply N4 in physical LPS coordinates, leaving label masks unchanged."""
 
-    def __init__(
-        self,
-        tolerance=0,
-        iters=[50, 50, 50, 50],
-        spline_parameters=[1, 1, 1],
-        spline_order=3,
-        rescale_intensities=False,
-        masking=False,
-        verbose=False,
-    ):
+    def __init__(self, tolerance: float = 0, iters: Sequence[int] | None = None,
+                 spline_parameters: float | Sequence[float] | None = None, spline_order: int = 3,
+                 rescale_intensities: bool = False, masking: bool = False, verbose: bool = False) -> None:
+        """Validate and store the settings for this preprocessing step."""
         super().__init__(verbose)
-        self.tolerance = tolerance
-        self.iters = iters
-        self.spline_parameters = spline_parameters
-        self.spline_order = spline_order
-        self.rescale_intensities = rescale_intensities
-        self.masking = masking
 
-    def execute(self, image, is_mask=False):
-        """
-        Apply the N4 bias field correction to the image based on the parameters.\n
-        If the image is a mask, return the image as it is.
-        """
+        self.iters: list[int] = list(iters) if iters is not None else [50, 50, 50, 50]
+
+        self.spline_parameters: float | list[float] | None = np.asarray(spline_parameters).tolist() if spline_parameters is not None else None
+
+        if self.spline_parameters is None:
+            self.spline_parameters = [1, 1, 1]
+
+        if not self.iters or any(not isinstance(i, (int, np.integer)) or i <= 0 for i in self.iters):
+            raise ValueError("N4 iteration counts must be positive integers")
+
+        if not np.isfinite(tolerance) or tolerance < 0:
+            raise ValueError("N4 tolerance must be finite and nonnegative")
+
+        spline = np.atleast_1d(self.spline_parameters)
+
+        if spline.size not in (1, 3) or not np.all(np.isfinite(spline)) or np.any(spline <= 0):
+            raise ValueError("N4 spline parameters must contain one or three positive values")
+
+        if spline.size == 3 and np.any(spline != np.rint(spline)):
+            raise ValueError("Three-axis N4 spline mesh sizes must be integers")
+
+        if not isinstance(spline_order, int) or not 1 <= spline_order <= 5:
+            raise ValueError("N4 spline order must be an integer between one and five")
+
+        self.tolerance: float = tolerance
+        self.spline_order: int = spline_order
+        self.rescale_intensities: bool = rescale_intensities
+        self.masking: bool = masking
+
+    def execute(self, image: NiftiImage, is_mask: bool = False, **parameters: Any) -> NiftiImage:
+        """Pass spacing, origin, and direction into ANTs and restore NIfTI geometry."""
         if is_mask:
             return image
 
-        ants_image = ants.from_numpy(image.get_fdata())
-        convergence = {"iters": self.iters, "tol": self.tolerance}
+        origin, spacing, direction = _lps_geometry(image)
+        source_data: NDArray = image.get_fdata()
+        ants_image = ants.from_numpy(source_data, origin=origin, spacing=spacing, direction=direction)
 
-        ants_image = ants_n4_bias_field_wrapper(
-            image=ants_image,
-            rescale_intensities=self.rescale_intensities,
-            automatic_masking=self.masking,
-            convergence=convergence,
-            spline_param=self.spline_parameters,
-            spline_order=self.spline_order,
-        )
-        return nib.Nifti1Image(
-            ants_image.numpy(), image.affine, image.header, dtype=np.float64
-        )
+        corrected = self._correct_bias_field(ants_image)
+
+        corrected_data: NDArray = corrected.numpy()
+
+        return _new_image(corrected_data, image)
+
+
+    def _correct_bias_field(self, image: ants.ANTsImage) -> ants.ANTsImage:
+        """Run ANTs N4 using this step's settings, preserving optional masking.
+
+        The backend call allows masking to be disabled and an explicit spline
+        order to be supplied. Shrinking remains fixed at four, as before.
+        """
+        if image.pixeltype != "float":
+            image = image.clone("float")
+
+        mask: ants.ANTsImage | None = None
+        if self.masking:
+            mask = ants.get_mask(image)
+
+        iteration_values: list[str] = [str(value) for value in self.iters]
+        iteration_schedule: str = "x".join(iteration_values)
+        convergence: str = f"[{iteration_schedule}, {self.tolerance:.10f}]"
+
+        spline_values: NDArray = np.atleast_1d(self.spline_parameters)
+        if spline_values.size == 1:
+            spacing: float = float(spline_values[0])
+            spline_parameters: str = f"[{spacing:g}]"
+        else:
+            mesh_values: list[str] = [str(value) for value in self.spline_parameters]
+            mesh_size: str = "x".join(mesh_values)
+            spline_parameters = f"[{mesh_size}, {self.spline_order}]"
+
+        corrected: ants.ANTsImage = image.clone("float")
+        bias_field: ants.ANTsImage = image.clone("float")
+        corrected_pointer: str = ants.utils.get_pointer_string(corrected)
+        bias_pointer: str = ants.utils.get_pointer_string(bias_field)
+        output: str = f"[{corrected_pointer},{bias_pointer}]"
+
+        rescale_flag: int = int(self.rescale_intensities)
+        verbose_flag: int = int(self.verbose)
+        arguments: dict[str, Any] = {
+            "d": image.dimension,
+            "i": image,
+            "w": None,
+            "s": "4",
+            "c": convergence,
+            "b": spline_parameters,
+            "x": mask,
+            "r": rescale_flag,
+            "o": output,
+            "v": verbose_flag,
+        }
+
+        processed_arguments: list[str] = ants.process_args._int_antsProcessArguments(arguments)
+        run_n4: Callable = ants.utils.get_lib_fn("N4BiasFieldCorrection")
+        run_n4(processed_arguments)
+
+        return corrected
 
 
 class Normalize(PreprocessingStep):
-    """
-    Normalize class is used to normalize the image using minmax or zscore normalization.
-    """
+    """Normalize finite intensities; map constant images to zeros."""
 
-    def __init__(self, mode="zscore", verbose=False):
+    def __init__(self, mode: str = "zscore", verbose: bool = False) -> None:
+        """Validate and store the settings for this preprocessing step."""
         super().__init__(verbose)
-        self.mode = mode
 
-    def execute(self, image, is_mask=False):
-        """
-        Apply the normalization to the image based on the mode.\n
-        If the image is a mask, return the image as it is.
-        """
+        if mode not in ("minmax", "zscore"):
+            raise ValueError("Normalization mode must be 'minmax' or 'zscore'")
+
+        self.mode: str = mode
+
+    def execute(self, image: NiftiImage, is_mask: bool = False, **parameters: Any) -> NiftiImage:
+        """Normalize intensities without dividing by zero or modifying masks."""
         if is_mask:
             return image
 
         data = image.get_fdata()
-        if self.mode == "minmax":
-            data = (data - data.min()) / (data.max() - data.min())
-        elif self.mode == "zscore":
-            data = (data - data.mean()) / data.std()
-        else:
-            print("ERROR: Unknown normalization mode")
-        return nib.Nifti1Image(data, image.affine, image.header, dtype=np.float64)
+
+        if not np.all(np.isfinite(data)):
+            raise ValueError("Cannot normalize non-finite intensities")
+
+        offset = data.min() if self.mode == "minmax" else data.mean()
+        denominator = data.max() - data.min() if self.mode == "minmax" else data.std()
+
+        result = (data - offset) / denominator if denominator > 0 else np.zeros_like(data)
+
+        return _new_image(result, image)
 
 
 class Padder(PreprocessingStep):
-    def __init__(self, dim, fill_mode="constant", pad_mode="center", verbose=False):
-        """
-        Apply random or center cropping to the image based on the mode 'random' or 'center'.
+    """Pad aligned images and masks using shared per-axis widths."""
 
-        Parameters:
-        - dim: tuple, cropping dimensions.
-        """
+    spatial = True
+
+    def __init__(self, dim: Sequence[int], fill_mode: str = "constant", pad_mode: str = "center", verbose: bool = False) -> None:
+        """Validate and store the settings for this preprocessing step."""
         super().__init__(verbose)
-        self.dim = dim
-        self.pad_mode = pad_mode
-        self.fill_mode = fill_mode
 
-    def generate_padding_values(self, img_shape, target_shape):
-        """
-        Generate padding values for each dimension to achieve the target shape.
-        """
-        if self.pad_mode == "random":
-            return self.random_padding_values(img_shape, target_shape)
-        elif self.pad_mode == "center":
-            return self.center_padding_values(img_shape, target_shape)
-        else:
-            raise ValueError("Invalid mode. Please choose between random and center.")
+        self.dim: Coordinates = _shape(dim)
 
-    def random_padding_values(self, img_shape, target_shape):
-        """
-        Generate padding values for each dimension to achieve the target shape.
-        Randomize the padding amounts for each side independently.
-        """
-        diff_x = target_shape[0] - img_shape[0]
-        diff_y = target_shape[1] - img_shape[1]
-        diff_z = target_shape[2] - img_shape[2]
+        if pad_mode not in ("center", "random"):
+            raise ValueError("Padding mode must be 'center' or 'random'")
 
-        pad_x1 = pad_x2 = pad_y1 = pad_y2 = pad_z1 = pad_z2 = 0
+        if fill_mode not in ("constant", "reflect", "edge", "symmetric", "wrap"):
+            raise ValueError("Unsupported padding fill mode")
 
-        if diff_x > 0:
-            pad_x1 = np.random.randint(0, diff_x + 1)
-            pad_x2 = diff_x - pad_x1
-        if diff_y > 0:
-            pad_y1 = np.random.randint(0, diff_y + 1)
-            pad_y2 = diff_y - pad_y1
-        if diff_z > 0:
-            pad_z1 = np.random.randint(0, diff_z + 1)
-            pad_z2 = diff_z - pad_z1
+        self.fill_mode: str = fill_mode
+        self.pad_mode: str = pad_mode
 
-        return ((pad_x1, pad_x2), (pad_y1, pad_y2), (pad_z1, pad_z2))
+    def generate_padding_values(self, img_shape: Sequence[int], target_shape: Sequence[int]) -> Padding:
+        """Compute configured padding widths, retaining legacy helper access."""
+        random_padding: bool = self.pad_mode == "random"
 
-    def center_padding_values(self, img_shape, target_shape):
-        """
-        Generate padding values for each dimension to achieve the target shape.
-        Center the image and pad equally on each side.
-        """
-        diff_x = target_shape[0] - img_shape[0]
-        diff_y = target_shape[1] - img_shape[1]
-        diff_z = target_shape[2] - img_shape[2]
+        return _padding(img_shape, target_shape, random=random_padding)
 
-        pad_x1 = pad_x2 = pad_y1 = pad_y2 = pad_z1 = pad_z2 = 0
+    def random_padding_values(self, img_shape: Sequence[int], target_shape: Sequence[int]) -> Padding:
+        """Compute randomly positioned padding widths."""
+        return _padding(img_shape, target_shape, random=True)
 
-        if diff_x > 0:
-            pad_x1 = diff_x // 2
-            pad_x2 = diff_x - pad_x1
-        if diff_y > 0:
-            pad_y1 = diff_y // 2
-            pad_y2 = diff_y - pad_y1
-        if diff_z > 0:
-            pad_z1 = diff_z // 2
-            pad_z2 = diff_z - pad_z1
+    def center_padding_values(self, img_shape: Sequence[int], target_shape: Sequence[int]) -> Padding:
+        """Compute centered padding widths."""
+        return _padding(img_shape, target_shape)
 
-        return ((pad_x1, pad_x2), (pad_y1, pad_y2), (pad_z1, pad_z2))
+    def sample_parameters(self, image: NiftiImage) -> dict[str, Any]:
+        """Choose one padding placement for the entire group."""
+        pad_values: Padding = self.generate_padding_values(image.shape, self.dim)
 
-    def execute(self, img, pad_values, fill_mode="reflect"):
-        """
-        Pad the image using the specified padding values.
-        """
-        img_data = img.get_fdata()
+        return {"pad_values": pad_values}
 
-        # Apply the specified padding values
-        img_data = np.pad(img_data, pad_values, mode=fill_mode)
+    def execute(self, image: NiftiImage, is_mask: bool = False, *,
+                pad_values: Padding | None = None, fill_mode: str | None = None) -> NiftiImage:
+        """Pad one image and update its origin; masks always receive zero padding."""
+        widths = pad_values if pad_values is not None else self.generate_padding_values(image.shape, self.dim)
+        padding_mode: str = "constant" if is_mask else fill_mode or self.fill_mode
 
-        return Nifti1Image(img_data, img.affine, img.header)
-
-    def iterate(self, imgs=None, masks=None):
-        """
-        Apply the padding to the images and the masks based on their type.
-        All images and masks will be padded based on the same padding values since they should have the same shape.
-        """
-        # Generate padding values using the shape of the first image (assuming all images have the same shape)
-        if imgs:
-            img_shape = (
-                imgs[0].get_fdata().shape
-                if isinstance(imgs, list)
-                else imgs.get_fdata().shape
-            )
-            padding_values = self.generate_padding_values(img_shape, self.dim)
-
-        if imgs:
-            imgs = self.iterate_list(imgs, self.execute, padding_values, self.fill_mode)
-        if masks:
-            masks = self.iterate_list(masks, self.execute, padding_values, "constant")
-
-        return super().return_processed(imgs, masks)
+        return _pad(image, widths, padding_mode)
 
 
 class PadderCutter(PreprocessingStep):
-    """
-    PadderCutter class is used to pad or cut the image to the desired size.
-    """
+    """Center-pad or center-crop to the exact requested shape."""
 
-    def __init__(self, img_size, verbose=False):
+    spatial = True
+
+    def __init__(self, img_size: Sequence[int], verbose: bool = False) -> None:
+        """Validate and store the settings for this preprocessing step."""
         super().__init__(verbose)
-        self.img_size = img_size
 
-    def execute(self, image, is_mask=False):
-        """
-        Pad or cut the image to the desired size based on the image size.
-        """
-        diff_x = self.img_size[0] - image.shape[0]
-        diff_y = self.img_size[1] - image.shape[1]
-        diff_z = self.img_size[2] - image.shape[2]
+        self.img_size: Coordinates = _shape(img_size)
 
-        pad_x1 = pad_x2 = pad_y1 = pad_y2 = pad_z1 = pad_z2 = 0
+    def execute(self, image: NiftiImage, is_mask: bool = False, **parameters: Any) -> NiftiImage:
+        """Share padding logic and retain world coordinates of the cropped voxels."""
+        widths: Padding = _padding(image.shape, self.img_size)
+        padded = _pad(image, widths, "constant")
 
-        if diff_x > 0:
-            pad_x1 = diff_x // 2
-            pad_x2 = diff_x - pad_x1
-        if diff_y > 0:
-            pad_y1 = diff_y // 2
-            pad_y2 = diff_y - pad_y1
-        if diff_z > 0:
-            pad_z1 = diff_z // 2
-            pad_z2 = diff_z - pad_z1
+        starts = [(size - wanted) // 2 for size, wanted in zip(padded.shape, self.img_size)]
+        slices = tuple(slice(start, start + size) for start, size in zip(starts, self.img_size))
 
-        data = image.get_fdata()
+        cropped_data: NDArray = padded.get_fdata()[slices]
+        affine: NDArray = _shift_affine(padded.affine, starts)
 
-        # Pad or cut the image along each dimension
-        if diff_x > 0:
-            data = np.pad(data, ((pad_x1, pad_x2), (0, 0), (0, 0)), mode="constant")
-        elif diff_x < 0:
-            data = data[: self.img_size[0], :, :]
-
-        if diff_y > 0:
-            data = np.pad(data, ((0, 0), (pad_y1, pad_y2), (0, 0)), mode="constant")
-        elif diff_y < 0:
-            data = data[:, : self.img_size[1], :]
-
-        if diff_z > 0:
-            data = np.pad(data, ((0, 0), (0, 0), (pad_z1, pad_z2)), mode="constant")
-        elif diff_z < 0:
-            data = data[:, :, : self.img_size[2]]
-
-        return nib.Nifti1Image(data, image.affine, image.header, dtype=np.float64)
+        return _new_image(cropped_data, padded, affine)
 
 
 class SaveNifti(PreprocessingStep):
-    """
-    SaveNifti class is used to save the image to a Nifti file.
-    """
+    """Save a single image, optionally resampling onto a reference grid."""
 
-    def __init__(
-        self, path=None, postfix=None, reference=None, verbose=False, replace=None
-    ):
+    def __init__(self, path: str | None = None, postfix: str | None = None,
+                 reference: NiftiImage | None = None, verbose: bool = False, replace: str | None = None) -> None:
+        """Validate and store the settings for this preprocessing step."""
         super().__init__(verbose)
-        self.path = path
-        self.replace = replace
-        self.postfix = postfix
-        self.reference = reference
 
-    def execute(self, image, is_mask=False):
-        """
-        Save the image to a Nifti file based on the path.\n
-        If the reference image is provided when istantiating the class, the metadata of the reference image will be cloned.
-        """
-        if self.verbose:
-            print(f"\t|- Image type: {type(image)}")
+        self.path: str | None = str(path) if path is not None else None
+        self.postfix: str | None = postfix
+        self.reference: NiftiImage | None = reference
+        self.replace: str | None = replace
 
-        if self.path is None:
-            cur_path = self.current_path
-            if self.verbose:
-                print(
-                    f"\t|- No path provided. Image saved on the current path: {cur_path}"
-                )
-        else:
-            cur_path = self.path
+    def iterate(self, imgs: ImageInput, masks: ImageInput) -> PreprocessResult:
+        """Prevent multiple outputs from silently overwriting the same filename."""
+        if len(_images(imgs) + _images(masks)) != 1:
+            raise ValueError("SaveNifti saves one image at a time")
+
+        return super().iterate(imgs, masks)
+
+    def execute(self, image: NiftiImage, is_mask: bool = False, **parameters: Any) -> NiftiImage:
+        """Save to an explicit path or a derived filename supporting .nii and .nii.gz."""
+        path = self.path or self.current_path
+
+        if path is None:
+            raise ValueError("Provide an output path or the current input path")
+
+        output = Path(path)
 
         if self.postfix is not None:
-            # Add a postfix to the filename
             if self.replace is not None:
-                cur_path = cur_path.replace(self.replace, self.postfix)
+                if self.replace not in output.name:
+                    raise ValueError(f"Filename does not contain replacement text: {self.replace}")
+
+                output_name: str = output.name.replace(self.replace, self.postfix)
+                output = output.with_name(output_name)
             else:
-                cur_path = cur_path.replace(".nii.gz", f"{self.postfix}.nii.gz")
+                extension = ".nii.gz" if output.name.endswith(".nii.gz") else ".nii" if output.name.endswith(".nii") else None
 
-        if self.reference is None:
-            if self.verbose:
-                print(f"\t|- Cloning metadata from the original image.")
-            image = nib.Nifti1Image(
-                image.get_fdata(), image.affine, image.header, dtype=np.float64
-            )
+                if extension is None:
+                    raise ValueError("Expected a .nii or .nii.gz filename")
 
-        nib.save(image, cur_path)
+                output_name = output.name[:-len(extension)] + self.postfix + extension
+                output = output.with_name(output_name)
+
+        if self.path is None and output == Path(self.current_path):
+            raise ValueError("Derived output would overwrite the input; supply an explicit output path")
+
+        if self.reference is not None:
+            result = _resample(image, self.reference, is_mask)
+        else:
+            source_data: NDArray = image.get_fdata()
+            result = _new_image(source_data, image)
+
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output_path: str = str(output)
+        nib.save(result, output_path)
+
         if self.verbose:
-            print(f"\t|- Image saved to {cur_path}")
-        return image
+            print(f"Image saved to {output}")
+
+        return result
 
 
 class Scale(PreprocessingStep):
-    """
-    Scale class is used to scale the image by a factor.
-    """
+    """Change sampling density while preserving physical extent and center."""
 
-    def __init__(self, scale_factor, inerpolation=0, verbose=False):
+    spatial = True
+
+    def __init__(self, scale_factor: float | Sequence[float], interpolation: int = 1,
+                 verbose: bool = False) -> None:
+        """Validate and store the settings for this preprocessing step."""
         super().__init__(verbose)
-        self.scale_factor = scale_factor
-        self.interpolation = inerpolation
 
-    def execute(self, image, is_mask=False):
-        """
-        Scale the image by a factor.
-        """
-        data = image.get_fdata()
-        data = zoom(data, self.scale_factor, order=self.interpolation)
-        return nib.Nifti1Image(data, image.affine, image.header, dtype=np.float64)
+        if interpolation not in (0, 1, 2, 3, 4, 5):
+            raise ValueError("Interpolation must be 0 (nearest) or 1-5 (linear to quintic). See scipy.ndimage.affine_transform for details.")
+
+        self.scale_factor: NDArray[np.float64] = _vector(scale_factor, "Scale factor")
+        self.interpolation: int = interpolation
+
+    def execute(self, image: NiftiImage, is_mask: bool = False, **parameters: Any) -> NiftiImage:
+        """Resample images linearly and masks discretely onto the scaled grid."""
+        scaled_shape: NDArray = np.asarray(image.shape) * self.scale_factor
+        rounded_shape: NDArray = np.rint(scaled_shape)
+        shape = np.maximum(1, rounded_shape).astype(int)
+
+        spacing = nib.affines.voxel_sizes(image.affine) * np.asarray(image.shape) / shape
+        target_shape: Coordinates = tuple(shape)
+
+        interpolation_order: int = 0 if is_mask else self.interpolation
+
+        return _resize_grid(image, target_shape, spacing, interpolation_order)
 
 
-# Augmentations classes
 class Noise(PreprocessingStep):
-    """
-    Noise class:\n
-    This class is used to apply Gaussian noise to an image with a random standard deviation.
+    """Add Gaussian intensity noise; the range is in image intensity units."""
 
-    Attributes:
-        noise_range (list): Range of the standard deviation of the Gaussian noise.
-        probability (float): Probability of applying the augmentation.
-        geometric (bool): If the augmentation is geometric or not, to know if it should be applied to the mask.
-    """
+    def __init__(self, noise_range: Sequence[float], probability: float = 0.3, mean: float = 0) -> None:
+        """Validate and store the settings for this preprocessing step."""
+        super().__init__(probability=probability, global_probability=True)
 
-    def __init__(self, noise_range, probability=0.3, mean=0):
-        super().__init__(probability=probability)
-        self.noise_range = noise_range
-        self.probability = probability
-        self.mean = mean
+        self.noise_range: tuple[float, float] = _range(noise_range, "Noise standard deviation", minimum=0)
 
-    def execute(self, image, is_mask=False):
-        """
-        Apply Gaussian noise to the image with a mean and a standard deviation.
-        """
-        if is_mask == True:
+        if not np.isfinite(mean):
+            raise ValueError("Noise mean must be finite")
+
+        self.mean: float = mean
+
+    def execute(self, image: NiftiImage, is_mask: bool = False, **parameters: Any) -> NiftiImage:
+        """Add sampled noise to intensities only."""
+        if is_mask:
             return image
-        image_data = image.get_fdata()
-        std = np.random.uniform(self.noise_range[0], self.noise_range[1])
-        noise = np.random.normal(self.mean, std, image.shape)
-        return nib.Nifti1Image(
-            image_data + noise,
-            affine=image.affine,
-            header=image.header,
-            dtype=np.float64,
-        )
+
+        std = np.random.uniform(*self.noise_range)
+
+        source_data: NDArray = image.get_fdata()
+        noise: NDArray = np.random.normal(self.mean, std, image.shape)
+        noisy_data: NDArray = source_data + noise
+
+        return _new_image(noisy_data, image)
 
 
 class GaussianBlur(PreprocessingStep):
-    """
-    GaussianBlur class:\n
-    This class is used to apply Gaussian blur to an image with a random sigma.
+    """Smooth intensities; sigma is measured in voxels on each axis."""
 
-    Attributes:
-        gaussian_blur_range (list): Range of the sigma of the Gaussian blur.
-        probability (float): Probability of applying the augmentation.
-        geometric (bool): If the augmentation is geometric or not, to know if it should be applied to the mask.
-    """
+    def __init__(self, gaussian_blur_range: Sequence[float], probability: float = 0.3) -> None:
+        """Validate and store the settings for this preprocessing step."""
+        super().__init__(probability=probability, global_probability=True)
 
-    def __init__(self, gaussian_blur_range, probability=0.3):
-        super().__init__(probability=probability)
-        self.gaussian_blur_range = gaussian_blur_range
-        self.probability = probability
+        self.gaussian_blur_range: tuple[float, float] = _range(gaussian_blur_range, "Gaussian sigma", minimum=0)
 
-    def execute(self, img, is_mask=False):
-        """
-        Apply Gaussian blur to the image using ndimage.
+    def execute(self, image: NiftiImage, is_mask: bool = False, **parameters: Any) -> NiftiImage:
+        """Apply independently sampled per-axis smoothing to images only."""
+        if is_mask:
+            return image
 
-        Parameters:
-            img (np.array): Image to augment.
-            sigma (float): Sigma of the Gaussian blur.
-        """
-        if is_mask == True:
-            return img
-        img_data = img.get_fdata()
-        sigmas = np.random.uniform(
-            self.gaussian_blur_range[0], self.gaussian_blur_range[1], 3
-        )
-        return nib.Nifti1Image(
-            ndimage.gaussian_filter(img_data, sigmas),
-            affine=img.affine,
-            header=img.header,
-            dtype=np.float64,
-        )
+        sigma = np.random.uniform(*self.gaussian_blur_range, size=3)
+
+        source_data: NDArray = image.get_fdata()
+        blurred_data: NDArray = gaussian_filter(source_data, sigma)
+
+        return _new_image(blurred_data, image)
 
 
 class RandomAffine(PreprocessingStep):
-    """
-    RandomAffine class:\n
-    This class is used to apply a random affine transformation to an image with a random rotation and scale using SimpleITK.
-    By default, the interpolation method is set to sitkLinear for the image and sitkNearestNeighbor for the mask.
-    Another interpolation method can be set for the images using the interpolation attribute.
+    """Rotate in degrees and scale about the physical image center on a fixed grid."""
 
-    Attributes:
-        scale_range (list): Range of the scale factor of the affine transformation.
-        rotation_range (list): Range of the rotation angles of the affine transformation.
-        probability (float): Probability of applying the augmentation.
-        interpolation (int): Interpolation method to resample the image.
-        geometric (bool): If the augmentation is geometric or not, to know if it should be applied to the mask.
-    """
+    spatial = True
 
-    def __init__(
-        self,
-        scale_range=None,
-        rotation_range=None,
-        probability=0.5,
-        interpolation=sitk.sitkNearestNeighbor,
-        background_label=0,
-    ):
-        super().__init__(probability=probability)
-        self.scale_range = scale_range
-        self.rotation_range = rotation_range
-        self.probability = probability
-        self.interpolation = interpolation
-        self.background_label = background_label
+    def __init__(self, scale_range: Sequence[float] | None = None, rotation_range: Sequence[float] | None = None,
+                 probability: float = 0.5, interpolation: int = sitk.sitkLinear, background_label: int = 0) -> None:
+        """Validate and store the settings for this preprocessing step."""
+        super().__init__(probability=probability, global_probability=True)
 
-    def iterate(self, imgs=None, masks=None):
-        """
-        Apply the random affine transformation to the images and the masks based on their type.
-        All images and masks will be transformed based on the same angles and scale factor since they should have the same shape.
-        """
-        # Select random angles and scale factor for both input types
-        angles = (
-            np.random.uniform(self.rotation_range[0], self.rotation_range[1], 3)
-            if self.rotation_range is not None
-            else None
-        )
-        scale_factor = (
-            np.random.uniform(self.scale_range[0], self.scale_range[1])
-            if self.scale_range is not None
-            else None
-        )
+        self.scale_range: tuple[float, float] | None = _range(scale_range, "Scale range", minimum=np.finfo(float).eps) if scale_range is not None else None
+        self.rotation_range: tuple[float, float] | None = _range(rotation_range, "Rotation range") if rotation_range is not None else None
 
-        if masks is not None:
-            masks = self.iterate_list(masks, self.execute, angles, scale_factor, True)
-        if imgs is not None:
-            imgs = self.iterate_list(imgs, self.execute, angles, scale_factor, False)
+        if interpolation not in (sitk.sitkLinear, sitk.sitkNearestNeighbor):
+            raise ValueError("Use sitkLinear or sitkNearestNeighbor interpolation")
 
-        return super().return_processed(imgs, masks)
+        self.interpolation: int = interpolation
+        self.background_label: int = background_label
 
-    def execute(self, img, angles=None, scale_factor=None, is_mask=False):
-        """
-        Apply random rotation and zoom to the image.
-        Use nearest neighbor interpolation method.
-
-        Parameters:
-            img (np.array): Image to augment.
-            angles (list): List of the rotation angles (in degrees).
-            scale_factor (float): Scale factor for zoom.
-            is_mask (bool): If the image is a mask or not.
-        """
-        data = img.get_fdata()
-        rotation_center = [x / 2 for x in data.shape[::-1]]
-        affine_transform = sitk.AffineTransform(3)
-        affine_transform.SetIdentity()
-
-        if angles is not None:
-            rotation_transform = sitk.Euler3DTransform(
-                rotation_center,
-                np.radians(angles[0]),
-                np.radians(angles[1]),
-                np.radians(angles[2]),
-            )
-            affine_transform = sitk.CompositeTransform(
-                [affine_transform, rotation_transform]
-            )
-
-        if scale_factor is not None:
-            scale_transform = sitk.ScaleTransform(
-                3, [scale_factor, scale_factor, scale_factor]
-            )
-            scale_transform.SetCenter(rotation_center)
-            affine_transform = sitk.CompositeTransform(
-                [affine_transform, scale_transform]
-            )
-
-        if is_mask:
-            transformed_img = sitk.Resample(
-                sitk.GetImageFromArray(data),
-                affine_transform,
-                sitk.sitkNearestNeighbor,
-                self.background_label,
-                sitk.sitkFloat64,
-            )
+    def sample_parameters(self, image: NiftiImage) -> dict[str, Any]:
+        """Sample one physical transform for all images and masks."""
+        angles: NDArray[np.float64]
+        if self.rotation_range is not None:
+            angles = np.random.uniform(*self.rotation_range, size=3)
         else:
-            transformed_img = sitk.Resample(
-                sitk.GetImageFromArray(data),
-                affine_transform,
-                self.interpolation,
-                0.0,
-                sitk.sitkFloat64,
-            )
+            angles = np.zeros(3)
 
-        return nib.Nifti1Image(
-            sitk.GetArrayFromImage(transformed_img),
-            affine=img.affine,
-            header=img.header,
-            dtype=np.float64,
+        scale_factor: float
+        if self.scale_range is not None:
+            sampled_scale = np.random.uniform(*self.scale_range)
+            scale_factor = float(sampled_scale)
+        else:
+            scale_factor = 1.0
+
+        return {"angles": angles, "scale_factor": scale_factor}
+
+    def execute(self, image: NiftiImage, is_mask: bool = False, *,
+                angles: Sequence[float] | None = None, scale_factor: float | None = None) -> NiftiImage:
+        """Transform in physical LPS coordinates using the input as output reference."""
+        if angles is None:
+            sampled = self.sample_parameters(image)
+            angles = sampled["angles"]
+            scale_factor = sampled["scale_factor"] if scale_factor is None else scale_factor
+
+        if len(angles) != 3 or not np.all(np.isfinite(angles)):
+            raise ValueError("Supply three finite rotation angles")
+
+        factor = 1.0 if scale_factor is None else scale_factor
+
+        if not np.isfinite(factor) or factor <= 0:
+            raise ValueError("Scale factor must be positive and finite")
+
+        origin, spacing, direction = _lps_geometry(image)
+        source_data: NDArray = image.get_fdata().transpose(2, 1, 0)
+        itk_image = sitk.GetImageFromArray(source_data)
+        itk_image.SetOrigin(origin)
+        itk_image.SetSpacing(spacing)
+
+        flattened_direction: NDArray = direction.ravel()
+        itk_direction: tuple = tuple(flattened_direction)
+        itk_image.SetDirection(itk_direction)
+
+        center_indices: NDArray = (np.asarray(image.shape) - 1) / 2
+        center_index: tuple = tuple(center_indices)
+        center = itk_image.TransformContinuousIndexToPhysicalPoint(center_index)
+
+        angles_radians: NDArray = np.radians(angles)
+        rotation = sitk.Euler3DTransform(center, *angles_radians)
+
+        scale_factors: list[float] = [factor] * 3
+        scale = sitk.ScaleTransform(3, scale_factors)
+        scale.SetCenter(center)
+
+        transforms: list[sitk.Transform] = [rotation, scale]
+        transform = sitk.CompositeTransform(transforms)
+
+        interpolation: int = sitk.sitkNearestNeighbor if is_mask else self.interpolation
+        background_value: float = float(self.background_label) if is_mask else 0.0
+        result = sitk.Resample(
+            itk_image, itk_image, transform,
+            interpolation, background_value, sitk.sitkFloat64,
         )
+
+        result_data: NDArray = sitk.GetArrayFromImage(result).transpose(2, 1, 0)
+
+        return _new_image(result_data, image)
 
 
 class Flip(PreprocessingStep):
-    """
-    Flip class:\n
-    This class is used to apply a random flip to an image.
+    """Reflect anatomy within a fixed grid for augmentation, not reorientation."""
 
-    Attributes:
-        flip_axis (list): List of the axis to flip the image.
-        probability (float): Probability of applying the augmentation.
-        geometric (bool): If the augmentation is geometric or not, to know if it should be applied to the mask.
-    """
+    spatial = True
 
-    def __init__(self, axis_list, probability=0.5):
-        super().__init__(probability=probability, global_probability=True)
-        self.axis_list = axis_list
+    def __init__(self, axis_list: Sequence[int], probability: float = 0.5, verbose: bool = False) -> None:
+        """Validate and store the settings for this preprocessing step."""
+        super().__init__(verbose, probability, global_probability=True)
 
-    def iterate(self, imgs=None, masks=None):
-        random_axis = np.random.choice(self.axis_list)
-        if masks is not None:
-            masks = self.iterate_list(masks, self.execute, random_axis)
-        if imgs is not None:
-            imgs = self.iterate_list(imgs, self.execute, random_axis)
-        return super().return_processed(imgs, masks)
+        if len(axis_list) == 0 or any(not isinstance(axis, (int, np.integer)) or axis not in (0, 1, 2) for axis in axis_list):
+            raise ValueError("Flip axes must be chosen from 0, 1, 2")
 
-    def execute(self, img, random_axis):
-        img_data = img.get_fdata()
-        return nib.Nifti1Image(
-            np.flip(img_data, axis=random_axis),
-            affine=img.affine,
-            header=img.header,
-            dtype=np.float64,
-        )
+        self.axis_list: list[int] = list(axis_list)
+
+    def sample_parameters(self, image: NiftiImage) -> dict[str, Any]:
+        """Choose a shared augmentation axis."""
+        sampled_axis = np.random.choice(self.axis_list)
+        axis: int = int(sampled_axis)
+
+        return {"axis": axis}
+
+    def execute(self, image: NiftiImage, is_mask: bool = False, *, axis: int | None = None) -> NiftiImage:
+        """Flip voxel values on the unchanged grid; repeating the same flip undoes it."""
+        axis = int(np.random.choice(self.axis_list)) if axis is None else axis
+
+        if axis not in (0, 1, 2):
+            raise ValueError("Flip axis must be 0, 1, or 2")
+
+        source_data: NDArray = image.get_fdata()
+        flipped_data: NDArray = np.flip(source_data, axis=axis)
+
+        return _new_image(flipped_data, image)
 
 
 class RandomCropping(PreprocessingStep):
-    """
-    RandomCropping class is used to apply random or center cropping to the image.
-    todo: check input shape and cropping dimensions to see if they are compatible. Implement padding if needed.
-    """
+    """Sample exact-sized crops, optionally padding small images first."""
 
-    def __init__(self, dim, mode="random", std=None, verbose=False, padding=False):
-        """
-        Apply random or center cropping to the image based on the mode 'random' or 'center'.
+    spatial = True
 
-        Parameters:
-        - dim: tuple, cropping dimensions.
-        - mode: str, cropping mode ('random' or 'center').
-        - std: tuple, standard deviation for the center cropping.
-        """
+    def __init__(self, dim: Sequence[int], mode: str = "random", std: float | None = None,
+                 verbose: bool = False, padding: bool = False) -> None:
+        """Validate and store the settings for this preprocessing step."""
         super().__init__(verbose)
-        self.dim = dim
-        self.mode = mode
-        self.std = std
-        self.padding = padding
 
-    def get_random_cropping_coordinates(self, img):
-        """
-        Get random cropping coordinate within the image shape by avoiding the borders.
-        """
+        self.dim: Coordinates = _shape(dim)
 
-        def get_random_coordinate(patch_size, img_size):
-            if patch_size == img_size:
-                return patch_size // 2
-            return np.random.randint(patch_size // 2, img_size - patch_size // 2)
+        if mode not in ("random", "center"):
+            raise ValueError("Crop mode must be 'random' or 'center'")
 
-        x = get_random_coordinate(self.dim[0], img.shape[0])
-        y = get_random_coordinate(self.dim[1], img.shape[1])
-        z = get_random_coordinate(self.dim[2], img.shape[2])
-        return x, y, z
+        if std is not None and (not np.isfinite(std) or std <= 0):
+            raise ValueError("Cropping standard deviation must be positive and finite")
 
-    def get_center_cropping_coordinates(self, img):
-        """
-        Get random cropping coordinates with a higher probability towards the center of the image using truncated normal distribution.
-        """
-        center_x, center_y, center_z = (
-            img.shape[0] / 2,
-            img.shape[1] / 2,
-            img.shape[2] / 2,
-        )
+        self.mode: str = mode
+        self.std: float | None = std
+        self.pad_if_needed: bool = padding
 
-        upper_x, upper_y, upper_z = (
-            img.shape[0] - self.dim[0] // 2,
-            img.shape[1] - self.dim[1] // 2,
-            img.shape[2] - self.dim[2] // 2,
-        )
-        lower_x, lower_y, lower_z = self.dim[0] // 2, self.dim[1] // 2, self.dim[2] // 2
-        std_x = self.std if self.std is not None else img.shape[0] // 4
-        std_y = self.std if self.std is not None else img.shape[1] // 4
-        std_z = self.std if self.std is not None else img.shape[2] // 4
+    def _coordinates(self, shape: Sequence[int], mode: str) -> Coordinates:
+        """Sample centers including the last valid crop, for odd and even sizes."""
+        coordinates = []
 
-        def truncated_normal(mean, std_dev, lower_bound, upper_bound):
-            if lower_bound == upper_bound:
-                return lower_bound
-            a, b = (lower_bound - mean) / std_dev, (upper_bound - mean) / std_dev
-            return truncnorm(a, b, loc=mean, scale=std_dev).rvs()
+        for size, patch in zip(shape, self.dim):
+            maximum = size - patch
 
-        x = int(truncated_normal(center_x, std_x, lower_x, upper_x))
-        y = int(truncated_normal(center_y, std_y, lower_y, upper_y))
-        z = int(truncated_normal(center_z, std_z, lower_z, upper_z))
+            if maximum < 0:
+                raise ValueError("Crop exceeds image size; enable padding or add Padder")
 
-        return x, y, z
+            if maximum == 0:
+                start = 0
+            elif mode == "random":
+                start = int(np.random.randint(maximum + 1))
+            else:
+                mean, std = maximum / 2, self.std or size / 4
+                lower_bound: float = -mean / std
+                upper_bound: float = (maximum - mean) / std
+                distribution = truncnorm(lower_bound, upper_bound, loc=mean, scale=std)
+                sampled_start: float = distribution.rvs()
+                rounded_start = np.rint(sampled_start)
+                start = int(rounded_start)
 
-    def select_cropping_coordinates(self, img):
-        """
-        Select the cropping coordinates based on the mode.
-        """
-        if self.mode == "random":
-            return self.get_random_cropping_coordinates(img)
-        elif self.mode == "center":
-            return self.get_center_cropping_coordinates(img)
+            coordinates.append(start + patch // 2)
+
+        return tuple(coordinates)
+
+    def get_random_cropping_coordinates(self, img: NiftiImage) -> Coordinates:
+        """Return uniformly sampled crop centers on the supplied grid."""
+        return self._coordinates(img.shape, "random")
+
+    def get_center_cropping_coordinates(self, img: NiftiImage) -> Coordinates:
+        """Return center-biased crop centers on the supplied grid."""
+        return self._coordinates(img.shape, "center")
+
+    def select_cropping_coordinates(self, img: NiftiImage) -> Coordinates:
+        """Sample crop centers using the configured distribution."""
+        return self._coordinates(img.shape, self.mode)
+
+    def sample_parameters(self, image: NiftiImage) -> dict[str, Any]:
+        """Choose shared padding and crop coordinates without allocating an image."""
+        widths: Padding
+        if self.pad_if_needed:
+            widths = _padding(image.shape, self.dim)
         else:
-            raise ValueError("Invalid mode. Please choose between random and center.")
+            widths = ((0, 0),) * 3
 
-    # Override apply method to apply the same cropping coordinates to all images and masks
-    def iterate(self, imgs=None, masks=None):
-        """
-        Apply the cropping to the images and the masks based on their type.
-        All images and masks will be cropped based on the same coordinates since they should have the same shape.
-        """
-        x, y, z = self.select_cropping_coordinates(
-            imgs[0] if isinstance(imgs, list) else imgs
-        )
+        shape = tuple(size + before + after for size, (before, after) in zip(image.shape, widths))
+        center: Coordinates = self._coordinates(shape, self.mode)
 
-        if masks is not None:
-            masks = self.iterate_list(masks, self.execute, x, y, z)
-        if imgs is not None:
-            imgs = self.iterate_list(imgs, self.execute, x, y, z)
+        return {"center": center, "pad_values": widths}
 
-        return super().return_processed(imgs, masks)
+    def padding(self, img: NiftiImage) -> NiftiImage:
+        """Pad to at least the crop size using the shared padding implementation."""
+        widths: Padding = _padding(img.shape, self.dim)
 
-    def padding(self, img):
-        """
-        Pad the image in equal amounts on each side to make the dimensions even.
-        """
-        img_data = img.get_fdata()
-        x, y, z = img_data.shape
-        diff_x = self.dim[0] - x
-        diff_y = self.dim[1] - y
-        diff_z = self.dim[2] - z
+        return _pad(img, widths, "constant")
 
-        if diff_x > 0:
-            img_data = np.pad(img_data, (0, diff_x), mode="constant")
-        if diff_y > 0:
-            img_data = np.pad(img_data, (0, diff_y), mode="constant")
-        if diff_z > 0:
-            img_data = np.pad(img_data, (0, diff_z), mode="constant")
+    def execute(self, image: NiftiImage, is_mask: bool = False, *,
+                center: Coordinates | None = None, pad_values: Padding | None = None) -> NiftiImage:
+        """Extract the exact requested shape and update the voxel origin."""
+        if center is None:
+            parameters = self.sample_parameters(image)
+            center, pad_values = parameters["center"], parameters["pad_values"]
 
-        return Nifti1Image(img_data, img.affine, img.header, dtype=np.float64)
+        image = _pad(image, pad_values, "constant") if pad_values is not None and any(a or b for a, b in pad_values) else image
 
-    def execute(self, img, x, y, z):
-        """
-        Crop the image based on the coordinates.
-        """
-        img_data = img.get_fdata()
-        img_data = img_data[
-            x - self.dim[0] // 2 : x + self.dim[0] // 2,
-            y - self.dim[1] // 2 : y + self.dim[1] // 2,
-            z - self.dim[2] // 2 : z + self.dim[2] // 2,
-        ]
-        return nib.Nifti1Image(img_data, img.affine, img.header, dtype=np.float64)
+        starts = [coordinate - size // 2 for coordinate, size in zip(center, self.dim)]
+
+        if len(starts) != 3 or any(start < 0 or start + size > available for start, size, available in zip(starts, self.dim, image.shape)):
+            raise ValueError("Crop coordinates are outside the image")
+
+        slices = tuple(slice(start, start + size) for start, size in zip(starts, self.dim))
+        cropped_data: NDArray = image.get_fdata()[slices]
+        affine: NDArray = _shift_affine(image.affine, starts)
+
+        return _new_image(cropped_data, image, affine)

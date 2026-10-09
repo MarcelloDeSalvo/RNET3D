@@ -1,43 +1,47 @@
-import os
-import shutil
-import subprocess
-import ants
-from n4_bias import ants_n4_bias_field_wrapper
+"""Correct NIfTI volumes in ./source using the shared preprocessing step."""
 
-def main():
-    # Save the working directory
-    wdir = os.join(os.getcwd(), "source")
-    out = os.path.join(wdir, "N4")
-    for NAME in os.listdir(wdir):
-        # If file does not end with .nii.gz, skip
-        print(NAME)
-        if not NAME.endswith(".nii.gz"):
-            continue
+import sys
+from pathlib import Path
 
-        # Remove 'anat_orig' from the name
-        _NAME = NAME.replace("_anat_orig.nii.gz", "")
-
-        # Magnetic field bias correction
-        image = ants.image_read(f"{NAME}")
-
-        # Default values for Ants N4BiasFieldCorrection
-        spline_param = [1,1,1]
-        spline_odrer = 3
-
-        output = ants_n4_bias_field_wrapper(
-            image=image,
-            automatic_masking=True,
-            spline_param=spline_param,
-            spline_order=spline_odrer,
-        )
-        
-        # save to output directory
-        if not os.path.exists(out):
-            os.makedirs(out)
-        output.to_filename(os.path.join(out, f"{_NAME}_N4.nii.gz"))
+import nibabel as nib
 
 
-    os.chdir(wdir)
+REPO_ROOT: Path = Path(__file__).resolve().parents[3]
+repo_path: str = str(REPO_ROOT)
+if repo_path not in sys.path:
+    sys.path.insert(0, repo_path)
+
+from src.preprocessing.preprocessor import N4BiasFieldCorrection, NiftiImage
+
+
+def main() -> None:
+    """Save corrected images under ./source/N4, preserving input files."""
+    source_directory: Path = Path.cwd() / "source"
+    output_directory: Path = source_directory / "N4"
+
+    if not source_directory.is_dir():
+        raise FileNotFoundError(f"Input directory does not exist: {source_directory}")
+
+    output_directory.mkdir(exist_ok=True)
+    correction = N4BiasFieldCorrection(
+        masking=True,
+        rescale_intensities=True,
+        spline_parameters=[1, 1, 1],
+        spline_order=3,
+    )
+
+    input_paths = source_directory.glob("*.nii.gz")
+    image_paths: list[Path] = sorted(input_paths)
+    for image_path in image_paths:
+        print(image_path.name)
+        subject_name: str = image_path.name.removesuffix(".nii.gz").removesuffix("_anat_orig")
+        output_path: Path = output_directory / f"{subject_name}_N4.nii.gz"
+
+        image: NiftiImage = nib.load(image_path)
+        corrected: NiftiImage = correction.execute(image)
+
+        nib.save(corrected, output_path)
+
 
 if __name__ == "__main__":
     main()
