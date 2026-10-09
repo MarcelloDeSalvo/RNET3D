@@ -1,0 +1,195 @@
+[
+  {
+    "builder": "mt_r_net_3d",
+    "options": {
+      "residual": false,
+      "attention": false,
+      "max_pooling": false,
+      "with_classifier": false
+    },
+    "parameters": 111548,
+    "layers": 108,
+    "graph_sha256": "c46fd0e639ced88964c2040ed7f12cbb577fc98f4a433dcc82b947b38f56eaf1"
+  },
+  {
+    "builder": "standard_unet_3d",
+    "options": {
+      "residual": false,
+      "attention": false,
+      "max_pooling": false
+    },
+    "parameters": 92174,
+    "layers": 65,
+    "graph_sha256": "3062dbefd7ea5a2d11260f65daee933efbfe5cd75c4e19f56aa2eaa7e2acec6e"
+  },
+  {
+    "builder": "mt_r_net_3d",
+    "options": {
+      "residual": false,
+      "attention": false,
+      "max_pooling": true,
+      "with_classifier": false
+    },
+    "parameters": 108678,
+    "layers": 104,
+    "graph_sha256": "c274558c266e195019d601985f39763657d8b2f32a6fd658467747ba296a1cce"
+  },
+  {
+    "builder": "standard_unet_3d",
+    "options": {
+      "residual": false,
+      "attention": false,
+      "max_pooling": true
+    },
+    "parameters": 89304,
+    "layers": 61,
+    "graph_sha256": "9cbdc1299265bbe6d33079666a638c75cd05c7a6fac7c493bf78e7b66f012ed2"
+  },
+  {
+    "builder": "mt_r_net_3d",
+    "options": {
+      "residual": false,
+      "attention": true,
+      "max_pooling": false,
+      "with_classifier": false
+    },
+    "parameters": 115532,
+    "layers": 152,
+    "graph_sha256": "1c6f6e8d0556db312f9c6c033141d4b3fd0ad141f375ec5a06f1f0709b03aafb"
+  },
+  {
+    "builder": "standard_unet_3d",
+    "options": {
+      "residual": false,
+      "attention": true,
+      "max_pooling": false
+    },
+    "parameters": 96158,
+    "layers": 109,
+    "graph_sha256": "13f3b0fcaee5004e14c907159ce1a87f52708d509b041a37caaf8964e606456a"
+  },
+  {
+    "builder": "mt_r_net_3d",
+    "options": {
+      "residual": false,
+      "attention": true,
+      "max_pooling": true,
+      "with_classifier": false
+    },
+    "parameters": 112662,
+    "layers": 148,
+    "graph_sha256": "b4ca77c2a8e97488928fa8f27c0e0b122658750997aee3bd4c0ad8e6b4af556b"
+  },
+  {
+    "builder": "standard_unet_3d",
+    "options": {
+      "residual": false,
+      "attention": true,
+      "max_pooling": true
+    },
+    "parameters": 93288,
+    "layers": 105,
+    "graph_sha256": "49c3a62d9b99a0db0f7a7a3945236ceea1e0c9a3b13a12527500da6c2cb34232"
+  },
+  {
+    "builder": "mt_r_net_3d",
+    "options": {
+      "residual": true,
+      "attention": false,
+      "max_pooling": false,
+      "with_classifier": false
+    },
+    "parameters": 113338,
+    "layers": 135,
+    "graph_sha256": "2b02172847042ed932af7fede8c7c4b279a75571e5d17e10eddf52607a806d0c"
+  },
+  {
+    "builder": "standard_unet_3d",
+    "options": {
+      "residual": true,
+      "attention": false,
+      "max_pooling": false
+    },
+    "parameters": 93628,
+    "layers": 92,
+    "graph_sha256": "2f1c45a1f62e8aee313d80e6a87030dd460a226a96aecd1ae2e621e39b89aa68"
+  },
+  {
+    "builder": "mt_r_net_3d",
+    "options": {
+      "residual": true,
+      "attention": false,
+      "max_pooling": true,
+      "with_classifier": false
+    },
+    "parameters": 110468,
+    "layers": 131,
+    "graph_sha256": "16c85b7422ef1c419ae127e642cbde7868313f7f6d6dbdaae951e471975af8f5"
+  },
+  {
+    "builder": "standard_unet_3d",
+    "options": {
+      "residual": true,
+      "attention": false,
+      "max_pooling": true
+    },
+    "parameters": 90758,
+    "layers": 88,
+    "graph_sha256": "03516ee919f68f60454dad2842fc7159b344b5e78e3df8413899b9967c72c411"
+  },
+  {
+    "builder": "mt_r_net_3d",
+    "options": {
+      "residual": true,
+      "attention": true,
+      "max_pooling": false,
+      "with_classifier": false
+    },
+    "parameters": 117322,
+    "layers": 179,
+    "graph_sha256": "accacb80980d2c9334d504cbd6512f876b807dc94126ecdad1240687c06db90b"
+  },
+  {
+    "builder": "standard_unet_3d",
+    "options": {
+      "residual": true,
+      "attention": true,
+      "max_pooling": false
+    },
+    "parameters": 97612,
+    "layers": 136,
+    "graph_sha256": "a8f6d5c3aeb75e2c0085c57c3a2dc3cf1ca96da656a0f7a80c4d784e60500bdc"
+  },
+  {
+    "builder": "mt_r_net_3d",
+    "options": {
+      "residual": true,
+      "attention": true,
+      "max_pooling": true,
+      "with_classifier": false
+    },
+    "parameters": 114452,
+    "layers": 175,
+    "graph_sha256": "55c65368e4e9bc7610b27a210ce94204b60b4286adf7ae131edc3fbf8a2b67ef"
+  },
+  {
+    "builder": "standard_unet_3d",
+    "options": {
+      "residual": true,
+      "attention": true,
+      "max_pooling": true
+    },
+    "parameters": 94742,
+    "layers": 132,
+    "graph_sha256": "aee396c590b066ab4636e2e5a5b6efa64ee496c397c03843f9d37610af99b1a2"
+  },
+  {
+    "builder": "mt_r_net_3d",
+    "options": {
+      "with_classifier": true
+    },
+    "parameters": 262933,
+    "layers": 181,
+    "graph_sha256": "53a1240fd7023d650caa3a26ad5f6bc8d7edf03ed83d0a4bfc645ac14a40c2a0"
+  }
+]
