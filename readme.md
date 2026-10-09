@@ -132,3 +132,35 @@ Src/            # The main folder of the project containing all the source code
 └── DA_3DRNET_Training.ipynb  # Tutorial on how to train the 3D RNET with domain adaptation
 </pre>
 
+See [Loading rodent datasets](docs/data_loading.md) for the legacy and normalized
+folder layouts, original-ID metadata, longitudinal scan identities, and usage examples.
+
+See [Preprocessing behavior](docs/preprocessing.md) for interpolation, spatial
+geometry, label policies, prediction restoration, and regression tests.
+
+See [Generator behavior and review](docs/generators.md) for batch construction,
+target encoding, validation checks, and remaining batching/label-policy issues.
+
+See [Network blocks and ablation preparation](docs/networks.md) for corrected
+activation/dropout behavior, residual controls, and network regression checks.
+
+See [Losses, metrics and partial-label gradients](docs/losses_metrics.md) for
+the numerical refactor checks and the confirmed coupling through softmax.
+
+Run [check_partial_label_loss_gradient](notebook/check_partial_label_loss_gradient.ipynb)
+to compare the original objective with `diceCELoss_gradient_fix`, which takes raw
+ROI logits and excludes unavailable classes before softmax. The notebook also
+shows how to expose logits while preserving the existing inference model.
+
+See [Cross-validation and ablation runs](docs/cross_validation.md) for connecting
+legacy/normalized loader records to subject-level folds, preserving timepoints,
+and reusing saved splits across model variants.
+
+See [Reviewer evaluation additions](docs/reviewer_evaluation.md) for full-volume
+surface/volume metrics, paired agreement diagnostics, and subject-level
+classification confidence intervals.
+
+Open [Check preprocessing](notebook/check_preprocessing.ipynb) with the `rnet`
+kernel to sample normalized subjects, compare preprocessing variants, and inspect
+interactive image/mask overlays. Change `SUBJECT_INDEX` to inspect another sample.
+
