@@ -1,229 +1,211 @@
+"""Keras batches for ROI segmentation, brain masks, and domain adaptation."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Any, TypeAlias
+
 import numpy as np
 import tensorflow as tf
-    
+from numpy.typing import NDArray
+
+if TYPE_CHECKING:
+    from .preprocessor import Preprocessor
+    from ..utils.loader import Rodent, RodentDatasets, SubjectKey
+
+
+BatchArray: TypeAlias = NDArray[np.float64]
+Batch: TypeAlias = tuple[BatchArray, list[BatchArray]]
+
+
 class MultiTaskGenerator(tf.keras.utils.Sequence):
-    '''
-    Generates data for Keras.\n
-    Applies preprocessing and augmentation to the data with the help of the preprocessor and augmentator classes.\n
-    '''
-    def __init__(self, 
-                 ids,
-                 loader,
-                 config,
-                 batch_size=None,
-                 shuffle=True, 
-                 preprocessor=None):
-        
-        'Initialization'
-        self.ids = ids
-        self.loader = loader
-        self.shuffle = shuffle
-        self.preprocessor = preprocessor
+    """Build full batches with ROI and brain-mask targets.
+
+    Input volumes are repeated across the configured input channels. Targets
+    are returned as ``[regions, brain_mask]``. The last incomplete batch is
+    dropped, matching the existing training notebooks. ROI values must already
+    be mapped to contiguous class indexes by the supplied preprocessor.
+    """
+
+    def __init__(
+        self,
+        ids: Sequence[SubjectKey],
+        loader: RodentDatasets,
+        config: Mapping[str, Any],
+        batch_size: int | None = None,
+        shuffle: bool = True,
+        preprocessor: Preprocessor | None = None,
+    ) -> None:
+        """Store batch settings; omit preprocessing for already prepared volumes."""
+        self.ids: list[SubjectKey] = list(ids)
+        self.loader: RodentDatasets = loader
+        self.shuffle: bool = shuffle
+        self.preprocessor: Preprocessor | None = preprocessor
+
+        self.config: dict[str, Any] = dict(config)
+        self.labels: list[int] = list(self.config["labels"])
+        self.dim: tuple[int, ...] = tuple(self.config["input_shape"])
+        self.dataset_path: str = self.config["dataset_path"]
+        self.n_input_channels: int = self.config["in_channels"]
+        self.n_classes: int = self.config["num_classes"]
+
+        if batch_size is None:
+            batch_size = self.config["batch_size"]
+
+        self.batch_size: int = batch_size
+        counts: tuple[int, ...] = (self.batch_size, self.n_input_channels, self.n_classes, *self.dim)
+        for count in counts:
+            if isinstance(count, bool) or not isinstance(count, (int, np.integer)) or count <= 0:
+                raise ValueError("Batch size, channels, classes and dimensions must be positive integers")
+
+        if len(self.dim) != 3:
+            raise ValueError("input_shape must contain three dimensions")
+
+        self.indexes: NDArray[np.int64]
         self.on_epoch_end()
 
-        'Configuration'
-        self.config = config
-        self.labels = self.config['labels']
-        self.dim = self.config['input_shape']
-        self.dataset_path = self.config['dataset_path']
-        self.n_input_channels = self.config['in_channels']
-        self.n_classes = self.config['num_classes']
+        description: str = (
+            f"Generator configuration:\n"
+            f"- Dataset path: {self.dataset_path}\n"
+            f"- Dimensions: {self.dim}\n"
+            f"- Batch size: {self.batch_size}\n"
+            f"- Number of input channels: {self.n_input_channels}\n"
+            f"- Number of classes: {self.n_classes}\n"
+            f"- Shuffle: {self.shuffle}\n"
+        )
+        print(description)
 
-        'Batch size'
-        if batch_size is None:
-            self.batch_size = self.config['batch_size']
-            print(f'Batch size not provided. Using default batch size: {self.batch_size}')
-        else:
-            self.batch_size = batch_size
-            
-        print(f'Generator configuration:\n'
-            f'- Dataset path: {self.dataset_path}\n'
-            f'- Dimensions: {self.dim}\n'
-            f'- Batch size: {self.batch_size}\n'
-            f'- Number of input channels: {self.n_input_channels}\n'
-            f'- Number of classes: {self.n_classes}\n'
-            f'- Shuffle: {self.shuffle}\n')
+    def __len__(self) -> int:
+        """Return the number of complete batches, excluding the remainder."""
+        return len(self.ids) // self.batch_size
 
-    def __len__(self):
-        'Denotes the number of batches per epoch'
-        return int(np.floor(len(self.ids) / self.batch_size))
+    def __getitem__(self, index: int) -> Batch:
+        """Return one valid batch; reject negative and out-of-range indexes."""
+        if not isinstance(index, (int, np.integer)):
+            raise TypeError("Batch index must be an integer")
 
-    def __getitem__(self, index):
-        'Generate one batch of data'
-        # Generate indexes of the batch
-        indexes = self.indexes[index * self.batch_size:(index + 1) * self.batch_size]
+        if index < 0 or index >= len(self):
+            raise IndexError(f"Batch index out of range: {index}")
 
-        # Find list of IDs
-        batch_ids = [self.ids[k] for k in indexes]
+        start: int = index * self.batch_size
+        stop: int = start + self.batch_size
+        indexes: NDArray[np.int64] = self.indexes[start:stop]
+        batch_ids: list[SubjectKey] = [self.ids[position] for position in indexes]
 
-        # Generate data
-        X, Y = self.__data_generation(batch_ids)
-        return X, Y
-    
-    def __getcase__(self, index):
-        'Returns the case of the given index'
+        return self._generate_batch(batch_ids)
+
+    def __getcase__(self, index: int) -> SubjectKey:
+        """Return an ID in original list order, independently of batch shuffling."""
         return self.ids[index]
 
-    def on_epoch_end(self):
-        'Updates indexes after each epoch'
-        self.indexes = np.arange(len(self.ids))
-        if self.shuffle == True:
+    def on_epoch_end(self) -> None:
+        """Reset batch indexes and optionally shuffle with NumPy's global RNG."""
+        sample_count: int = len(self.ids)
+        self.indexes = np.arange(sample_count, dtype=np.int64)
+
+        if self.shuffle:
             np.random.shuffle(self.indexes)
 
-    def __data_generation(self, batch_ids):
-        'Generates data containing batch_size samples'
-        
-        # Initialization
-        X = np.zeros((self.batch_size,*(self.dim),self.n_input_channels)) # Processed image
-        Y = np.zeros((self.batch_size,*(self.dim),self.n_classes)) # Processed ground truth
-        M = np.zeros((self.batch_size,*(self.dim),1)) # Processed brain mask
+    def _prepare_sample(self, subject: Rodent) -> tuple[BatchArray, NDArray, BatchArray]:
+        """Prepare one image/mask group and validate class indexes before encoding."""
+        image, roi_mask, brain_mask = subject.get_images()
+        if brain_mask is None:
+            raise ValueError(f"{subject.id}: a brain mask is required for multitask targets")
 
-        # Generate data
-        for i, rodent_key in enumerate(batch_ids):
+        if self.preprocessor is not None:
+            masks = [roi_mask, brain_mask]
+            image, processed_masks = self.preprocessor.preprocess(image, masks)
+            roi_mask, brain_mask = processed_masks
 
-            # Get mouse object from loader
-            mouse = self.loader.get_subject(rodent_key)
-            
-            # Extract images and masks
-            image, roi_ground_truth, brain_mask_ground_truth = mouse.get_images()
+        image_data: BatchArray = image.get_fdata()
+        roi_data: BatchArray = roi_mask.get_fdata()
+        brain_data: BatchArray = brain_mask.get_fdata()
 
-            # Preprocess and augment the images
-            prep_image, [prep_ground_truth, prep_brain_mask] = self.preprocessor.preprocess(image, [roi_ground_truth, brain_mask_ground_truth])
-            
-            # Get data from the images
-            prep_image_data = prep_image.get_fdata()
-            prep_ground_truth_data = prep_ground_truth.get_fdata()
-            prep_brain_mask = prep_brain_mask.get_fdata()
-        
-            # Convert to one hot encoding
-            prep_ground_truth_data = tf.keras.utils.to_categorical(prep_ground_truth_data, num_classes=self.n_classes)
+        for data in (image_data, roi_data, brain_data):
+            if data.shape != self.dim:
+                raise ValueError(f"{subject.id}: expected shape {self.dim}, received {data.shape}")
 
-            # Stacking input into n input channels
-            X[i] = np.stack((prep_image_data,)*self.n_input_channels, axis=-1)
-            # One hot encoding
-            Y[i] = prep_ground_truth_data
-            # Brain mask
-            M[i] = np.expand_dims(prep_brain_mask, axis=-1)
+            finite_values: NDArray[np.bool_] = np.isfinite(data)
+            if not finite_values.all():
+                raise ValueError(f"{subject.id}: images and masks must contain finite values")
 
-        return X, [Y, M]
-    
+        rounded_labels: NDArray = np.rint(roi_data)
+        integer_labels: bool = np.array_equal(roi_data, rounded_labels)
+        labels_in_range: bool = bool(roi_data.min() >= 0 and roi_data.max() < self.n_classes)
+        if not integer_labels or not labels_in_range:
+            raise ValueError(
+                f"{subject.id}: ROI labels must be integer class indexes in [0, {self.n_classes}); "
+                "configure MapLabels in the preprocessor"
+            )
 
-class DomainAdaptationGenerator(tf.keras.utils.Sequence):
-    '''
-    Generates data for Keras.\n
-    Applies preprocessing and augmentation to the data with the help of the preprocessor and augmentator classes.\n
-    '''
-    def __init__(self, 
-                 ids,
-                 loader,
-                 config,
-                 batch_size=None,
-                 shuffle=True, 
-                 preprocessor=None):
-        
-        'Initialization'
-        self.ids = ids
-        self.loader = loader
-        self.shuffle = shuffle
-        self.preprocessor = preprocessor
-        self.on_epoch_end()
+        # Flatten first: Keras otherwise removes a trailing singleton voxel axis.
+        flat_labels: NDArray = roi_data.reshape(-1)
+        flat_regions: NDArray = tf.keras.utils.to_categorical(flat_labels, num_classes=self.n_classes)
+        region_shape: tuple[int, ...] = (*self.dim, self.n_classes)
+        encoded_regions: NDArray = flat_regions.reshape(region_shape)
 
-        'Configuration'
-        self.config = config
-        self.labels = self.config['labels']
-        self.dim = self.config['input_shape']
-        self.dataset_path = self.config['dataset_path']
-        self.n_input_channels = self.config['in_channels']
-        self.n_classes = self.config['num_classes']
-        if batch_size is None:
-            self.batch_size = self.config['batch_size']
-        else:
-            self.batch_size = batch_size
-            
-        print(f'Generator configuration:\n'
-            f'- Dataset path: {self.dataset_path}\n'
-            f'- Dimensions: {self.dim}\n'
-            f'- Batch size: {self.batch_size}\n'
-            f'- Number of input channels: {self.n_input_channels}\n'
-            f'- Number of classes: {self.n_classes}\n'
-            f'- Shuffle: {self.shuffle}\n')
+        return image_data, encoded_regions, brain_data
 
-    def __len__(self):
-        'Denotes the number of batches per epoch'
-        return int(np.floor(len(self.ids) / self.batch_size))
+    def _generate_batch(self, batch_ids: Sequence[SubjectKey]) -> Batch:
+        """Load each subject once and fill arrays with the historical float64 dtype."""
+        image_shape: tuple[int, ...] = (self.batch_size, *self.dim, self.n_input_channels)
+        region_shape: tuple[int, ...] = (self.batch_size, *self.dim, self.n_classes)
+        mask_shape: tuple[int, ...] = (self.batch_size, *self.dim, 1)
 
-    def __getitem__(self, index):
-        'Generate one batch of data'
-        # Generate indexes of the batch
-        indexes = self.indexes[index * self.batch_size:(index + 1) * self.batch_size]
+        images: BatchArray = np.zeros(image_shape, dtype=np.float64)
+        regions: BatchArray = np.zeros(region_shape, dtype=np.float64)
+        brain_masks: BatchArray = np.zeros(mask_shape, dtype=np.float64)
+        subjects: list[Rodent] = []
 
-        # Find list of IDs
-        batch_ids = [self.ids[k] for k in indexes]
+        for position, subject_key in enumerate(batch_ids):
+            subject: Rodent = self.loader.get_subject(subject_key)
+            subjects.append(subject)
+            image_data, region_data, brain_data = self._prepare_sample(subject)
 
-        # Generate data
-        X, Y = self.__data_generation(batch_ids)
-        return X, Y
-    
-    def __getcase__(self, index):
-        'Returns the case of the given index'
-        return self.ids[index]
+            image_channels: NDArray = np.expand_dims(image_data, axis=-1)
+            brain_channel: NDArray = np.expand_dims(brain_data, axis=-1)
+            images[position] = image_channels
+            regions[position] = region_data
+            brain_masks[position] = brain_channel
 
-    def on_epoch_end(self):
-        'Updates indexes after each epoch'
-        self.indexes = np.arange(len(self.ids))
-        if self.shuffle == True:
-            np.random.shuffle(self.indexes)
+        targets: list[BatchArray] = self._prepare_targets(subjects, regions, brain_masks)
 
-    def __data_generation(self, batch_ids):
-        'Generates data containing batch_size samples'
-        
-        # Initialization
-        X = np.zeros((self.batch_size,*(self.dim),self.n_input_channels)) # Processed image
-        Y = np.zeros((self.batch_size,*(self.dim),self.n_classes)) # Processed ground truth
-        M = np.zeros((self.batch_size,*(self.dim),1)) # Processed brain mask
-        S = np.zeros((self.batch_size, 1)) # Sham
+        return images, targets
 
-        # Generate data
-        for i, rodent_key in enumerate(batch_ids):
+    def _prepare_targets(
+        self, subjects: Sequence[Rodent], regions: BatchArray, brain_masks: BatchArray,
+    ) -> list[BatchArray]:
+        """Return ROI channels followed by the brain-mask channel."""
+        return [regions, brain_masks]
 
-            # Get mouse object from loader
-            subject = self.loader.get_subject(rodent_key)
 
-            # Extract images and masks
-            image, roi_ground_truth, brain_mask_ground_truth = subject.get_images()
+class DomainAdaptationGenerator(MultiTaskGenerator):
+    """Add missing-label sentinels and condition targets to multitask batches.
 
-            unavailable_labels = subject.get_unavailable_labels()
-            sham = subject.get_sham()
+    Output order is ``[regions, brain_mask, condition]``. Unavailable source
+    labels are matched against ``config['labels']`` in channel order and their
+    entire channels are set to -1. Condition is 0 for SHAM and 1 otherwise.
+    Annotation availability is supplied by the loader, never inferred here.
+    """
 
-            # One hot encode ignore labels based on the number of classes
+    def _prepare_targets(
+        self, subjects: Sequence[Rodent], regions: BatchArray, brain_masks: BatchArray,
+    ) -> list[BatchArray]:
+        """Preserve existing ignored-channel and SHAM/TBI target conventions."""
+        condition_shape: tuple[int, int] = (len(subjects), 1)
+        conditions: BatchArray = np.zeros(condition_shape, dtype=np.float64)
+
+        for position, subject in enumerate(subjects):
+            unavailable_labels: Sequence[int] | None = subject.get_unavailable_labels()
             if unavailable_labels:
-                _one_hot_ignore = np.zeros(self.n_classes)
-                for j, label in enumerate(self.labels):
+                for channel, label in enumerate(self.labels):
                     if label in unavailable_labels:
-                        _one_hot_ignore[j] = 1
+                        if channel >= self.n_classes:
+                            raise ValueError("Unavailable-label channel exceeds num_classes; check labels and mapping")
 
-            # Preprocess and augment the images
-            prep_image, [prep_ground_truth, prep_brain_mask] = self.preprocessor.preprocess(image, [roi_ground_truth, brain_mask_ground_truth])
-            prep_image_data = prep_image.get_fdata()
-            prep_ground_truth_data = prep_ground_truth.get_fdata()
-            prep_brain_mask = prep_brain_mask.get_fdata()
-        
-            # Convert to one hot encoding
-            prep_ground_truth_data = tf.keras.utils.to_categorical(prep_ground_truth_data, num_classes=self.n_classes)
+                        regions[position, ..., channel] = -1
 
-            # If one hot ignore is 1 for a label dimension, set the whole dimension to -1
-            if unavailable_labels:
-                for k, label in enumerate(_one_hot_ignore):
-                    if label == 1:
-                        prep_ground_truth_data[..., k] = -1
+            if not subject.get_sham():
+                conditions[position, 0] = 1
 
-            # Stacking input into n input channels
-            X[i] = np.stack((prep_image_data,)*self.n_input_channels, axis=-1)
-            # One hot encoding
-            Y[i] = prep_ground_truth_data
-            # Brain mask
-            M[i] = np.expand_dims(prep_brain_mask, axis=-1)
-            # Sham
-            S[i] = 0 if sham == True else 1
-
-        return X, [Y, M, S]
+        return [regions, brain_masks, conditions]
