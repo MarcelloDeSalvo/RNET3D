@@ -1,654 +1,521 @@
-from abc import abstractmethod
-import os
-import math
+﻿"""Sliding-window predictions and legacy full-volume evaluation reports.
+
+Inputs must already share the intended preprocessing/orientation. Model heads
+must return probabilities. ROI logits from gradient-fixed training require an
+explicit probability-producing inference view. Patch order and repeated edge
+patches retain the historical weighting; classifier output is a majority vote.
+"""
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping, Sequence
+from itertools import product
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, TypeAlias
+
+import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
+import nibabel as nib
 import numpy as np
+from numpy.typing import NDArray
 import pandas as pd
 import seaborn as sns
-import nibabel as nib
 import tensorflow as tf
 from tabulate import tabulate
-import matplotlib.pyplot as plt
-from utils.logger import PrintLogger
-from evaluation.metrics import *
+
+from .metrics import (
+    MetricFunction, dice_coefficient, precision_coefficient, specificity_coefficient,
+    sensitivity_coefficient, iou_coefficient, volume_similarity_coefficient,
+)
+
+# Support both repository imports and historical notebooks with src on sys.path.
+if __package__ == 'evaluation':
+    from utils.logger import PrintLogger
+else:
+    from ..utils.logger import PrintLogger
+
+if TYPE_CHECKING:
+    from ..utils.loader import Rodent, RodentDatasets, SubjectKey
+    from ..preprocessing.preprocessor import Preprocessor
+
+Array: TypeAlias = NDArray[Any]
+Shape3D: TypeAlias = tuple[int, int, int]
+ImageInput: TypeAlias = nib.spatialimages.SpatialImage | Array
+PostprocessCallback: TypeAlias = Callable[[Array], Array]
+
+
+def _spatial_slices(start: Sequence[int], end: Sequence[int]) -> tuple[slice, ...]:
+    """Build a shared spatial selection, leaving trailing channels untouched."""
+    return tuple(slice(first, last) for first, last in zip(start, end))
 
 
 class RandomCroppingPrediction:
-    '''
-    Class that performs inference on an input image that was randomly cropped into patches during training.\n
-    It will cover the entire input volume by making a last prediction near the edges if a dimension is not a multiple of the stride.\n
-    The final mask is made by taking the mean of the predictions of the overlapping patches.\n
-    Expected model input shape is (B, H, W, D, C) where B is the batch size, H is the height, W is the width, D is the depth and C is the number of channels.\n
-    If num_classes is 1, the output will be a binary mask, otherwise argmax will be used to get the class with the highest probability.
+    """Average overlapping patches from a single-channel 3D input.
 
-    Parameters:
-    - model (tensorflow.python.keras.engine.functional.Functional): Model to perform inference with.
-    - patch_size (tuple): Size of the patches to be used for inference.
-    - num_classes (int): Number of classes in the output mask.
-    - stride (int): Stride to be used for the random cropping.
-    - threshold (float): Threshold value for the binary mask.
-    '''
+    Despite its historical name, the inference grid is deterministic. Public
+    helper methods remain available. ROI decisions use argmax or >= threshold;
+    classifier patch votes use >0.5 and ties in the final vote are false.
+    """
 
-    def __init__(self, model, patch_size, num_classes, stride=16, threshold=0.5):
-        self.patch_size = patch_size
-        self.num_classes = num_classes
-        self.stride = stride
-        self.threshold = threshold
-        self.model = model
+    def __init__(self, model: Any, patch_size: Sequence[int], num_classes: int,
+                 stride: int = 16, threshold: float = 0.5) -> None:
+        """Validate patch dimensions and settings before allocating full volumes."""
+        self.patch_size: Shape3D = tuple(patch_size)
+        if len(self.patch_size) != 3 or any(not isinstance(n, (int, np.integer)) or n <= 0 for n in self.patch_size):
+            raise ValueError('patch_size must contain three positive integers')
+        if not isinstance(num_classes, (int, np.integer)) or num_classes < 1:
+            raise ValueError('num_classes must be a positive integer')
+        self.num_classes: int = num_classes
+        self.model: Any = model
+        self.set_stride(stride)
+        self.set_threshold(threshold)
 
-    def fix_dimension(self, depth, height, width):
-        '''
-        Fix the dimensions by checking if they are smaller than the patch size.
-        
-        Returns:
-        - the patch size if the dimensions are smaller, otherwise the original dimensions.
-        '''
-        if depth < self.patch_size[0]:
-            depth = self.patch_size[0]
-        if height < self.patch_size[1]:
-            height = self.patch_size[1]
-        if width < self.patch_size[2]:
-            width = self.patch_size[2]
-        return depth, height, width
-    
-    def padding(self, img_data, fixed_depth, fixed_height, fixed_width):
-        '''
-        Pad the image to reach the desired dimensions.
-        '''
-        diff_x = fixed_depth - img_data.shape[0]
-        diff_y = fixed_height - img_data.shape[1]
-        diff_z = fixed_width - img_data.shape[2]
+    def fix_dimension(self, depth: int, height: int, width: int) -> Shape3D:
+        """Ensure the padded volume can contain one full patch."""
+        dimensions: Shape3D = (depth, height, width)
+        return tuple(max(size, patch) for size, patch in zip(dimensions, self.patch_size))
 
-        if diff_x > 0:
-            img_data = np.pad(img_data, ((0, diff_x), (0, 0), (0, 0)), mode='constant')
-        if diff_y > 0:
-            img_data = np.pad(img_data, ((0, 0), (0, diff_y), (0, 0)), mode='constant')
-        if diff_z > 0:
-            img_data = np.pad(img_data, ((0, 0), (0, 0), (0, diff_z)), mode='constant')
+    def padding(self, img_data: Array, fixed_depth: int, fixed_height: int, fixed_width: int) -> Array:
+        """Zero-pad at the upper edge of each axis in a single operation."""
+        dimensions: Shape3D = (fixed_depth, fixed_height, fixed_width)
+        padding = [(0, max(0, size - original)) for size, original in zip(dimensions, img_data.shape)]
+        return np.pad(img_data, padding, mode='constant')
 
-        return img_data
+    def preprocess_input(self, input_img: ImageInput) -> tuple[Array, Shape3D, Shape3D]:
+        """Load NIfTI voxel data or accept a 3D array, then pad to patch size."""
+        if isinstance(input_img, nib.spatialimages.SpatialImage):
+            volume: Array = input_img.get_fdata()
+        else:
+            volume = np.asarray(input_img)
+        if volume.ndim != 3 or any(size == 0 for size in volume.shape):
+            raise ValueError('Expected a nonempty single-channel 3D input volume')
+        original_shape: Shape3D = volume.shape
+        padded_shape: Shape3D = self.fix_dimension(*original_shape)
+        volume = self.padding(volume, *padded_shape)
+        return volume, original_shape, padded_shape
 
-    def random_cropping_inference(self, input_img, with_brain_mask=False, with_classifier=False):
-        '''
-        Perform inference on an input image that was randomly cropped into patches during training.\n
-        It will cover the entire input volume by making a last prediction near the edges if a dimension is not a multiple of the stride.
-        The final mask is made by taking the mean of the predictions of the overlapping patches.
+    def initialize_prediction_arrays(self, padded_shape: Shape3D) -> tuple[Array, Array]:
+        """Allocate float64 ROI sums and per-class counts as in the original API."""
+        shape = (*padded_shape, self.num_classes)
+        return np.zeros(shape), np.zeros(shape)
 
-        Parameters:
-        - input_img (nibabel.nifti1.Nifti1Image): Input image to perform inference on.
-        - with_brain_mask (bool): Whether to return a brain mask alongside the prediction mask.
-        - with_classifier (bool): Whether to return the binary output of the classifier.
+    def initialize_brain_arrays(self, padded_shape: Shape3D) -> tuple[Array, Array]:
+        """Allocate single-channel float64 sums and counts for the brain head."""
+        shape = (*padded_shape, 1)
+        return np.zeros(shape), np.zeros(shape)
 
-        Returns:
-        - results (dict): Dictionary containing the final prediction mask, brain mask and classifier output if requested.
-        - results['roi'] (np.ndarray): Final prediction mask.
-        - results['brain_mask'] (np.ndarray): Final brain mask.
-        - results['classifier'] (bool): Classifier output.
-        '''
+    def initialize_classifier_arrays(self) -> tuple[Array, Array]:
+        """Allocate the positive-vote and total-patch counters."""
+        return np.zeros(1), np.zeros(1)
 
-        results = {}
-        
-        input_volume, original_shape, padded_shape = self.preprocess_input(input_img)
-        
-        predicted_patches, count_map = self.initialize_prediction_arrays(padded_shape)
+    def update_prediction_arrays(self, predicted_patches: Array, count_map: Array,
+                                 predicted_patch: Array, start: Shape3D, end: Shape3D) -> None:
+        """Accumulate all channels together instead of looping over classes."""
+        selection = _spatial_slices(start, end)
+        predicted_patches[selection] += predicted_patch
+        count_map[selection] += 1
 
-        if with_brain_mask:
-            predicted_brain_patches, brain_count_map = self.initialize_brain_arrays(padded_shape)
+    def update_brain_arrays(self, predicted_brain_patches: Array, brain_count_map: Array,
+                            brain_patch: Array, start: Shape3D, end: Shape3D) -> None:
+        """Use the same accumulation rule for the single-channel brain head."""
+        self.update_prediction_arrays(predicted_brain_patches, brain_count_map, brain_patch, start, end)
 
-        if with_classifier:
-            predicted_classifier_patches, classifier_count_map = self.initialize_classifier_arrays()
-        
-        steps_d, steps_h, steps_w = self.calculate_steps(padded_shape)
-        
-        for d in range(0, steps_d *  self.stride, self.stride):
-            for h in range(0, steps_h *  self.stride, self.stride):
-                for w in range(0, steps_w *  self.stride, self.stride):
-                    start, end = self.calculate_patch_bounds(d, h, w, padded_shape)
-                    patch = self.extract_patch(input_volume, start, end)
-                    predicted_patch, brain_patch, predicted_aux = self.perform_inference(patch, with_brain_mask, with_classifier)
-
-                    self.update_prediction_arrays(predicted_patches, count_map, predicted_patch, start, end)
-
-                    if with_brain_mask:
-                        self.update_brain_arrays(predicted_brain_patches, brain_count_map, brain_patch, start, end)
-
-                    if with_classifier:
-                        self.update_classifier_arrays(predicted_classifier_patches, classifier_count_map, predicted_aux)
-
-        if with_brain_mask:
-            final_brain_mask = self.calculate_final_brain_mask(predicted_brain_patches, brain_count_map, original_shape)
-            results['brain_mask'] = final_brain_mask
-
-        if with_classifier:
-            final_classifier_output = self.calculate_final_classifier_output(predicted_classifier_patches, classifier_count_map)
-            results['classifier'] = final_classifier_output
-
-        final_prediction = self.calculate_final_prediction(predicted_patches, count_map, original_shape)
-        results['roi'] = final_prediction
-
-        return results
-
-    def preprocess_input(self, input_img):
-        '''
-        Preprocess the input image by padding it to reach the desired dimensions.
-        '''
-        input_volume = input_img.get_fdata() if isinstance(input_img, nib.Nifti1Image) else input_img
-        original_shape = input_volume.shape
-        padded_shape = self.fix_dimension(*original_shape)
-        input_volume = self.padding(input_volume, *padded_shape)
-        return input_volume, original_shape, padded_shape
-
-    def initialize_prediction_arrays(self, padded_shape):
-        '''
-        Initialize the arrays to store the predicted patches and the count map.
-        '''
-        predicted_patches = np.zeros((*padded_shape, self.num_classes))
-        count_map = np.zeros((*padded_shape, self.num_classes))
-        return predicted_patches, count_map
-
-    def initialize_brain_arrays(self, padded_shape):
-        '''
-        Initialize the arrays to store the predicted brain patches and the brain count map.
-        '''
-        predicted_brain_patches = np.zeros((*padded_shape, 1))
-        brain_count_map = np.zeros((*padded_shape, 1))
-        return predicted_brain_patches, brain_count_map
-    
-    def initialize_classifier_arrays(self):
-        '''
-        Initialize the arrays to store the predicted classifier patches and the count map.
-        '''
-        predicted_classifier_patches = np.zeros((1))
-        count_map = np.zeros((1))
-        return predicted_classifier_patches, count_map
-    
-    def update_prediction_arrays(self, predicted_patches, count_map, predicted_patch, start, end):
-        '''
-        Update the predicted patches and the count map with the current patch.
-        '''
-        for i in range(self.num_classes):
-            predicted_patches[start[0]:end[0], start[1]:end[1], start[2]:end[2], i] += predicted_patch[..., i]
-            count_map[start[0]:end[0], start[1]:end[1], start[2]:end[2], i] += 1
-
-    def update_brain_arrays(self, predicted_brain_patches, brain_count_map, brain_patch, start, end):
-        '''
-        Update the predicted brain patches and the brain count map with the current patch.
-        '''
-        predicted_brain_patches[start[0]:end[0], start[1]:end[1], start[2]:end[2], 0] += brain_patch[..., 0]
-        brain_count_map[start[0]:end[0], start[1]:end[1], start[2]:end[2], 0] += 1
-
-    def update_classifier_arrays(self, predicted_classifier_patches, count_map, predicted_patch):
-        '''
-        Update the predicted classifier patches and the count map with the current patch.
-        '''
-        predicted_classifier_patches += 1 if predicted_patch > 0.5 else 0
+    def update_classifier_arrays(self, predicted_classifier_patches: Array,
+                                 count_map: Array, predicted_patch: Array) -> None:
+        """Count a positive patch vote at >0.5, preserving the original policy."""
+        probability: float = float(np.asarray(predicted_patch).item())
+        if probability > 0.5:
+            predicted_classifier_patches += 1
         count_map += 1
 
-    def calculate_steps(self, padded_shape):
-        '''
-        Calculate the number of steps to cover the entire volume.
-        '''
-        depth, height, width = padded_shape
-        steps_d = max(1, (depth - self.patch_size[0]) // self.stride +1)
-        steps_h = max(1, (height - self.patch_size[1]) // self.stride +1)
-        steps_w = max(1, (width - self.patch_size[2]) // self.stride +1)
+    def calculate_steps(self, padded_shape: Shape3D) -> Shape3D:
+        """Retain the legacy step counts, including duplicate clamped edge patches."""
+        steps: list[int] = []
+        for size, patch in zip(padded_shape, self.patch_size):
+            count: int = max(1, (size - patch) // self.stride + 1)
+            if count * self.stride < size:
+                count += 1
+            steps.append(count)
+        return tuple(steps)
 
-        # if steps * stride < volume size, add one more step
-        if steps_d * self.stride < depth: steps_d += 1
-        if steps_h * self.stride < height: steps_h += 1
-        if steps_w * self.stride < width: steps_w += 1
+    def calculate_patch_bounds(self, d: int, h: int, w: int,
+                               padded_shape: Shape3D) -> tuple[Shape3D, Shape3D]:
+        """Clamp the last patch to each upper image boundary."""
+        positions: Shape3D = (d, h, w)
+        start = tuple(min(position, size - patch) for position, size, patch in zip(positions, padded_shape, self.patch_size))
+        end = tuple(position + patch for position, patch in zip(start, self.patch_size))
+        return start, end
 
-        return steps_d, steps_h, steps_w
+    def extract_patch(self, input_volume: Array, start: Shape3D, end: Shape3D) -> Array:
+        """Select one spatial patch without copying its voxel data."""
+        selection = _spatial_slices(start, end)
+        return input_volume[selection]
 
-    def calculate_patch_bounds(self, d, h, w, padded_shape):
-        '''
-        Calculate the start and end indices of the current patch.
-        '''
-        depth, height, width = padded_shape
-        if d + self.patch_size[0] > depth:
-            d = depth - self.patch_size[0]
-        if h + self.patch_size[1] > height:
-            h = height - self.patch_size[1]
-        if w + self.patch_size[2] > width:
-            w = width - self.patch_size[2]
-        
-        ranges_d = (d, d + self.patch_size[0])
-        ranges_h = (h, h + self.patch_size[1])
-        ranges_w = (w, w + self.patch_size[2])
-        
-        return (ranges_d[0], ranges_h[0], ranges_w[0]), (ranges_d[1], ranges_h[1], ranges_w[1])
-
-    def extract_patch(self, input_volume, start, end):
-        '''
-        Extract the current patch from the input volume.
-        '''
-        return input_volume[start[0]:end[0], start[1]:end[1], start[2]:end[2]]
-
-    def perform_inference(self, patch, with_brain_mask, with_classifier_output):
-        '''
-        Perform inference on the current patch.
-        Extract the predicted patch, brain mask and classifier output if requested.
-        '''
-        fixed_patch = np.expand_dims(np.expand_dims(patch, axis=-1), axis=0)
+    def perform_inference(self, patch: Array, with_brain_mask: bool,
+                          with_classifier_output: bool) -> tuple[Array, Array | None, Array | None]:
+        """Accept a single ROI head, positional heads or named output dictionaries."""
+        fixed_patch: Array = patch[np.newaxis, ..., np.newaxis]
         predictions = self.model.predict(fixed_patch, verbose=False)
-        predicted_patch = predictions[0][0] # (1, H, W, D, C) -> (H, W, D, C)
-        brain_patch = predictions[1][0] if with_brain_mask else None
-        aux_patch = predictions[2][0] if with_classifier_output else None
-        return predicted_patch, brain_patch, aux_patch
-
-    def calculate_final_prediction(self, predicted_patches, count_map, original_shape):
-        '''
-        Calculate the final prediction mask by taking the mean of the predictions of the overlapping patches.
-        '''
-        count_map[count_map == 0] = 1
-        predicted_patches /= count_map
-        if self.num_classes == 1:
-            final_prediction = (predicted_patches >= self.threshold).astype(np.float64)[..., 0]
+        if isinstance(predictions, Mapping):
+            heads = [predictions['regions'], predictions.get('brain_mask'), predictions.get('classifier')]
+        elif isinstance(predictions, (list, tuple)):
+            heads = list(predictions)
         else:
-            final_prediction = np.argmax(predicted_patches, axis=-1).astype(np.float64)
-        return final_prediction[:original_shape[0], :original_shape[1], :original_shape[2]]
+            heads = [predictions]
 
-    def calculate_final_brain_mask(self, predicted_brain_patches, brain_count_map, original_shape):
-        '''
-        Calculate the final brain mask by taking the mean of the predictions of the overlapping patches.
-        '''
-        brain_count_map[brain_count_map == 0] = 1
-        predicted_brain_patches /= brain_count_map
-        final_brain_mask = (predicted_brain_patches >= self.threshold).astype(np.float64)[..., 0]
-        return final_brain_mask[:original_shape[0], :original_shape[1], :original_shape[2]]
-    
-    def calculate_final_classifier_output(self, predicted_classifier_patches, count_map):
-        '''
-        Calculate the final classifier output by taking the mean of the predictions of the overlapping patches.
-        '''
-        print('predicted_classifier_patches: ', predicted_classifier_patches, ' - count_map: ', count_map)
-        return True if predicted_classifier_patches/count_map > 0.5 else False 
-    
-    def set_threshold(self, threshold):
-        self.threshold = threshold
+        roi: Array = np.asarray(heads[0])[0]
+        expected_roi = (*self.patch_size, self.num_classes)
+        if roi.shape != expected_roi:
+            raise ValueError(f'ROI output shape {roi.shape} does not match {expected_roi}')
+        brain: Array | None = None
+        classifier: Array | None = None
+        if with_brain_mask:
+            if len(heads) < 2 or heads[1] is None:
+                raise ValueError('Requested brain_mask output is missing')
+            brain = np.asarray(heads[1])[0]
+            if brain.shape != (*self.patch_size, 1):
+                raise ValueError('Brain output must have the patch shape and one channel')
+        if with_classifier_output:
+            if len(heads) < 3 or heads[2] is None:
+                raise ValueError('Requested classifier output is missing')
+            classifier = np.asarray(heads[2])[0]
+            if classifier.size != 1:
+                raise ValueError('Classifier must return one probability per patch')
+        return roi, brain, classifier
 
-    def set_stride(self, stride):
-        self.stride = stride
+    def _final_mask(self, sums: Array, counts: Array, original_shape: Shape3D, binary: bool) -> Array:
+        """Normalize in place and crop a thresholded/argmax mask to the input shape."""
+        counts[counts == 0] = 1
+        sums /= counts
+        if binary:
+            mask: Array = (sums[..., 0] >= self.threshold).astype(np.float64)
+        else:
+            mask = np.argmax(sums, axis=-1).astype(np.float64)
+        origin: Shape3D = (0, 0, 0)
+        selection = _spatial_slices(origin, original_shape)
+        return mask[selection]
+
+    def calculate_final_prediction(self, predicted_patches: Array, count_map: Array,
+                                   original_shape: Shape3D) -> Array:
+        """Return ROI labels with the original threshold/argmax policy."""
+        binary: bool = self.num_classes == 1
+        return self._final_mask(predicted_patches, count_map, original_shape, binary)
+
+    def calculate_final_brain_mask(self, predicted_brain_patches: Array, brain_count_map: Array,
+                                   original_shape: Shape3D) -> Array:
+        """Return a binary brain mask from averaged probabilities."""
+        return self._final_mask(predicted_brain_patches, brain_count_map, original_shape, binary=True)
+
+    def calculate_final_classifier_output(self, predicted_classifier_patches: Array, count_map: Array) -> bool:
+        """Return the majority patch vote; ties remain negative."""
+        if count_map.item() <= 0:
+            raise ValueError('Cannot classify a volume without patch votes')
+        positive_fraction: float = float((predicted_classifier_patches / count_map).item())
+        return positive_fraction > 0.5
+
+    def set_threshold(self, threshold: float) -> None:
+        """Set a finite probability threshold in [0, 1]."""
+        if not np.isfinite(threshold) or not 0 <= threshold <= 1:
+            raise ValueError('threshold must be between zero and one')
+        self.threshold: float = threshold
+
+    def set_stride(self, stride: int) -> None:
+        """Reject invalid strides and strides that would leave uncovered voxels."""
+        if isinstance(stride, bool) or not isinstance(stride, (int, np.integer)) or not 1 <= stride <= min(self.patch_size):
+            raise ValueError('stride must be a positive integer no larger than the smallest patch dimension')
+        self.stride: int = stride
+
+    def random_cropping_inference(self, input_img: ImageInput, with_brain_mask: bool = False,
+                                 with_classifier: bool = False) -> dict[str, Array | bool]:
+        """Accumulate patches in the original order and return selected output masks."""
+        volume, original_shape, padded_shape = self.preprocess_input(input_img)
+        sums, counts = self.initialize_prediction_arrays(padded_shape)
+        if with_brain_mask:
+            brain_sums, brain_counts = self.initialize_brain_arrays(padded_shape)
+        if with_classifier:
+            positive_votes, total_votes = self.initialize_classifier_arrays()
+
+        steps: Shape3D = self.calculate_steps(padded_shape)
+        positions = [range(0, count * self.stride, self.stride) for count in steps]
+        for d, h, w in product(*positions):
+            start, end = self.calculate_patch_bounds(d, h, w, padded_shape)
+            patch = self.extract_patch(volume, start, end)
+            roi, brain, classifier = self.perform_inference(patch, with_brain_mask, with_classifier)
+            self.update_prediction_arrays(sums, counts, roi, start, end)
+            if with_brain_mask:
+                self.update_brain_arrays(brain_sums, brain_counts, brain, start, end)
+            if with_classifier:
+                self.update_classifier_arrays(positive_votes, total_votes, classifier)
+
+        results: dict[str, Array | bool] = {}
+        if with_brain_mask:
+            results['brain_mask'] = self.calculate_final_brain_mask(brain_sums, brain_counts, original_shape)
+        if with_classifier:
+            results['classifier'] = self.calculate_final_classifier_output(positive_votes, total_votes)
+        results['roi'] = self.calculate_final_prediction(sums, counts, original_shape)
+        return results
 
 
 class FullVolumeEvaluation:
+    """Evaluate scan-level legacy overlap metrics and optionally write reports.
 
-    def __init__(self, model, test_ids, config, loader, strides, preprocessor, brain_mask_postprocess_callback=None, roi_postprocess_callback=None,
-                path=None, verbose=False, threshold=0.5):
-        self.patch_size = config['input_shape']
-        self.data_path = config['dataset_path']
-        self.num_classes = config['num_classes']
-        self.strides = strides
-        self.threshold = threshold
-        self.model = model
-        self.test_ids = test_ids
-        self.loader = loader
-        self.modalities = loader.get_modalities()
-        self.preprocessor = preprocessor
-        self.results_path = path
-        self.verbose = verbose
+    Model ROI channel count remains separate from evaluation class count.
+    Existing ROI postprocessors default to the historical five output classes;
+    use postprocessed_num_classes for a different label contract. This report
+    retains legacy metric formulas; physical surface metrics live in metrics.py.
+    """
+
+    def __init__(
+        self, model: Any, test_ids: Sequence[SubjectKey], config: Mapping[str, Any],
+        loader: RodentDatasets, strides: Sequence[int], preprocessor: Preprocessor,
+        brain_mask_postprocess_callback: PostprocessCallback | None = None,
+        roi_postprocess_callback: PostprocessCallback | None = None,
+        path: str | Path | None = None, verbose: bool = False, threshold: float = 0.5,
+        *, postprocessed_num_classes: int | None = None,
+    ) -> None:
+        """Store inference settings without opening a log until evaluate is called."""
+        self.patch_size: Shape3D = tuple(config['input_shape'])
+        self.data_path: str = config['dataset_path']
+        self.num_classes: int = config['num_classes']
+        self.strides: list[int] = list(strides)
+        if not self.strides:
+            raise ValueError('At least one inference stride is required')
+        self.threshold: float = threshold
+        self.model: Any = model
+        self.test_ids: list[SubjectKey] = list(test_ids)
+        self.loader: RodentDatasets = loader
+        self.modalities: list[str] = list(loader.get_modalities())
+        self.preprocessor: Preprocessor = preprocessor
+        self.results_path: Path | None = None
+        if path is not None:
+            self.results_path = Path(path)
+        self.verbose: bool = verbose
         self.brain_mask_postprocess_callback = brain_mask_postprocess_callback
         self.roi_postprocess_callback = roi_postprocess_callback
-        self.logger = PrintLogger(os.path.join(self.results_path, 'evaluation.log'), verbose=verbose) if self.results_path is not None else None
-        self.metrics = [dice_coefficient(average='micro'), precision_coefficient(average='micro'), specificity_coefficient(average='micro'), 
-                        sensitivity_coefficient(average='micro'), iou_coefficient(average='micro'), volume_similarity_coefficient(average='micro')]
+        self.postprocessed_num_classes: int = 5
+        if postprocessed_num_classes is not None:
+            if not isinstance(postprocessed_num_classes, int) or postprocessed_num_classes < 1:
+                raise ValueError('postprocessed_num_classes must be a positive integer')
+            self.postprocessed_num_classes = postprocessed_num_classes
+        self.logger: PrintLogger = PrintLogger(verbose=verbose)
+        self.with_brain_mask: bool = True
+        self.evaluate_brain_mask: bool = False
+        factories = [dice_coefficient, precision_coefficient, specificity_coefficient,
+                     sensitivity_coefficient, iou_coefficient, volume_similarity_coefficient]
+        self.metrics: list[MetricFunction] = [factory(average='micro') for factory in factories]
 
-
-    def load_subject(self, subject_key):
+    def load_subject(self, subject_key: SubjectKey) -> Rodent:
+        """Retrieve a legacy or normalized loader record using its scan key."""
         return self.loader.get_subject(subject_key)
-    
-    def load_data(self, subject):        
-        # Extract images and masks
-        image, roi_ground_truth, brain_mask_ground_truth = subject.get_images()
-        return image, roi_ground_truth, brain_mask_ground_truth
-    
-    def evaluate(self, with_brain_mask=True, evaluate_brain_mask=False):
-        '''
-        Evaluate the model using random cropping inference.\n
-        The evaluation is performed for each stride and each modality.\n
-        Return a DataFrame with the metrics for each modality, subject and class.
-        '''
-        # Adding new parameters to the class
-        self.evaluate_brain_mask = evaluate_brain_mask
+
+    def load_data(self, subject: Rodent) -> tuple[Any, Any, Any]:
+        """Return image, ROI ground truth and optional brain ground truth."""
+        return subject.get_images()
+
+    def preprocess_data(self, image: Any, gt: Any) -> tuple[Any, Any]:
+        """Apply the configured spatial/intensity pipeline to image and labels."""
+        return self.preprocessor.preprocess(image, gt)
+
+    def get_unique_test_ids(self) -> tuple[list[SubjectKey], list[list[SubjectKey]]]:
+        """Deduplicate scan keys in input order and group by loader collection."""
+        unique: list[SubjectKey] = list(dict.fromkeys(self.test_ids))
+        groups: dict[str, list[SubjectKey]] = {modality: [] for modality in self.modalities}
+        for key in unique:
+            if not isinstance(key, tuple) or len(key) != 2 or key[0] not in groups:
+                raise ValueError(f'Unknown loader scan key: {key!r}')
+            self.load_subject(key)
+            groups[key[0]].append(key)
+        return unique, list(groups.values())
+
+    def evaluate(self, with_brain_mask: bool = True, evaluate_brain_mask: bool = False) -> pd.DataFrame:
+        """Evaluate all requested strides; path=None runs without disk reports."""
+        if evaluate_brain_mask and not with_brain_mask:
+            raise ValueError('Brain evaluation requires with_brain_mask=True')
         self.with_brain_mask = with_brain_mask
+        self.evaluate_brain_mask = evaluate_brain_mask
+        initial_stride: int = self.strides[0]
+        predictor = RandomCroppingPrediction(self.model, self.patch_size, self.num_classes,
+                                              initial_stride, self.threshold)
+        unique_ids, groups = self.get_unique_test_ids()
+        if not unique_ids:
+            raise ValueError('At least one evaluation scan is required')
 
-        croppingInference = RandomCroppingPrediction(self.model, self.patch_size, self.num_classes, self.strides, self.threshold)
-        unique_test_ids, unique_modality_test_ids = self.get_unique_test_ids()
-        self.test_ids = unique_test_ids
-
-        stride_metrics = []
-        for stride in self.strides:
-            self.logger.write(f'Evaluation for stride {stride}')
-            dataset_metrics = self.evaluate_dataset(stride, unique_modality_test_ids, croppingInference)
-            stride_metrics.append(dataset_metrics)
-
-        # Aggregate each set's metrics dataframe into a single dataframe
-        stride_metrics = pd.concat(stride_metrics, axis=0)
-        # Order by subject
-        stride_metrics.sort_index(inplace=True)
-
-        self.logger.write(tabulate(stride_metrics, headers='keys', tablefmt='psql'))
-
-        # Save the results in a excel file
+        log_path: str | None = None
         if self.results_path is not None:
-            stride_metrics.to_excel(os.path.join(self.results_path, 'evaluation_results.xlsx'))
+            self.results_path.mkdir(parents=True, exist_ok=True)
+            log_path = str(self.results_path / 'evaluation.log')
+        self.logger = PrintLogger(log_path, verbose=self.verbose)
+        try:
+            tables: list[pd.DataFrame] = []
+            for stride in self.strides:
+                self.logger.write(f'Evaluation for stride {stride}')
+                table = self.evaluate_dataset(stride, groups, predictor)
+                tables.append(table)
+            combined = pd.concat(tables).sort_index()
+            self._save_table(combined, 'evaluation_results.xlsx')
+            output_file: Path | None = None
+            if self.results_path is not None:
+                output_file = self.results_path / 'metrics_per_stride_and_modality.png'
+            return self.plot_all_metrics(combined, output_file)
+        finally:
+            self.logger.close()
 
-        # Plot all metrics
-        final_df = self.plot_all_metrics(stride_metrics, os.path.join(self.results_path, 'metrics_per_stride_and_modality.png'))
-        self.logger.close()
-        return final_df
-
-
-    def evaluate_dataset(self, stride, unique_modality_test_ids, croppingInference):
-        '''
-        Evaluate the dataset using random cropping inference.\n
-        Returns a DataFrame with the metrics for each modality, subject and class.
-        '''
+    def evaluate_dataset(self, stride: int, unique_modality_test_ids: Sequence[Sequence[SubjectKey]],
+                         croppingInference: RandomCroppingPrediction) -> pd.DataFrame:
+        """Combine per-scan tables, retaining their collection group and stride."""
         croppingInference.set_stride(stride)
-        
-        # Declare dataset dictionary to store 'stride', 'modality' and 'subject' metrics
-        dataset_metrics = []
-        for mod_idx, subjects in enumerate(unique_modality_test_ids):
-            # get current modality from dictionary converted to list
-            cur_modality = list(self.modalities)[mod_idx]
-
-            if len(subjects) == 0:
-                self.logger.write(f'No subjects for modality {cur_modality}')
+        tables: list[pd.DataFrame] = []
+        for modality, keys in zip(self.modalities, unique_modality_test_ids):
+            if not keys:
                 continue
-
-            self.logger.write(f'Evaluation for modality {cur_modality}')
-            subjects_metrics = []
-            for key in subjects:
+            subject_tables: list[pd.DataFrame] = []
+            for key in keys:
                 subject = self.load_subject(key)
                 self.logger.write(f'Evaluation for subject {subject.get_id()}')
-                subject_metrics_dataframe = self.compute_metrics_for_subject(subject, croppingInference)
-                subjects_metrics.append(subject_metrics_dataframe)
-            
-            if len(subjects_metrics) > 1:
-                # Concatenate all the dataframes
-                subjects_metrics = pd.concat(subjects_metrics, axis=0)
-            else:
-                # Create a DataFrame from the single element in the list
-                subjects_metrics = subjects_metrics[0]
-            
-            # Set the first column name as 'Metric'
-            subjects_metrics.index.name = 'Metric'
+                table = self.compute_metrics_for_subject(subject, croppingInference)
+                subject_tables.append(table)
+            combined = pd.concat(subject_tables)
+            combined.index.name = 'Metric'
+            if self.results_path is not None:
+                for metric in self.metrics:
+                    metric_rows = combined.loc[[metric.__name__]]
+                    suffix: str = f'_stride_{stride}_modality_{modality}'
+                    self.plot_subjects_metric_per_class(metric_rows, metric.__name__, suffix)
+            combined.insert(0, 'Stride', stride)
+            combined.insert(1, 'Modality', modality)
+            combined = combined.reset_index().set_index('Subject')
+            tables.append(combined)
+        if not tables:
+            raise ValueError('No matching scans to evaluate')
+        return pd.concat(tables)
 
-            # Plot the dice values for each class
+    def compute_metrics_for_subject(self, subject: Rodent,
+                                    croppingInference: RandomCroppingPrediction) -> pd.DataFrame:
+        """Prepare one scan without mutating the model's ROI channel count."""
+        image, roi_gt, brain_gt = self.load_data(subject)
+        ground_truth: Any = roi_gt
+        callback = self.roi_postprocess_callback
+        output_name: str = 'roi'
+        class_count: int = self.num_classes
+        if self.evaluate_brain_mask:
+            if brain_gt is None:
+                raise ValueError(f'{subject.get_id()}: brain ground truth is missing')
+            ground_truth = [roi_gt, brain_gt]
+            callback = self.brain_mask_postprocess_callback
+            output_name = 'brain_mask'
+            class_count = 1
+        elif callback is not None:
+            class_count = self.postprocessed_num_classes
+
+        processed_image, processed_gt = self.preprocess_data(image, ground_truth)
+        if self.evaluate_brain_mask:
+            processed_gt = processed_gt[1]
+        outputs = croppingInference.random_cropping_inference(processed_image, self.with_brain_mask)
+        prediction: Array = outputs[output_name]
+        if callback is not None:
+            prediction = callback(prediction)
+        reference: Array = processed_gt.get_fdata()
+        if reference.shape != prediction.shape:
+            raise ValueError('Prediction and preprocessed ground truth shapes differ')
+
+        if class_count > 1:
+            for values in (reference, prediction):
+                if not np.isfinite(values).all() or np.any(values != np.rint(values)) or np.any(values < 0) or np.any(values >= class_count):
+                    raise ValueError('Label values do not fit the evaluation class count; check mapping/postprocessed_num_classes')
+            # Indexing preserves singleton spatial axes that to_categorical can squeeze.
+            class_lookup: Array = np.eye(class_count, dtype=np.float32)
+            reference_indices: Array = reference.astype(np.int64)
+            prediction_indices: Array = prediction.astype(np.int64)
+            reference = class_lookup[reference_indices]
+            prediction = class_lookup[prediction_indices]
+        else:
+            reference = reference[..., np.newaxis]
+            prediction = (prediction[..., np.newaxis] >= self.threshold)
+        reference = reference[np.newaxis].astype(np.float32)
+        prediction = prediction[np.newaxis].astype(np.float32)
+        subject_id: str = subject.get_id()
+        return self.compute_metrics_per_class(reference, prediction, subject_id)
+
+    def compute_metrics_per_class(self, preprocessed_ground_truth: Array,
+                                  final_prediction: Array, id: str) -> pd.DataFrame:
+        """Apply the original metric callbacks independently to every class."""
+        if preprocessed_ground_truth.shape != final_prediction.shape:
+            raise ValueError('Encoded prediction and ground truth shapes differ')
+        subject_metrics: dict[str, Any] = {'Subject': id}
+        for class_index in range(final_prediction.shape[-1]):
+            reference: Array = preprocessed_ground_truth[..., class_index]
+            prediction: Array = final_prediction[..., class_index]
+            values: dict[str, float] = {}
             for metric in self.metrics:
-                # Extract rows with name equal to the current metric
-                sub_series = subjects_metrics.loc[metric.__name__]
-               
-                # If type not DataFrame, convert to DataFrame
-                if not isinstance(sub_series, pd.DataFrame):
-                    sub_series = pd.DataFrame(sub_series).T
-                
-                self.plot_subjects_metric_per_class(sub_series, metric.__name__, f'_stride_{stride}_modality_{cur_modality}')
-
-            # Insert the stride and modality columns to the left of the DataFrame
-            subjects_metrics.insert(0, 'Stride', stride)
-            subjects_metrics.insert(1, 'Modality', cur_modality)
-
-            # Move the 'Subject' column to the left of the DataFrame
-            subjects_metrics = subjects_metrics[['Subject', 'Stride', 'Modality'] + [col for col in subjects_metrics.columns if col not in ['Subject', 'Stride', 'Modality']]]
-            # Make subject the index and metric a column
-            subjects_metrics.reset_index(inplace=True)
-            subjects_metrics.set_index('Subject', inplace=True)
-
-            # Append the metrics for each modality to the dataset_metrics
-            dataset_metrics.append(subjects_metrics)
-
-        # Aggregate each modality's metrics dataframe into a single dataframe
-        dataset_metrics = pd.concat(dataset_metrics, axis=0)
-        self.logger.write(tabulate(dataset_metrics, headers='keys', tablefmt='psql'))
-
-        # Return the metrics in a DataFrame
-        return dataset_metrics
-
-    def compute_metrics_for_subject(self, subject, croppingInference):
-        '''
-        Compute the metrics for a single subject.
-        Returns a DataFrame with the metrics for each class.
-        '''
-        if self.evaluate_brain_mask:
-            image, seg_gt, mask_gt = self.load_data(subject)
-            processed_image, [preprocessed_gt, preprocessed_mask] = self.preprocess_data(image, [seg_gt, mask_gt])  
-        else:
-            image, seg_gt, _ = self.load_data(subject)
-            processed_image, preprocessed_gt = self.preprocess_data(image, seg_gt)
-
-        results = croppingInference.random_cropping_inference(processed_image, self.with_brain_mask)
-        fv_brain_mask = results['brain_mask'] if self.with_brain_mask else None
-        fv_roi_mask = results['roi']
-        
-        # Perform inference
-        if self.evaluate_brain_mask:
-            if self.brain_mask_postprocess_callback is not None:
-                prediction = self.brain_mask_postprocess_callback(fv_brain_mask)
-            prep_ground_truth = preprocessed_mask
-            self.num_classes = 1
-        else:
-            # post process the roi mask only if the brain mask is present
-            if self.roi_postprocess_callback is not None:
-                prediction = self.roi_postprocess_callback(fv_roi_mask)
-                self.num_classes = 5
-            prep_ground_truth = preprocessed_gt
-
-        # Prepare predictions for metric computation
-        final_prediction = np.expand_dims(prediction, axis=(0, -1))
-        if self.num_classes > 1:
-            final_prediction = tf.keras.utils.to_categorical(final_prediction, self.num_classes)
-        else:
-            final_prediction = (final_prediction >= self.threshold).astype(np.float32)
-
-        # Prepare ground truth data for metric computation
-        prep_gt_data = prep_ground_truth.get_fdata()
-        prep_gt_data = np.expand_dims(prep_gt_data, axis=0)
-
-        if self.num_classes > 1:
-            prep_gt_data = tf.keras.utils.to_categorical(prep_gt_data, self.num_classes)
-        else:
-            prep_gt_data = np.expand_dims(prep_gt_data, axis=-1)
-
-        # Ensure correct data types
-        final_prediction = final_prediction.astype(np.float32)
-        prep_gt_data = prep_gt_data.astype(np.float32)
-
-        # Compute and return metrics
-        class_df = self.compute_metrics_per_class(prep_gt_data, final_prediction, subject.get_id())
-        return class_df
-
-    def compute_metrics_per_class(self, preprocessed_ground_truth, final_prediction, id):
-        '''
-        For each class of the prediction, compute every metric in self.metrics and return the results in a dataframe.
-        '''
-
-        subject_metrics = { 'Subject': id }
-
-        for class_idx in range(self.num_classes):
-            class_gt = preprocessed_ground_truth[..., class_idx]
-            class_pred = final_prediction[..., class_idx]
-
-            # Compute the metrics for the current class and store them in the dictionary
-            metrics = {
-                metric.__name__: metric(class_gt, class_pred).numpy() for metric in self.metrics
-            }
-
-            subject_metrics[f'Class: {class_idx}'] = metrics
-
-        # Return the metrics in a DataFrame
+                values[metric.__name__] = float(metric(reference, prediction).numpy())
+            subject_metrics[f'Class: {class_index}'] = values
         return pd.DataFrame(subject_metrics)
-        
 
-    def preprocess_data(self, image, gt):
-        processed_image, processed_gt = self.preprocessor.preprocess(image, gt)
-        return processed_image, processed_gt
+    def _save_table(self, table: pd.DataFrame, filename: str) -> None:
+        """Write a report only when an output directory was requested."""
+        if self.results_path is not None:
+            destination: Path = self.results_path / filename
+            table.to_excel(destination)
 
-    def get_unique_test_ids(self):
-        unique_test_ids = []
-        unique_modality_test_ids = [[] for _ in range(len(self.modalities))]
-
-        for id in self.test_ids:
-            if id not in unique_test_ids:
-                unique_test_ids.append(id)
-                for index, modality in enumerate(self.modalities):
-                    if id[0] == modality:
-                        unique_modality_test_ids[index].append(id)
-
-        for index, modality in enumerate(self.modalities):
-            self.logger.write(f'Unique test ids for modality {modality}:\n - {unique_modality_test_ids[index]}')
-
-        return unique_test_ids, unique_modality_test_ids
-    
-    def plot_subjects_metric_per_class(self, subjects_df, metric, file_name):
-        '''
-        subjects_df: Dataframe containing the metrics for each class for each subject.
-        metric: the metric to plot.
-        file_name: the name of the file to save the plot.
-
-        Dataframe example:
-        ```
-        | Metric  | Subject  | Class 0  | Class 1  | Class 2  |
-        |---------|----------|----------|----------|----------|
-        |  Dice   | Subject 1| 0.8      | 0.7      | 0.6      |
-        |  Dice   | Subject 2| 0.9      | 0.8      | 0.7      |
-        |  Dice   | Subject 3| 0.7      | 0.6      | 0.5      |
-
-        '''
-        # Write the DataFrame to the log
-        self.logger.write(f'{metric} per subject per class')
+    def plot_subjects_metric_per_class(self, subjects_df: pd.DataFrame, metric: str, file_name: str) -> None:
+        """Export per-class plots without altering their source table."""
         self.logger.write(tabulate(subjects_df, headers='keys', tablefmt='psql'))
-
-        # Melting the DataFrame to convert it to long format for plotting
-        df = subjects_df.melt(id_vars='Subject', var_name='Class', value_name=metric)
-
-        # Create subplots
-        fig, axes = plt.subplots(1, 2, figsize=(15, 7))
-
-        # Plot bar plot with vertical x-axis labels
-        sns.pointplot(y=metric, x='Subject', data=df, ax=axes[0], palette='deep', hue='Class')
-        axes[0].set_title('Per class ' + metric)
-        axes[0].set_ylabel(metric)
-        axes[0].set_xlabel('Subject')
-        axes[0].tick_params(axis='x', rotation=90)
-
-        # Make legend size smaller
-        axes[0].legend(loc='lower left', title='Class', fontsize='small')
-
-        # Plot box plot
-        sns.boxplot(y=metric, hue='Class', data=df, ax=axes[1], palette='deep', legend=False)
-        axes[1].set_title('Boxplot ' + metric)
-        axes[1].set_xlabel('Class')
-        axes[1].set_ylabel(metric)
-        axes[1].tick_params(axis='x', rotation=90)
-        
-        # Title
-        fig.suptitle(metric + '_' + file_name)
-
-        plt.tight_layout()
-
-        # Save the combined figure
+        data = subjects_df.melt(id_vars='Subject', var_name='Class', value_name=metric)
+        figure, axes = plt.subplots(1, 2, figsize=(15, 7))
+        sns.pointplot(y=metric, x='Subject', data=data, ax=axes[0], palette='deep', hue='Class')
+        sns.boxplot(y=metric, hue='Class', data=data, ax=axes[1], palette='deep', legend=False)
+        for axis in axes:
+            axis.tick_params(axis='x', rotation=90)
+            axis.set_ylabel(metric)
+        figure.suptitle(metric + '_' + file_name)
+        figure.tight_layout()
         if self.results_path is not None:
-            # if none create the directory 'metrics per class'
-            save_path = os.path.join(self.results_path, 'metrics per class')
-            if not os.path.exists(save_path):
-                os.makedirs(save_path)
+            folder: Path = self.results_path / 'metrics per class'
+            folder.mkdir(parents=True, exist_ok=True)
+            stem: str = metric + '_' + file_name
+            figure.savefig(folder / f'{stem}.png')
+            subjects_df.to_excel(folder / f'{stem}.xlsx')
+        plt.close(figure)
 
-            plt.savefig(os.path.join(save_path, metric + '_' + file_name + '.png'))
-            # Save excel
-            subjects_df.to_excel(os.path.join(save_path, metric + '_' + file_name + '.xlsx'))
+    def plot_all_metrics(self, all_metrics_data: pd.DataFrame, output_file: str | Path | None) -> pd.DataFrame:
+        """Build the legacy report independently of plotting or disk output."""
+        self._save_table(all_metrics_data, 'all_metrics_data.xlsx')
+        tables: list[pd.DataFrame] = []
+        for metric in all_metrics_data['Metric'].unique():
+            subset = all_metrics_data.loc[all_metrics_data['Metric'] == metric].sort_index().copy()
+            class_columns = [column for column in subset if column.startswith('Class: ')]
+            subset['Mean'] = subset[class_columns].mean(axis=1)
+            subset = subset.reset_index()
+            tables.append(subset)
+        final = pd.concat(tables)
+        self._save_table(final, 'final_metrics.xlsx')
 
-        plt.close()
+        if output_file is not None:
+            rows: int = (len(tables) + 2) // 3
+            figure, axes = plt.subplots(rows, 3, figsize=(15, 5 * rows), squeeze=False)
+            for table, axis in zip(tables, axes.flat):
+                metric_name: str = table['Metric'].iloc[0]
+                self.plot_results(table, metric_name, axis)
+            for axis in list(axes.flat)[len(tables):]:
+                axis.set_visible(False)
+            figure.tight_layout()
+            figure.savefig(output_file)
+            plt.show()
+            plt.close(figure)
+        return final
 
-    def plot_all_metrics(self, all_metrics_data, output_file):
-        '''
-        all_metrics_data: a dataframe containing the metrics for each class for each subject for each modality for each stride.
-        output_file: filename to save the plot.
-        '''
-
-        all_metrics_data.to_excel(os.path.join(self.results_path, 'all_metrics_data.xlsx'))
-
-        # Calculate the number of metrics
-        num_metrics = len(self.metrics)
-
-        # Calculate the number of rows
-        num_rows = math.ceil(num_metrics / 3)
-
-        # Create a larger figure with subplots
-        fig, axes = plt.subplots(num_rows, 3, figsize=(15, 5*num_rows))
-
-        # Flatten axes if needed
-        axes = axes.flatten()
-
-        final_df = pd.DataFrame()
-        sub_df = []
-        # Iterate over each metric and corresponding data
-        for i, metric in enumerate(all_metrics_data['Metric'].unique()):
-            # Extract the rows with the current metric
-            metric_subset = all_metrics_data.loc[all_metrics_data['Metric'] == metric]
-
-            # order subjects, stride, modality
-            metric_subset.sort_index(inplace=True)
-            self.logger.write(tabulate(metric_subset, headers='keys', tablefmt='psql'))
-            sub_df.append(metric_subset)
-            # Plot the boxplot for the current metric on its corresponding subplot
-            self.plot_results(metric_subset, metric, axes[i])
-
-        # Concatenate all the dataframes
-        final_df = pd.concat(sub_df, axis=0)
-        self.logger.write(tabulate(final_df, headers='keys', tablefmt='psql'))
-        # Adjust layout and save the plot
-        plt.tight_layout()
-        plt.savefig(output_file)
-        plt.show()
-
-        # Save the final dataframe
-        if self.results_path is not None:
-            final_df.to_excel(os.path.join(self.results_path, 'final_metrics.xlsx'))
-
-        return final_df
-
-    def plot_results(self, stride_average_dices_df, metric, ax):
-        '''
-        stride_average_dices_df: DataFrame containing the average dice values for each set for each modality for each stride.
-        
-        Parameters:
-        metric: the metric to plot.
-        stride_average_dices_df: a DataFrame containing the average dice values for each set for each modality for each stride.
-        ax: subplot axes to plot the boxplot.
-
-        Dataframe example:
-        ```
-        | Subject  | Stride  | Modality  | Metric  | Class: 0 | Class: 1 | Class: 2 |
-        |----------|---------|-----------|---------|----------|----------|----------|
-        | Subject 1| 16      | T1        | Dice    | 0.8      | 0.7      | 0.6      |
-        | Subject 2| 16      | T1        | Dice    | 0.9      | 0.8      | 0.7      |
-        | Subject 3| 16      | T1        | Dice    | 0.7      | 0.6      | 0.5      |
-        ```
-        '''
-
-        # Calculate the index of the first class column
-        first_class_index = stride_average_dices_df.columns.get_loc('Class: 0')
-
-        # Condense all the Class columns into a single column with the mean
-        stride_average_dices_df['Mean'] = stride_average_dices_df.iloc[:, first_class_index:].mean(axis=1)
-
-        # Reset index to make 'Subject' a regular column
-        stride_average_dices_df.reset_index(inplace=True)
-
-        # Melt DataFrame to have a tidy format for plotting
-        melted_df = pd.melt(stride_average_dices_df, id_vars=['Subject', 'Stride', 'Modality', 'Metric'], value_vars=['Mean'], var_name='Class', value_name='Means')
-
-        # Plot using seaborn boxplot
-        sns.boxplot(x='Stride', y='Means', hue='Modality', data=melted_df, ax=ax, palette='deep')
-
-        # # Overlay the scatterplot
-        sns.stripplot(x='Stride', y='Means', hue='Modality', data=melted_df, dodge=True, jitter=True, color='black', ax=ax, alpha=0.5)
-
-        # Ensure the legend is not duplicated
+    def plot_results(self, stride_average_dices_df: pd.DataFrame, metric: str, ax: Axes) -> None:
+        """Plot means over explicit class columns without mutating the caller's table."""
+        data = stride_average_dices_df.copy()
+        if 'Subject' not in data.columns and data.index.name == 'Subject':
+            data = data.reset_index()
+        class_columns = [column for column in data if column.startswith('Class: ')]
+        data['Means'] = data[class_columns].mean(axis=1)
+        sns.boxplot(x='Stride', y='Means', hue='Modality', data=data, ax=ax, palette='deep')
+        sns.stripplot(x='Stride', y='Means', hue='Modality', data=data, dodge=True,
+                      jitter=True, palette='dark:black', ax=ax, alpha=0.5)
         handles, labels = ax.get_legend_handles_labels()
-        ax.legend(handles[:len(set(labels))], labels[:len(set(labels))],fontsize='small')
-
+        unique_count: int = len(set(labels))
+        ax.legend(handles[:unique_count], labels[:unique_count], fontsize='small')
         ax.set_title(f'{metric} per Stride')
         ax.set_xlabel('Stride')
         ax.set_ylabel(metric)
-

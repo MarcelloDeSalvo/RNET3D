@@ -160,6 +160,9 @@ See [Reviewer evaluation additions](docs/reviewer_evaluation.md) for full-volume
 surface/volume metrics, paired agreement diagnostics, and subject-level
 classification confidence intervals.
 
+See [Inference and full-volume evaluation](docs/inference.md) for patch
+aggregation, output-head contracts and optional evaluation reports.
+
 Open [Check preprocessing](notebook/check_preprocessing.ipynb) with the `rnet`
 kernel to sample normalized subjects, compare preprocessing variants, and inspect
 interactive image/mask overlays. Change `SUBJECT_INDEX` to inspect another sample.
