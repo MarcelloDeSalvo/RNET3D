@@ -175,3 +175,79 @@ def test_real_keras_single_roi_head():
     predictor = RandomCroppingPrediction(model, (4, 4, 4), 1, stride=4)
     result = predictor.random_cropping_inference(np.zeros((4, 4, 4)))
     np.testing.assert_array_equal(result['roi'], 1)
+
+
+def test_typed_prediction_keeps_false_classifier_and_legacy_dictionary():
+    from src.evaluation.inference_results import PredictionResult
+    roi = np.zeros((2, 2, 2))
+    result = PredictionResult(roi=roi, classifier=False)
+    assert result.as_dict()['classifier'] is False
+    assert result.as_dict()['roi'] is roi
+    assert 'brain_mask' not in result.as_dict()
+    predictor = RandomCroppingPrediction(ToyModel(), (4, 4, 4), 2, stride=2)
+    typed = predictor.predict(np.ones((4, 4, 4)), True, True)
+    legacy = predictor.random_cropping_inference(np.ones((4, 4, 4)), True, True)
+    assert isinstance(typed, PredictionResult)
+    for key, value in typed.as_dict().items():
+        np.testing.assert_array_equal(value, legacy[key])
+
+
+def test_computation_does_not_create_reports_even_with_output_path(evaluation_data, tmp_path, monkeypatch):
+    import matplotlib.pyplot as plt
+    from src.evaluation.inference_results import EvaluationResult
+
+    def unexpected_plot(*args, **kwargs):
+        pytest.fail('Computation must not invoke plotting/report code')
+    folder = tmp_path / 'reports'
+    evaluator = make_evaluator(evaluation_data, path=folder)
+    monkeypatch.setattr(evaluator, '_report_writer', unexpected_plot)
+    monkeypatch.setattr(plt, 'subplots', unexpected_plot)
+    result = evaluator.compute(with_brain_mask=False)
+    assert isinstance(result, EvaluationResult)
+    assert len(result.metrics) == len(result.summary) == 24
+    assert result.metrics.index.name == 'Subject'
+    assert 'Mean' not in result.metrics and 'Mean' in result.summary
+    assert not folder.exists()
+
+
+def test_evaluation_result_owns_copies_and_computes_only_class_means():
+    from src.evaluation.inference_results import EvaluationResult
+    raw = pd.DataFrame({'Subject': ['s1', 's1'], 'Metric': ['dice', 'precision'],
+                        'Stride': [16, 16], 'Modality': ['D1_T1w', 'D1_T1w'],
+                        'Class: 0': [1., 0.5], 'Class: 1': [0.5, 0.25],
+                        'ExtraNumber': [1000, 1000]}).set_index('Subject')
+    before = raw.copy(deep=True)
+    result = EvaluationResult.from_metrics(raw)
+    np.testing.assert_array_equal(result.summary['Mean'], [0.75, 0.375])
+    pd.testing.assert_frame_equal(raw, before)
+    raw.iloc[0, raw.columns.get_loc('Class: 0')] = 0
+    assert result.metrics.iloc[0]['Class: 0'] == 1
+    assert result.summary.iloc[0]['Class: 0'] == 1
+
+
+def test_typed_result_and_legacy_evaluation_match(evaluation_data):
+    evaluator = make_evaluator(evaluation_data)
+    typed = evaluator.evaluate_result(with_brain_mask=False, show=False)
+    computed = evaluator.compute(with_brain_mask=False)
+    legacy = evaluator.evaluate(with_brain_mask=False)
+    pd.testing.assert_frame_equal(typed.summary, computed.summary)
+    pd.testing.assert_frame_equal(typed.summary, legacy)
+
+
+def test_writer_plots_computed_means_without_recalculating(evaluation_data, monkeypatch):
+    import matplotlib.pyplot as plt
+    import src.evaluation.inference_plotting as plotting
+    from src.evaluation.inference_results import EvaluationResult
+
+    captured = []
+    monkeypatch.setattr(plotting.sns, 'boxplot', lambda **kwargs: captured.append(kwargs['data']['Mean'].tolist()))
+    monkeypatch.setattr(plotting.sns, 'stripplot', lambda **kwargs: None)
+    raw = pd.DataFrame({'Subject': ['s1'], 'Metric': ['dice'], 'Stride': [16],
+                        'Modality': ['D1_T1w'], 'Class: 0': [1.], 'Class: 1': [0.5]}).set_index('Subject')
+    result = EvaluationResult.from_metrics(raw)
+    result.summary['Mean'] = 0.123
+    figure, axis = plt.subplots()
+    writer = plotting.EvaluationReportWriter()
+    writer.plot_results(result.summary, 'dice', axis)
+    assert captured == [[0.123]]
+    plt.close(figure)

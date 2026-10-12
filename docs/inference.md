@@ -56,13 +56,50 @@ One-hot encoding preserves singleton spatial axes. Returned report columns
 include per-class values and the historical Mean over all class columns,
 including background. That mean does not replace structure-specific reports.
 
+## Result types and separate reporting
+
+`inference_results.py` owns two small dataclasses:
+
+- `PredictionResult`: ROI labels, optional brain mask and optional classifier
+  decision. `predict(...)` returns this type; `random_cropping_inference(...)`
+  adapts it to the existing dictionary format.
+- `EvaluationResult`: `metrics` is the raw scan table with a Subject index;
+  `summary` contains Subject as a column and the computed class Mean. Building
+  a result copies input tables. The DataFrames themselves remain mutable.
+
+`inference_plotting.py` owns `EvaluationReportWriter`: writing Excel tables,
+per-class plots and the summary figure. It receives computed results, owns no
+model, and does not recompute metrics or class means. Plotting imports are loaded
+by inference only when a plot/report is requested.
+
+```python
+# Computation only, including when the evaluator has a configured output path.
+result = evaluator.compute(with_brain_mask=False)
+raw_metrics = result.metrics
+summary = result.summary
+
+# Optional export without repeating model inference.
+from src.evaluation.inference_plotting import EvaluationReportWriter
+
+writer = EvaluationReportWriter("results/inference")
+writer.write(result, show=False)
+```
+
+`evaluate_result(..., show=False)` combines computation with configured reporting
+and returns the dataclass. `evaluate(...)` still returns the summary DataFrame
+and preserves automatic reporting when a path is set. Existing plotting methods
+on the evaluator remain compatibility adapters. `compute()` creates no files or
+plots; verbose progress messages can still be printed. Logging during the
+combined reporting entry point retains the existing evaluation log.
+
 ## Verification
 
-22 focused tests cover head formats, padding, repeated edge patches, classifier
+27 focused tests cover head formats, padding, repeated edge patches, classifier
 votes/ties, invalid strides, missing outputs, path-optional/repeated evaluation,
 brain-to-ROI evaluation, report exports, table immutability, singleton spatial
-axes and a real Keras single-output model. Direct comparison against the previous
-committed implementation passed exactly for 36 synthetic configurations,
-including ROI/brain/classifier outputs and prediction-call counts. The file is
-about 20% shorter. The legacy notebook import (`evaluation.inference` with src
+axes, a real Keras single-output model, typed/dictionary conversion, copied
+result tables and computation/reporting separation. The preceding prediction
+refactor also passed exact comparisons for 36 synthetic configurations,
+including ROI/brain/classifier outputs and prediction-call counts. The legacy
+notebook import (`evaluation.inference` with src
 on sys.path) and repository import (`src.evaluation.inference`) both work.
