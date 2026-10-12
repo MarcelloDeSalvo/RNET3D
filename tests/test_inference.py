@@ -1,4 +1,4 @@
-﻿"""Sliding-window inference and repeatable, path-optional evaluation checks."""
+"""Sliding-window inference and repeatable, path-optional evaluation checks."""
 
 import matplotlib
 matplotlib.use('Agg')
@@ -7,7 +7,10 @@ import nibabel as nib
 import pandas as pd
 import pytest
 
-from src.evaluation.inference import RandomCroppingPrediction, FullVolumeEvaluation
+from src.evaluation.inference import (
+    RandomCroppingPrediction, FullVolumeEvaluation, PredictionResult,
+    EvaluationResult, EvaluationReportWriter,
+)
 from src.utils.loader import Rodent, RodentDatasets
 
 
@@ -37,10 +40,10 @@ def test_output_heads_padding_and_original_shape(shape, mode):
     model = ToyModel(mode)
     predictor = RandomCroppingPrediction(model, (4, 4, 4), 2, stride=2)
     volume = np.ones(shape)
-    result = predictor.random_cropping_inference(volume)
-    assert result['roi'].shape == shape
-    assert result['roi'].dtype == np.float64
-    assert set(np.unique(result['roi'])).issubset({0, 1})
+    result = predictor.predict(volume)
+    assert result.roi.shape == shape
+    assert result.roi.dtype == np.float64
+    assert set(np.unique(result.roi)).issubset({0, 1})
     np.testing.assert_array_equal(volume, 1)
 
 
@@ -50,10 +53,10 @@ def test_historical_duplicate_edge_patches_and_head_equivalence():
     for mode in ('multi', 'dict'):
         model = ToyModel(mode)
         predictor = RandomCroppingPrediction(model, (4, 4, 4), 2, stride=2)
-        results.append(predictor.random_cropping_inference(volume, True, True))
+        results.append(predictor.predict(volume, True, True))
         assert model.calls == 8  # Existing 2 x 2 x 2 repeated-edge schedule.
     for head in ('roi', 'brain_mask', 'classifier'):
-        np.testing.assert_array_equal(results[0][head], results[1][head])
+        np.testing.assert_array_equal(getattr(results[0], head), getattr(results[1], head))
 
 
 def test_classifier_uses_patch_votes_and_strict_tie_rule():
@@ -75,7 +78,7 @@ def test_invalid_or_gapped_stride_fails_early(stride):
 def test_missing_requested_head_has_clear_error():
     predictor = RandomCroppingPrediction(ToyModel('single'), (4, 4, 4), 2, stride=2)
     with pytest.raises(ValueError, match='brain_mask'):
-        predictor.random_cropping_inference(np.ones((4, 4, 4)), with_brain_mask=True)
+        predictor.predict(np.ones((4, 4, 4)), with_brain_mask=True)
 
 
 @pytest.fixture
@@ -106,8 +109,8 @@ def make_evaluator(loader, path=None, callback=None):
 
 def test_evaluation_without_callbacks_or_output_path_is_repeatable(evaluation_data):
     evaluator = make_evaluator(evaluation_data)
-    first = evaluator.evaluate(with_brain_mask=False)
-    second = evaluator.evaluate(with_brain_mask=False)
+    first = evaluator.evaluate(with_brain_mask=False).summary
+    second = evaluator.evaluate(with_brain_mask=False).summary
     pd.testing.assert_frame_equal(first, second)
     assert evaluator.num_classes == 2
     assert set(first['Subject']) == {'SUBJ_0000', 'SUBJ_0001'}
@@ -118,16 +121,16 @@ def test_evaluation_without_callbacks_or_output_path_is_repeatable(evaluation_da
 
 def test_postprocessing_does_not_change_model_channel_count(evaluation_data):
     evaluator = make_evaluator(evaluation_data, callback=lambda mask: mask)
-    actual = evaluator.evaluate(with_brain_mask=False)
+    actual = evaluator.evaluate(with_brain_mask=False).summary
     assert evaluator.num_classes == 2
     assert len(actual) == 24
 
 
 def test_brain_evaluation_then_roi_evaluation_keeps_class_counts(evaluation_data):
     evaluator = make_evaluator(evaluation_data)
-    brain = evaluator.evaluate(with_brain_mask=True, evaluate_brain_mask=True)
+    brain = evaluator.evaluate(with_brain_mask=True, evaluate_brain_mask=True).summary
     assert 'Class: 1' not in brain
-    roi = evaluator.evaluate(with_brain_mask=False)
+    roi = evaluator.evaluate(with_brain_mask=False).summary
     assert 'Class: 1' in roi
     assert evaluator.num_classes == 2
 
@@ -136,14 +139,14 @@ def test_reports_do_not_mutate_input_tables(evaluation_data, tmp_path, monkeypat
     import matplotlib.pyplot as plt
     monkeypatch.setattr(plt, 'show', lambda: None)
     evaluator = make_evaluator(evaluation_data, path=tmp_path / 'new_reports')
-    result = evaluator.evaluate(with_brain_mask=False)
+    result = evaluator.evaluate(with_brain_mask=False).summary
     assert len(result) == 24
     assert (tmp_path / 'new_reports' / 'final_metrics.xlsx').is_file()
     assert (tmp_path / 'new_reports' / 'evaluation.log').is_file()
     assert evaluator.logger.log.closed
     before = result.copy(deep=True)
     figure, axis = plt.subplots()
-    evaluator.plot_results(result, 'test', axis)
+    EvaluationReportWriter().plot_results(result, 'test', axis)
     pd.testing.assert_frame_equal(result, before)
     plt.close(figure)
     assert not plt.get_fignums()
@@ -173,34 +176,31 @@ def test_real_keras_single_roi_head():
     probabilities = tf.keras.layers.Activation('sigmoid')(inputs)
     model = tf.keras.Model(inputs, probabilities)
     predictor = RandomCroppingPrediction(model, (4, 4, 4), 1, stride=4)
-    result = predictor.random_cropping_inference(np.zeros((4, 4, 4)))
-    np.testing.assert_array_equal(result['roi'], 1)
+    result = predictor.predict(np.zeros((4, 4, 4)))
+    np.testing.assert_array_equal(result.roi, 1)
 
 
-def test_typed_prediction_keeps_false_classifier_and_legacy_dictionary():
-    from src.evaluation.inference_results import PredictionResult
+def test_typed_prediction_retains_optional_outputs_and_false_classifier():
     roi = np.zeros((2, 2, 2))
     result = PredictionResult(roi=roi, classifier=False)
-    assert result.as_dict()['classifier'] is False
-    assert result.as_dict()['roi'] is roi
-    assert 'brain_mask' not in result.as_dict()
+    assert result.classifier is False
+    assert result.roi is roi
+    assert result.brain_mask is None
     predictor = RandomCroppingPrediction(ToyModel(), (4, 4, 4), 2, stride=2)
     typed = predictor.predict(np.ones((4, 4, 4)), True, True)
-    legacy = predictor.random_cropping_inference(np.ones((4, 4, 4)), True, True)
     assert isinstance(typed, PredictionResult)
-    for key, value in typed.as_dict().items():
-        np.testing.assert_array_equal(value, legacy[key])
+    assert typed.brain_mask.shape == typed.roi.shape == (4, 4, 4)
+    assert isinstance(typed.classifier, bool)
 
 
 def test_computation_does_not_create_reports_even_with_output_path(evaluation_data, tmp_path, monkeypatch):
     import matplotlib.pyplot as plt
-    from src.evaluation.inference_results import EvaluationResult
 
     def unexpected_plot(*args, **kwargs):
         pytest.fail('Computation must not invoke plotting/report code')
     folder = tmp_path / 'reports'
     evaluator = make_evaluator(evaluation_data, path=folder)
-    monkeypatch.setattr(evaluator, '_report_writer', unexpected_plot)
+    monkeypatch.setattr(EvaluationReportWriter, 'write', unexpected_plot)
     monkeypatch.setattr(plt, 'subplots', unexpected_plot)
     result = evaluator.compute(with_brain_mask=False)
     assert isinstance(result, EvaluationResult)
@@ -211,7 +211,6 @@ def test_computation_does_not_create_reports_even_with_output_path(evaluation_da
 
 
 def test_evaluation_result_owns_copies_and_computes_only_class_means():
-    from src.evaluation.inference_results import EvaluationResult
     raw = pd.DataFrame({'Subject': ['s1', 's1'], 'Metric': ['dice', 'precision'],
                         'Stride': [16, 16], 'Modality': ['D1_T1w', 'D1_T1w'],
                         'Class: 0': [1., 0.5], 'Class: 1': [0.5, 0.25],
@@ -225,19 +224,16 @@ def test_evaluation_result_owns_copies_and_computes_only_class_means():
     assert result.summary.iloc[0]['Class: 0'] == 1
 
 
-def test_typed_result_and_legacy_evaluation_match(evaluation_data):
+def test_evaluation_and_computation_results_match(evaluation_data):
     evaluator = make_evaluator(evaluation_data)
-    typed = evaluator.evaluate_result(with_brain_mask=False, show=False)
+    typed = evaluator.evaluate(with_brain_mask=False, show=False)
     computed = evaluator.compute(with_brain_mask=False)
-    legacy = evaluator.evaluate(with_brain_mask=False)
     pd.testing.assert_frame_equal(typed.summary, computed.summary)
-    pd.testing.assert_frame_equal(typed.summary, legacy)
 
 
 def test_writer_plots_computed_means_without_recalculating(evaluation_data, monkeypatch):
     import matplotlib.pyplot as plt
-    import src.evaluation.inference_plotting as plotting
-    from src.evaluation.inference_results import EvaluationResult
+    import src.evaluation.inference as plotting
 
     captured = []
     monkeypatch.setattr(plotting.sns, 'boxplot', lambda **kwargs: captured.append(kwargs['data']['Mean'].tolist()))

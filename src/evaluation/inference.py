@@ -1,4 +1,4 @@
-"""Sliding-window predictions and legacy full-volume evaluation reports.
+"""Sliding-window predictions and typed full-volume evaluation reports.
 
 Inputs must already share the intended preprocessing/orientation. Model heads
 must return probabilities. ROI logits from gradient-fixed training require an
@@ -8,32 +8,28 @@ patches retain the historical weighting; classifier output is a majority vote.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from itertools import product
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeAlias
 
+import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
+import seaborn as sns
 import nibabel as nib
 import numpy as np
 from numpy.typing import NDArray
 import pandas as pd
 import tensorflow as tf
 
-from .inference_results import EvaluationResult, PredictionResult
-
 from .metrics import (
     MetricFunction, dice_coefficient, precision_coefficient, specificity_coefficient,
     sensitivity_coefficient, iou_coefficient, volume_similarity_coefficient,
 )
 
-# Support both repository imports and historical notebooks with src on sys.path.
-if __package__ == 'evaluation':
-    from utils.logger import PrintLogger
-else:
-    from ..utils.logger import PrintLogger
+from ..utils.logger import PrintLogger
 
 if TYPE_CHECKING:
-    from matplotlib.axes import Axes
-    from .inference_plotting import EvaluationReportWriter
     from ..utils.loader import Rodent, RodentDatasets, SubjectKey
     from ..preprocessing.preprocessor import Preprocessor
 
@@ -48,11 +44,152 @@ def _spatial_slices(start: Sequence[int], end: Sequence[int]) -> tuple[slice, ..
     return tuple(slice(first, last) for first, last in zip(start, end))
 
 
+@dataclass(frozen=True)
+class PredictionResult:
+    """Full-volume ROI labels and optional brain/classification outputs."""
+
+    roi: NDArray[Any]
+    brain_mask: NDArray[Any] | None = None
+    classifier: bool | None = None
+
+@dataclass(frozen=True)
+class EvaluationResult:
+    """Raw scan metrics and the per-metric summary with class means.
+
+    metrics has a Subject index and Metric/Stride/Modality/class columns.
+    summary has Subject as a column plus Mean over all class columns, including
+    background. Frames are ordinary mutable pandas objects, not immutable data.
+    No timepoint, subject, stride or fold aggregation is performed.
+    """
+
+    metrics: pd.DataFrame
+    summary: pd.DataFrame
+
+    @staticmethod
+    def with_class_means(table: pd.DataFrame) -> pd.DataFrame:
+        """Add a Mean column to a copy, using only explicitly named class columns."""
+        class_columns: list[str] = [column for column in table if column.startswith('Class: ')]
+        if not class_columns:
+            raise ValueError('Evaluation tables require at least one class column')
+        result: pd.DataFrame = table.copy(deep=True)
+        result['Mean'] = result[class_columns].mean(axis=1)
+        return result
+
+    @classmethod
+    def from_metrics(cls, metrics: pd.DataFrame) -> EvaluationResult:
+        """Copy validated metric rows and calculate class means without plotting."""
+        required: set[str] = {'Metric', 'Stride', 'Modality'}
+        if metrics.empty or metrics.index.name != 'Subject' or not required.issubset(metrics.columns):
+            raise ValueError('Expected nonempty metrics with a Subject index and Metric/Stride/Modality columns')
+        raw: pd.DataFrame = metrics.copy(deep=True)
+        tables: list[pd.DataFrame] = []
+        for metric in raw['Metric'].unique():
+            subset: pd.DataFrame = raw.loc[raw['Metric'] == metric].sort_index()
+            subset = cls.with_class_means(subset)
+            tables.append(subset.reset_index())
+        summary: pd.DataFrame = pd.concat(tables)
+        return cls(raw, summary)
+
+
+class EvaluationReportWriter:
+    """Save tables and draw reports without owning models or computing metrics."""
+
+    def __init__(self, output_dir: str | Path | None = None) -> None:
+        """Store an optional output folder; create it only when writing files."""
+        self.output_dir: Path | None = None
+        if output_dir is not None:
+            self.output_dir = Path(output_dir)
+
+    def save_table(self, table: pd.DataFrame, filename: str) -> None:
+        """Write an Excel table when a destination is configured."""
+        if self.output_dir is not None:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            destination: Path = self.output_dir / filename
+            table.to_excel(destination)
+
+    def write(self, result: EvaluationResult, *, show: bool = True) -> None:
+        """Export existing raw/summary values, per-class plots and the overall plot."""
+        if self.output_dir is None:
+            raise ValueError('An output directory is required to write a report')
+        self.save_table(result.metrics, 'evaluation_results.xlsx')
+        self.save_table(result.metrics, 'all_metrics_data.xlsx')
+        self.save_table(result.summary, 'final_metrics.xlsx')
+
+        rows: pd.DataFrame = result.metrics.reset_index()
+        class_columns: list[str] = [column for column in rows if column.startswith('Class: ')]
+        selection: list[str] = ['Subject', *class_columns]
+        for (stride, modality, metric), group in rows.groupby(['Stride', 'Modality', 'Metric'], sort=False):
+            per_class: pd.DataFrame = group.loc[:, selection].copy()
+            per_class.index = pd.Index([metric] * len(per_class), name='Metric')
+            suffix: str = f'_stride_{stride}_modality_{modality}'
+            self.plot_subjects_metric_per_class(per_class, metric, suffix)
+
+        output_file: Path = self.output_dir / 'metrics_per_stride_and_modality.png'
+        self.plot_summary(result.summary, output_file, show=show)
+
+    def plot_subjects_metric_per_class(self, subjects_df: pd.DataFrame, metric: str, file_name: str) -> None:
+        """Draw per-class scores from a copy and optionally export their table."""
+        data: pd.DataFrame = subjects_df.melt(id_vars='Subject', var_name='Class', value_name=metric)
+        figure, axes = plt.subplots(1, 2, figsize=(15, 7))
+        try:
+            sns.pointplot(y=metric, x='Subject', data=data, ax=axes[0], palette='deep', hue='Class')
+            sns.boxplot(y=metric, hue='Class', data=data, ax=axes[1], palette='deep', legend=False)
+            for axis in axes:
+                axis.tick_params(axis='x', rotation=90)
+                axis.set_ylabel(metric)
+            figure.suptitle(metric + '_' + file_name)
+            figure.tight_layout()
+            if self.output_dir is not None:
+                folder: Path = self.output_dir / 'metrics per class'
+                folder.mkdir(parents=True, exist_ok=True)
+                stem: str = metric + '_' + file_name
+                figure.savefig(folder / f'{stem}.png')
+                subjects_df.to_excel(folder / f'{stem}.xlsx')
+        finally:
+            plt.close(figure)
+
+    def plot_summary(self, summary: pd.DataFrame, output_file: str | Path, *, show: bool = True) -> None:
+        """Plot an already-computed summary, keeping all supplied values intact."""
+        groups = list(summary.groupby('Metric', sort=False))
+        if not groups:
+            raise ValueError('Cannot plot an empty evaluation summary')
+        rows: int = (len(groups) + 2) // 3
+        figure, axes = plt.subplots(rows, 3, figsize=(15, 5 * rows), squeeze=False)
+        try:
+            for (metric, table), axis in zip(groups, axes.flat):
+                self.plot_results(table, metric, axis)
+            for axis in list(axes.flat)[len(groups):]:
+                axis.set_visible(False)
+            figure.tight_layout()
+            figure.savefig(output_file)
+            if show:
+                plt.show()
+        finally:
+            plt.close(figure)
+
+    def plot_results(self, data: pd.DataFrame, metric: str, ax: Axes) -> None:
+        """Draw computed Mean scores across strides and collection groups."""
+        data = data.copy()
+        if 'Subject' not in data.columns and data.index.name == 'Subject':
+            data = data.reset_index()
+        if 'Mean' not in data.columns:
+            raise ValueError('Plotting requires a computed Mean column')
+        sns.boxplot(x='Stride', y='Mean', hue='Modality', data=data, ax=ax, palette='deep')
+        sns.stripplot(x='Stride', y='Mean', hue='Modality', data=data, dodge=True,
+                      jitter=True, palette='dark:black', ax=ax, alpha=0.5)
+        handles, labels = ax.get_legend_handles_labels()
+        unique_count: int = len(set(labels))
+        ax.legend(handles[:unique_count], labels[:unique_count], fontsize='small')
+        ax.set_title(f'{metric} per Stride')
+        ax.set_xlabel('Stride')
+        ax.set_ylabel(metric)
+
+
 class RandomCroppingPrediction:
     """Average overlapping patches from a single-channel 3D input.
 
-    Despite its historical name, the inference grid is deterministic. Public
-    helper methods remain available. ROI decisions use argmax or >= threshold;
+    Despite its historical name, the inference grid is deterministic. Patch probabilities are
+    accumulated in float64. ROI decisions use argmax or >= threshold;
     classifier patch votes use >0.5 and ties in the final vote are false.
     """
 
@@ -255,13 +392,6 @@ class RandomCroppingPrediction:
         roi_mask: Array = self.calculate_final_prediction(sums, counts, original_shape)
         return PredictionResult(roi=roi_mask, brain_mask=brain_mask, classifier=classifier_output)
 
-    def random_cropping_inference(self, input_img: ImageInput, with_brain_mask: bool = False,
-                                 with_classifier: bool = False) -> dict[str, Array | bool]:
-        """Retain the notebook dictionary API through the typed prediction result."""
-        result: PredictionResult = self.predict(input_img, with_brain_mask, with_classifier)
-        return result.as_dict()
-
-
 
 class FullVolumeEvaluation:
     """Evaluate scan-level legacy overlap metrics and optionally write reports.
@@ -357,7 +487,7 @@ class FullVolumeEvaluation:
         combined: pd.DataFrame = pd.concat(tables).sort_index()
         return EvaluationResult.from_metrics(combined)
 
-    def evaluate_result(self, with_brain_mask: bool = True, evaluate_brain_mask: bool = False,
+    def evaluate(self, with_brain_mask: bool = True, evaluate_brain_mask: bool = False,
                         *, show: bool = True) -> EvaluationResult:
         """Compute typed results and optionally export them with the report writer."""
         log_path: str | None = None
@@ -368,16 +498,11 @@ class FullVolumeEvaluation:
         try:
             result: EvaluationResult = self.compute(with_brain_mask, evaluate_brain_mask)
             if self.results_path is not None:
-                writer = self._report_writer()
+                writer: EvaluationReportWriter = EvaluationReportWriter(self.results_path)
                 writer.write(result, show=show)
             return result
         finally:
             self.logger.close()
-
-    def evaluate(self, with_brain_mask: bool = True, evaluate_brain_mask: bool = False) -> pd.DataFrame:
-        """Retain the legacy DataFrame API and optional automatic disk reporting."""
-        result: EvaluationResult = self.evaluate_result(with_brain_mask, evaluate_brain_mask)
-        return result.summary
 
     def evaluate_dataset(self, stride: int, unique_modality_test_ids: Sequence[Sequence[SubjectKey]],
                          croppingInference: RandomCroppingPrediction) -> pd.DataFrame:
@@ -468,37 +593,3 @@ class FullVolumeEvaluation:
                 values[metric.__name__] = float(metric(reference, prediction).numpy())
             subject_metrics[f'Class: {class_index}'] = values
         return pd.DataFrame(subject_metrics)
-
-    def _report_writer(self) -> EvaluationReportWriter:
-        """Load plotting dependencies only when a report or plot is requested."""
-        from .inference_plotting import EvaluationReportWriter
-
-        return EvaluationReportWriter(self.results_path)
-
-    def _save_table(self, table: pd.DataFrame, filename: str) -> None:
-        """Compatibility adapter for the separate report writer."""
-        writer = self._report_writer()
-        writer.save_table(table, filename)
-
-    def plot_subjects_metric_per_class(self, subjects_df: pd.DataFrame, metric: str, file_name: str) -> None:
-        """Compatibility adapter for per-class plotting."""
-        writer = self._report_writer()
-        writer.plot_subjects_metric_per_class(subjects_df, metric, file_name)
-
-    def plot_all_metrics(self, all_metrics_data: pd.DataFrame, output_file: str | Path | None) -> pd.DataFrame:
-        """Build typed tables, then delegate legacy export/plot requests."""
-        result: EvaluationResult = EvaluationResult.from_metrics(all_metrics_data)
-        writer = self._report_writer()
-        writer.save_table(result.metrics, 'all_metrics_data.xlsx')
-        writer.save_table(result.summary, 'final_metrics.xlsx')
-        if output_file is not None:
-            writer.plot_summary(result.summary, output_file)
-        return result.summary
-
-    def plot_results(self, stride_average_dices_df: pd.DataFrame, metric: str, ax: Axes) -> None:
-        """Adapt legacy raw tables to the computed summary expected by plotting."""
-        data: pd.DataFrame = stride_average_dices_df
-        if 'Mean' not in data.columns:
-            data = EvaluationResult.with_class_means(data)
-        writer = self._report_writer()
-        writer.plot_results(data, metric, ax)

@@ -113,6 +113,8 @@ training config is not a substitute for the inference config.
 
 The existing `FullVolumeEvaluation` is not a drop-in factory: it needs those
 additional arguments and reports scan identities. An evaluator wrapper should
+return `FullVolumeEvaluation.evaluate(...).summary` to satisfy the DataFrame
+contract now that inference returns typed results. It should also
 map each `(Modality, Subject)` scan key through `subjects.subject_for_scan(key)`
 into canonical `Subject` values, retaining separate scan/timepoint columns.
 The runner accepts either a `Subject` column or a named `Subject` index and
