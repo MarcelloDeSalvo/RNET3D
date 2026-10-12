@@ -5,6 +5,7 @@ from __future__ import annotations
 import abc
 import json
 import warnings
+from itertools import product
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, TypeAlias
@@ -172,6 +173,40 @@ def _lps_geometry(image: NiftiImage) -> tuple[tuple, tuple, NDArray[np.float64]]
         raise ValueError("ITK/ANTs transforms require an orthogonal grid; resample sheared images first")
 
     return tuple(affine[:3, 3]), tuple(spacing), direction
+
+
+def _orthogonal_grid(image: NiftiImage, spacing: Sequence[float]) -> tuple[Coordinates, NDArray[np.float64]]:
+    """Cover the source voxel edges with the closest orthogonal axis basis.
+
+    Polar decomposition preserves obliquity and handedness while removing shear.
+    Projected corner bounds prevent clipping the source field of view. The new
+    grid shares the source physical centre; it does not merely edit the header.
+    """
+    source_spacing = nib.affines.voxel_sizes(image.affine)
+    source_direction = image.affine[:3, :3] / source_spacing
+    left, _, right = np.linalg.svd(source_direction)
+    direction = left @ right
+
+    limits = [(-0.5, size - 0.5) for size in image.shape]
+    voxel_corners = np.asarray(list(product(*limits)))
+    world_corners = nib.affines.apply_affine(image.affine, voxel_corners)
+    projected_corners = world_corners @ direction
+    physical_extent = np.ptp(projected_corners, axis=0)
+    extent = physical_extent / np.asarray(spacing)
+    rounded_extent = np.rint(extent)
+    near_integer = np.isclose(extent, rounded_extent, rtol=1e-6, atol=0)
+    extent = np.where(near_integer, rounded_extent, extent)
+    shape_values = np.maximum(1, np.ceil(extent)).astype(int)
+    shape: Coordinates = tuple(shape_values)
+
+    source_center = (np.asarray(image.shape) - 1) / 2
+    center = nib.affines.apply_affine(image.affine, source_center)
+    target_center = (shape_values - 1) / 2
+    affine: NDArray[np.float64] = np.eye(4)
+    affine[:3, :3] = direction * np.asarray(spacing)
+    affine[:3, 3] = center - affine[:3, :3] @ target_center
+
+    return shape, affine
 
 
 def _configuration(value: Any) -> Any:
@@ -381,11 +416,18 @@ class Preprocessor:
 
 
 class Resample(PreprocessingStep):
-    """Change voxel spacing: linear for images, nearest-neighbor for masks."""
+    """Change spacing, optionally removing shear before physical transforms.
+
+    Linear interpolation is the image default; masks always use nearest-neighbour.
+    Existing callers preserve their grid directions unless orthogonal=True.
+    """
 
     spatial = True
 
-    def __init__(self, target_resolution: Sequence[float], interpolation: int = 1, verbose: bool = False) -> None:
+    def __init__(
+        self, target_resolution: Sequence[float], interpolation: int = 1,
+        verbose: bool = False, *, orthogonal: bool = False,
+    ) -> None:
         """Validate and store the settings for this preprocessing step."""
         super().__init__(verbose)
 
@@ -395,12 +437,31 @@ class Resample(PreprocessingStep):
             raise ValueError("Interpolation must be 0 (nearest) or 1-5 (linear to quintic). See scipy.ndimage.affine_transform for details.")
 
         self.interpolation: int = interpolation
+        self.orthogonal: bool = orthogonal
 
     def execute(self, image: NiftiImage, is_mask: bool = False, **parameters: Any) -> NiftiImage:
         """Resample around the physical center without modifying the input."""
         _check_image(image)
 
         spacing = nib.affines.voxel_sizes(image.affine)
+        direction = image.affine[:3, :3] / spacing
+        has_shear = not np.allclose(direction.T @ direction, np.eye(3), atol=1e-5)
+
+        if self.orthogonal and has_shear:
+            shape, affine = _orthogonal_grid(image, self.target_resolution)
+            target_grid = (shape, affine)
+            source_data: NDArray = image.get_fdata()
+            floating_image = _new_image(source_data, image)
+            interpolation_order: int = self.interpolation
+            if is_mask:
+                interpolation_order = 0
+
+            result = resample_from_to(
+                floating_image, target_grid, order=interpolation_order,
+                mode="constant", cval=0,
+            )
+            result_data: NDArray = result.get_fdata()
+            return _new_image(result_data, image, affine)
 
         if np.allclose(spacing, self.target_resolution, rtol=0, atol=1e-8):
             source_data: NDArray = image.get_fdata()

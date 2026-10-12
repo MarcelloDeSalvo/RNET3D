@@ -113,6 +113,67 @@ def test_resample_does_not_expand_unchanged_float32_spacing_axis():
     assert p.Resample((0.1, 0.1, 0.1)).execute(source).shape == (40, 160, 32)
 
 
+@pytest.mark.parametrize("shear", [0.00015, 0.3])
+@pytest.mark.parametrize("handedness", [-1, 1])
+def test_orthogonal_resampling_covers_sheared_grid_and_keeps_labels(shear, handedness):
+    from itertools import product
+
+    affine = np.array([
+        [handedness * 0.2, shear * 0.3, 0, 5],
+        [0, 0.3, 0, -7], [0, 0, 0.4, 9], [0, 0, 0, 1],
+    ])
+    grid = np.indices((8, 8, 8))[0].astype(np.int16)
+    source = image(grid, affine=affine)
+    labels = np.zeros(grid.shape, dtype=np.int16)
+    labels[2:6, 2:6, 2:6] = 13
+    mask = image(labels, affine=affine)
+    source_affine = source.affine.copy()
+    step = p.Resample((0.1, 0.15, 0.2), orthogonal=True)
+    result, result_mask = step.apply(source, mask)
+
+    spacing = nib.affines.voxel_sizes(result.affine)
+    direction = result.affine[:3, :3] / spacing
+    np.testing.assert_allclose(spacing, (0.1, 0.15, 0.2))
+    np.testing.assert_allclose(direction.T @ direction, np.eye(3), atol=1e-12)
+    assert np.sign(np.linalg.det(result.affine[:3, :3])) == handedness
+    np.testing.assert_array_equal(result.affine, result_mask.affine)
+    np.testing.assert_array_equal(source.affine, source_affine)
+    assert set(np.unique(result_mask.get_fdata())) == {0, 13}
+    assert np.any(result.get_fdata() != np.rint(result.get_fdata()))
+    source_center = (np.asarray(source.shape) - 1) / 2
+    result_center = (np.asarray(result.shape) - 1) / 2
+    np.testing.assert_allclose(world(source, source_center), world(result, result_center))
+
+    limits = [(-0.5, size - 0.5) for size in source.shape]
+    corners = np.asarray(list(product(*limits)))
+    world_corners = nib.affines.apply_affine(source.affine, corners)
+    result_corners = nib.affines.apply_affine(np.linalg.inv(result.affine), world_corners)
+    assert np.all(result_corners >= -0.5 - 1e-6)
+    assert np.all(result_corners <= np.asarray(result.shape) - 0.5 + 1e-6)
+    p._lps_geometry(result)  # The resulting direction is accepted by physical transforms.
+
+
+def test_orthogonal_resampling_does_not_skip_shear_at_matching_spacing():
+    affine = np.diag([0.1, 0.1, 0.1, 1.0])
+    affine[0, 1] = 0.000015
+    affine[1, 1] = np.sqrt(0.1 ** 2 - affine[0, 1] ** 2)
+    source = image(affine=affine)
+    unchanged = p.Resample((0.1, 0.1, 0.1)).execute(source)
+    np.testing.assert_array_equal(unchanged.affine, source.affine)
+    result = p.Resample((0.1, 0.1, 0.1), orthogonal=True).execute(source)
+    assert not np.array_equal(result.affine, source.affine)
+    p._lps_geometry(result)
+
+
+def test_orthogonal_option_preserves_existing_oblique_orthogonal_resampling():
+    affine = np.array([[0.2, -0.3, 0, 5], [0.2, 0.3, 0, 7], [0, 0, -0.4, 9], [0, 0, 0, 1.]])
+    source = image(affine=affine)
+    legacy = p.Resample((0.1, 0.1, 0.1)).execute(source)
+    orthogonal = p.Resample((0.1, 0.1, 0.1), orthogonal=True).execute(source)
+    np.testing.assert_array_equal(orthogonal.affine, legacy.affine)
+    np.testing.assert_array_equal(orthogonal.get_fdata(), legacy.get_fdata())
+
+
 def test_same_oblique_grid_restoration_preserves_boundary_labels():
     affine = np.array([[0.1, -0.2, 0, 11.3], [0.2, 0.1, 0, 5.7], [0, 0, 0.3, -6.1], [0, 0, 0, 1.]])
     source = image(np.ones((8, 8, 8)), affine=affine)

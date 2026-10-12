@@ -126,6 +126,36 @@ def test_validation_is_repeatable_keeps_tail_and_masks_partial_targets(experimen
     assert generator[1][0].shape[0] == 1
 
 
+@pytest.mark.parametrize("stage", ["training", "validation", "inference"])
+def test_experiment_handles_shear_before_affine_augmentation(experiment, stage):
+    from src.experiments.data import make_preprocessor
+    from src.preprocessing import preprocessor as preprocessing
+
+    settings = replace(
+        experiment.preprocessing, augment=True, augmentation_probability=1.0,
+        flip_probability=0.0, rotation_range=(0.0, 0.0), scale_range=(1.0, 1.0),
+    )
+    config = replace(experiment, preprocessing=settings)
+    data = prepare_data(config)
+    scan = data.loader.get_subject(("D1_T1w", "SUBJ_0000"))
+    affine = scan.image.affine.copy()
+    affine[0, 1] = 0.000015
+    image = nib.Nifti1Image(scan.image.get_fdata(), affine)
+    labels = nib.Nifti1Image(scan.labels.get_fdata(), affine)
+    brain = nib.Nifti1Image(scan.brain_mask.get_fdata(), affine)
+    pipeline = make_preprocessor(config, stage=stage)
+    result, masks = pipeline.preprocess(image, [labels, brain])
+    preprocessing._lps_geometry(result)
+    for mask in masks:
+        assert mask.shape == result.shape
+        np.testing.assert_array_equal(mask.affine, result.affine)
+        assert set(np.unique(mask.get_fdata())) <= {0, 1, 2}
+    if stage == "inference":
+        restored = pipeline.deprocess(masks[0], image, {0: 0, 1: 1, 2: 2})
+        assert restored.shape == image.shape
+        np.testing.assert_array_equal(restored.affine, image.affine)
+
+
 def test_training_repetition_does_not_duplicate_validation(experiment):
     settings = replace(experiment.training, data_multiplier=3)
     experiment = replace(experiment, training=settings)

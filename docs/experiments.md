@@ -63,6 +63,13 @@ performs the existing unit heuristic; omit it when geometry has been verified.
 Images use linear interpolation and masks nearest-neighbour interpolation.
 Existing N4 inputs are loaded without repeating bias correction.
 
+Before augmentation, all stages resample to an orthogonal grid. Small shear terms
+occur in normalized D1 affines and cannot be used directly by ITK transforms or
+spacing-based distance metrics. Resampling uses the closest orthogonal axis basis,
+keeps the physical centre and covers the source field of view. It preserves
+reference axis orientation and obliquity rather than changing headers alone.
+The original grid remains available for prediction restoration.
+
 Only training applies affine, blur, noise and flip augmentation. Training uses
 a deterministic centre crop by default, or uniform random cropping when requested.
 Validation always uses `PadderCutter`, not the stochastic centre-biased

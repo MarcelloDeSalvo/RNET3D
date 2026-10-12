@@ -238,6 +238,11 @@ def make_preprocessor(
         steps.append(CorrectX10(reference_resolution=settings.spacing_mm))
 
     steps.append(MapLabels(mapping=config.labels.mapping, unknown=config.labels.unknown))
+    resampling = Resample(
+        target_resolution=settings.spacing_mm, interpolation=1, orthogonal=True,
+    )
+    steps.append(resampling)
+
     if stage == "training" and settings.augment:
         affine = RandomAffine(
             scale_range=settings.scale_range, rotation_range=settings.rotation_range,
@@ -247,7 +252,6 @@ def make_preprocessor(
         steps.append(GaussianBlur(gaussian_blur_range=(0.0, 0.6), probability=settings.augmentation_probability))
         steps.append(Noise(noise_range=(0.0, 0.05), probability=settings.augmentation_probability))
 
-    steps.append(Resample(target_resolution=settings.spacing_mm, interpolation=1))
     steps.append(Normalize(mode=settings.normalization))
 
     if stage != "inference":
