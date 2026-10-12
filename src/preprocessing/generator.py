@@ -23,7 +23,9 @@ class MultiTaskGenerator(tf.keras.utils.Sequence):
 
     Input volumes are repeated across the configured input channels. Targets
     are returned as ``[regions, brain_mask]``. The last incomplete batch is
-    dropped, matching the existing training notebooks. ROI values must already
+    dropped by default, matching the existing training notebooks. Set
+    drop_last=False to retain every scan. Partial labels and the classifier can
+    be enabled independently. ROI values must already
     be mapped to contiguous class indexes by the supplied preprocessor.
     """
 
@@ -35,12 +37,19 @@ class MultiTaskGenerator(tf.keras.utils.Sequence):
         batch_size: int | None = None,
         shuffle: bool = True,
         preprocessor: Preprocessor | None = None,
+        *,
+        drop_last: bool = True,
+        partial_labels: bool = False,
+        with_classifier: bool = False,
     ) -> None:
         """Store batch settings; omit preprocessing for already prepared volumes."""
         self.ids: list[SubjectKey] = list(ids)
         self.loader: RodentDatasets = loader
         self.shuffle: bool = shuffle
         self.preprocessor: Preprocessor | None = preprocessor
+        self.drop_last: bool = drop_last
+        self.partial_labels: bool = partial_labels
+        self.with_classifier: bool = with_classifier
 
         self.config: dict[str, Any] = dict(config)
         self.labels: list[int] = list(self.config["labels"])
@@ -76,8 +85,13 @@ class MultiTaskGenerator(tf.keras.utils.Sequence):
         print(description)
 
     def __len__(self) -> int:
-        """Return the number of complete batches, excluding the remainder."""
-        return len(self.ids) // self.batch_size
+        """Return complete batches, optionally including a shorter final batch."""
+        count: int = len(self.ids) // self.batch_size
+        remainder: int = len(self.ids) % self.batch_size
+        if not self.drop_last and remainder:
+            count += 1
+
+        return count
 
     def __getitem__(self, index: int) -> Batch:
         """Return one valid batch; reject negative and out-of-range indexes."""
@@ -148,9 +162,10 @@ class MultiTaskGenerator(tf.keras.utils.Sequence):
 
     def _generate_batch(self, batch_ids: Sequence[SubjectKey]) -> Batch:
         """Load each subject once and fill arrays with the historical float64 dtype."""
-        image_shape: tuple[int, ...] = (self.batch_size, *self.dim, self.n_input_channels)
-        region_shape: tuple[int, ...] = (self.batch_size, *self.dim, self.n_classes)
-        mask_shape: tuple[int, ...] = (self.batch_size, *self.dim, 1)
+        sample_count: int = len(batch_ids)
+        image_shape: tuple[int, ...] = (sample_count, *self.dim, self.n_input_channels)
+        region_shape: tuple[int, ...] = (sample_count, *self.dim, self.n_classes)
+        mask_shape: tuple[int, ...] = (sample_count, *self.dim, 1)
 
         images: BatchArray = np.zeros(image_shape, dtype=np.float64)
         regions: BatchArray = np.zeros(region_shape, dtype=np.float64)
@@ -175,8 +190,34 @@ class MultiTaskGenerator(tf.keras.utils.Sequence):
     def _prepare_targets(
         self, subjects: Sequence[Rodent], regions: BatchArray, brain_masks: BatchArray,
     ) -> list[BatchArray]:
-        """Return ROI channels followed by the brain-mask channel."""
-        return [regions, brain_masks]
+        """Optionally mask unavailable mapped classes and add condition targets.
+
+        A merged class is unavailable when any contributing source label lacks
+        annotation. This is conservative: partial coverage is not a complete
+        ground truth for the merged structure. Legacy defaults remain unchanged.
+        """
+        if self.partial_labels:
+            mapping: dict[int, int] = self.config["label_mapping"]
+            for position, subject in enumerate(subjects):
+                unavailable: set[int] = set(subject.get_unavailable_labels() or ())
+                channels: set[int] = set()
+                for source, channel in mapping.items():
+                    if source in unavailable:
+                        channels.add(channel)
+
+                for channel in channels:
+                    regions[position, ..., channel] = -1
+
+        targets: list[BatchArray] = [regions, brain_masks]
+        if self.with_classifier:
+            conditions: BatchArray = np.zeros((len(subjects), 1), dtype=np.float64)
+            for position, subject in enumerate(subjects):
+                if not subject.get_sham():
+                    conditions[position, 0] = 1
+
+            targets.append(conditions)
+
+        return targets
 
 
 class DomainAdaptationGenerator(MultiTaskGenerator):

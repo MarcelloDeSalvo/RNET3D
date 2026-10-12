@@ -51,7 +51,7 @@ import sys
 import time
 import hashlib
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias
@@ -286,12 +286,12 @@ class TrainingConfig:
 
         return cls(**value)
 
-    def validate(self, n_subjects: int) -> None:
+    def validate(self, n_subjects: int, *, cross_validation: bool = True) -> None:
         """Reject invalid configurations before starting an experiment."""
         _safe_name(self.model_name)
         if self.run_id is not None:
             _safe_name(self.run_id)
-        if not 2 <= self.k <= n_subjects:
+        if cross_validation and not 2 <= self.k <= n_subjects:
             raise ValueError("k must be between 2 and the number of unique subjects")
         for name in ("epochs", "batch_size", "data_multiplier"):
             if getattr(self, name) < 1:
@@ -660,7 +660,7 @@ def _save_evaluations(result: TrainingResult) -> None:
 
 
 
-def _train_fold(
+def train_fold(
     context: FoldContext,
     train_factory: DatasetFactory,
     val_factory: DatasetFactory,
@@ -670,6 +670,7 @@ def _train_fold(
     evaluation_config: Mapping[str, Any],
     result: TrainingResult,
     evaluation: EvaluationConfig,
+    model_exporter: Callable[[Any, Path], None] | None = None,
 ) -> None:
     """Train a fresh model, restore its best checkpoint and evaluate one fold."""
     import tensorflow as tf
@@ -704,8 +705,11 @@ def _train_fold(
 
     model.load_weights(str(context.checkpoint_path))
     if config.save_model:
-        model_path: str = str(folder / "model.keras")
-        model.save(model_path)
+        model_path: Path = folder / "model.keras"
+        if model_exporter is None:
+            model.save(str(model_path))
+        else:
+            model_exporter(model, model_path)
     _save_history(history, folder)
     result.histories.append(history)
 
@@ -744,6 +748,14 @@ def _train_fold(
     gc.collect()
 
 
+def save_training_result(result: TrainingResult, config: TrainingConfig) -> None:
+    """Export common histories, evaluation tables and timings for any run type."""
+    _save_summary(result, config, metrics=())
+    _save_evaluations(result)
+    timings = pd.DataFrame(asdict(timing) for timing in result.timings)
+    timings.to_csv(result.run_dir / "summary" / "fold_timings.csv", index=False)
+
+
 def k_fold_loop(
     train_gen: DatasetFactory,
     val_gen: DatasetFactory,
@@ -759,6 +771,9 @@ def k_fold_loop(
     evaluation: EvaluationConfig | None = None,
     metadata: ExperimentMetadata | None = None,
     subject_index: SubjectIndex | None = None,
+    model_exporter: Callable[[Any, Path], None] | None = None,
+    split_seed: int | None = None,
+    run_setup: Callable[[Path], None] | None = None,
 ) -> TrainingResult:
     """Run a fresh TensorFlow/Keras training and validation experiment per fold.
 
@@ -787,6 +802,9 @@ def k_fold_loop(
         splitter: Optional factory receiving IDs and yielding pairs of integer
             training/validation indices. Must produce exactly ``config.k``
             disjoint folds, with each subject validated exactly once.
+        model_exporter: Optional inference-graph exporter after best-weight restoration.
+        split_seed: Optional split RNG seed independent of model initialization.
+        run_setup: Optional provenance writer invoked before fitting any fold.
 
     Returns:
         TrainingResult: Run location, per-fold histories and evaluations, and
@@ -815,7 +833,10 @@ def k_fold_loop(
             raise ValueError("SubjectIndex expands animals to scans; use generator cardinality or explicit steps")
 
     if precomputed_splits is None:
-        folds = _splits(ids, settings, splitter)
+        split_settings = settings
+        if split_seed is not None:
+            split_settings = replace(settings, seed=split_seed)
+        folds = _splits(ids, split_settings, splitter)
     else:
         folds = _load_splits(precomputed_splits, ids, settings.k)
     evaluators = _named_evaluators(fve_callbacks)
@@ -840,10 +861,13 @@ def k_fold_loop(
         "cv_subject_count": len(ids),
         "cv_subject_sha256": hashlib.sha256(json.dumps(sorted(ids)).encode()).hexdigest(),
         "precomputed_splits": str(precomputed_splits) if precomputed_splits else None,
+        "split_seed": settings.seed if split_seed is None else split_seed,
     }
     (run_dir / "metadata.json").write_text(json.dumps(provenance, indent=2), encoding="utf-8")
     split_payload = [{"train": fold.train_ids, "validation": fold.val_ids} for fold in folds]
     (run_dir / "splits.json").write_text(json.dumps(split_payload, indent=2), encoding="utf-8")
+    if run_setup is not None:
+        run_setup(run_dir)
     experiment_metadata = metadata or ExperimentMetadata()
     result = TrainingResult(
         run_dir=run_dir, evaluations={name: [] for name in evaluators},
@@ -856,7 +880,7 @@ def k_fold_loop(
         checkpoint_path = folder / "best.weights.h5"
         context = FoldContext(split=split, output_dir=folder, config=settings, checkpoint_path=checkpoint_path)
 
-        _train_fold(
+        train_fold(
             context=context,
             train_factory=train_gen,
             val_factory=val_gen,
@@ -866,6 +890,7 @@ def k_fold_loop(
             evaluation_config=evaluation_config,
             result=result,
             evaluation=evaluation,
+            model_exporter=model_exporter,
         )
 
     _save_summary(result, settings, metrics)

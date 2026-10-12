@@ -11,7 +11,9 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import product
 from pathlib import Path
+import time
 from typing import TYPE_CHECKING, Any, TypeAlias
+from urllib.parse import quote
 
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
@@ -30,6 +32,7 @@ from .metrics import (
 from ..utils.logger import PrintLogger
 
 if TYPE_CHECKING:
+    from ..experiments.data import PreparedData
     from ..utils.loader import Rodent, RodentDatasets, SubjectKey
     from ..preprocessing.preprocessor import Preprocessor
 
@@ -391,6 +394,109 @@ class RandomCroppingPrediction:
             classifier_output = self.calculate_final_classifier_output(positive_votes, total_votes)
         roi_mask: Array = self.calculate_final_prediction(sums, counts, original_shape)
         return PredictionResult(roi=roi_mask, brain_mask=brain_mask, classifier=classifier_output)
+
+
+class ExperimentVolumeEvaluator:
+    """Bridge configured experiments to physical metrics and prediction artifacts.
+
+    Metrics use the complete reoriented/resampled orthogonal grid. Saved masks
+    use the original image grid and output class IDs, including merged classes.
+    No anatomical postprocessing or annotation-dependent prediction is applied.
+    """
+
+    def __init__(
+        self, model: Any, data: PreparedData, subject_ids: Sequence[str],
+        options: Mapping[str, Any],
+    ) -> None:
+        """Store a probability-producing model and an explicit evaluation cohort."""
+        self.model: Any = model
+        self.data: PreparedData = data
+        self.subject_ids: list[str] = list(subject_ids)
+        self.options: dict[str, Any] = dict(options)
+
+    def evaluate(self) -> pd.DataFrame:
+        """Predict each scan once, preserving missing-annotation statuses and timings."""
+        from ..experiments.data import make_preprocessor
+        from .metrics import segmentation_metrics_table
+
+        config = self.data.config
+        pipeline = make_preprocessor(config, stage="inference")
+        predictor = RandomCroppingPrediction(
+            model=self.model, patch_size=config.preprocessing.patch_size,
+            num_classes=len(config.labels.names), stride=config.inference.stride,
+        )
+        output_dir = Path(self.options["evaluation_dir"])
+        output_dir.mkdir(parents=True, exist_ok=True)
+        regions = {index: name for index, name in enumerate(config.labels.names) if index != 0}
+        identity_mapping = {index: index for index in range(len(config.labels.names))}
+        save_predictions: bool = bool(self.options.get("save_predictions", False))
+        tables: list[pd.DataFrame] = []
+        timings: list[dict[str, str | float]] = []
+
+        # Exclude tracing/device warm-up from per-volume prediction durations.
+        warmup_shape = (1, *config.preprocessing.patch_size, 1)
+        warmup = np.zeros(warmup_shape, dtype=np.float32)
+        self.model.predict(warmup, verbose=0)
+
+        for subject_id in self.subject_ids:
+            for key in self.data.subjects.scan_keys([subject_id]):
+                scan = self.data.loader.get_subject(key)
+                started = time.perf_counter()
+                image, reference = pipeline.preprocess(scan.image, scan.labels)
+                preprocessing_seconds = time.perf_counter() - started
+
+                if image.shape != reference.shape or not np.allclose(image.affine, reference.affine):
+                    raise ValueError(f"{scan.id}: preprocessed image and reference must share a physical grid")
+
+                spacing = nib.affines.voxel_sizes(image.affine)
+                directions = image.affine[:3, :3] / spacing
+                orthogonal = np.allclose(directions.T @ directions, np.eye(3), atol=1e-5)
+                if not orthogonal:
+                    raise ValueError(f"{scan.id}: physical distance metrics require an orthogonal grid")
+
+                started = time.perf_counter()
+                prediction = predictor.predict(image, with_brain_mask=True)
+                inference_seconds = time.perf_counter() - started
+                unavailable = set(scan.get_unavailable_labels() or ())
+                unavailable_classes = {
+                    channel for source, channel in config.labels.mapping.items() if source in unavailable
+                }
+                available_classes = sorted(set(identity_mapping) - unavailable_classes)
+                reference_data = reference.get_fdata()
+                table = segmentation_metrics_table(
+                    reference=reference_data, prediction=prediction.roi, spacing_mm=spacing,
+                    regions=regions, subject=subject_id, scan=scan.id,
+                    dataset=scan.subject_group[0], available_labels=available_classes,
+                )
+                tables.append(table)
+
+                if save_predictions:
+                    group, scan_id = key
+                    group_name = quote(group, safe="")
+                    scan_name = quote(scan_id, safe="")
+                    folder = output_dir / "predictions" / group_name / scan_name
+                    folder.mkdir(parents=True, exist_ok=True)
+                    masks = {"regions": prediction.roi, "brain_mask": prediction.brain_mask}
+                    for name, mask in masks.items():
+                        mask_data = np.asarray(mask, dtype=np.int16)
+                        grid_prediction = nib.Nifti1Image(mask_data, image.affine)
+                        restored = pipeline.deprocess(
+                            prediction=grid_prediction, original_image=scan.image,
+                            mapping=identity_mapping,
+                        )
+                        restored.set_data_dtype(np.int16)
+                        nib.save(restored, folder / f"{name}.nii.gz")
+
+                timings.append({
+                    "Subject": subject_id, "Scan": scan.id,
+                    "PreprocessingSeconds": preprocessing_seconds, "InferenceSeconds": inference_seconds,
+                })
+
+        if not tables:
+            raise ValueError("No evaluation scans selected")
+
+        pd.DataFrame(timings).to_csv(output_dir / "inference_timings.csv", index=False)
+        return pd.concat(tables, ignore_index=True)
 
 
 class FullVolumeEvaluation:
