@@ -288,6 +288,7 @@ def save_provenance(config: ExperimentConfig, data: PreparedData, run_dir: Path)
     (run_dir / "experiment.json").write_text(json.dumps(settings, indent=2, default=str), encoding="utf-8")
     contract = data.contract()
     (run_dir / "data_contract.json").write_text(json.dumps(contract, indent=2), encoding="utf-8")
+    data.save_evaluation_patches(run_dir / "evaluation_patches.json")
     manifest_path = run_dir / "subjects.csv"
     if not manifest_path.exists():
         manifest = data.subjects.manifest(data.subjects.subject_ids)
@@ -371,6 +372,8 @@ def validate_resume(data: PreparedData, run_dir: Path) -> None:
         source_digest = hashlib.sha256(source_experiment.read_bytes()).hexdigest()
         if metadata.get("initialization_config_sha256") != source_digest:
             raise ValueError("Resume initialization source experiment has changed")
+
+    data.save_evaluation_patches(run_dir / "evaluation_patches.json", resume=True)
 
 
 def run_training(

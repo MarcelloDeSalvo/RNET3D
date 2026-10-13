@@ -13,8 +13,8 @@ For the historical rat CV protocol, use `notebook/04_rat_kfold.ipynb` and set
 from the same mouse weights, trains on four rats, and evaluates every available
 timepoint of the remaining rat. That rat also selects the checkpoint, matching
 the old `3DRNET_Kfold_rats.ipynb` split; results have the `validation` role, not
-an independent `holdout` role. Validation is deterministic and neither repeated
-nor dropped at incomplete batches. The original notebook's random validation
+an independent `holdout` role. Validation reuses five saved center-biased patches per scan and retains
+incomplete batches. The original notebook's random validation
 augmentation and nearest image interpolation are not reproduced. Full-volume
 postprocessing retains the historical ventricle separation and brain cleanup.
 `notebook/03_rat_finetuning.ipynb` adapts a pretrained mouse model to normalized
@@ -559,3 +559,28 @@ analysis. Animal bootstrap uncertainty conditions on supplied trained models;
 it does not estimate longitudinal trajectories or training-seed uncertainty.
 Notebook plots use Plotly's native VS Code renderer; the shared
 runner also writes standalone HTML history artifacts for optional offline use.
+
+## Saved validation and test patches
+
+`ExperimentConfig.evaluation_patches` separates evaluation coverage from
+`TrainingConfig.data_multiplier`. Training continues to draw fresh center-biased
+crops. The notebooks use three evaluation patches per scan (five in rat K-Fold),
+sampled once with their own seed and reused for every epoch and evaluation role.
+The center-biased distribution matches training's default crop distribution.
+`sampling="center", patches_per_scan=1` restores a single fixed center patch.
+
+`evaluation_patches.json` saves the crop centers on each processed, padded grid,
+padding widths, scan geometry and source/sampling contract. Runs save it before
+fitting; studies save one shared collection and copy it into every member run.
+Resumption loads the saved coordinates and rejects missing or modified multi-patch
+collections. Older saved settings without the new field retain one center patch.
+Changing evaluation sampling requires a new run. Training seeds and multipliers
+do not change the evaluation collection.
+
+`left_right_pairs=True` adds an original/reflected pair for each saved D1/rat crop.
+The same anatomical LR reflection is applied to MRI, ROI and brain targets;
+lesion/craniotomy-relative label identities remain unchanged. MouseFull keeps this
+option disabled. Evaluation has no noise, blur, affine augmentation or shuffling,
+and keeps the last incomplete batch. Full-volume evaluation remains uncropped.
+Several patches do not increase animal counts; small scans may yield identical
+coordinates when no additional crop positions exist.

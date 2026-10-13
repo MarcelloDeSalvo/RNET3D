@@ -55,7 +55,7 @@ existing U-Net does not support that head; neither model's dropout is changed.
 
 Rat CV matches the old split: train on four rats and select/evaluate on the fifth.
 That fifth rat contributes validation results, not an independent outer test.
-Validation is deterministic and includes every available scan once. Every fold
+Validation uses five saved center-biased patches for every available scan. Every fold
 starts from the same explicitly chosen mouse checkpoint and a fresh optimizer.
 
 MouseFull preserves the old source-label/channel order and SHAM/TBI classifier.

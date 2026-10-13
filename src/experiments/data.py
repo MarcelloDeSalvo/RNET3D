@@ -16,6 +16,7 @@ from ..evaluation.k_fold import FoldSplit, SubjectIndex
 from ..utils.loader import Rodent, RodentDatasets
 
 if TYPE_CHECKING:
+    from .patches import EvaluationPatches
     from ..preprocessing.generator import MultiTaskGenerator
     from ..preprocessing.preprocessor import Preprocessor
 
@@ -248,6 +249,37 @@ class PreparedData:
     config: ExperimentConfig
     loader: RodentDatasets
     subjects: SubjectIndex
+    evaluation_patches: EvaluationPatches | None = None
+
+    def patch_collection(self) -> EvaluationPatches:
+        """Reuse the same evaluation samples across roles, folds and study members."""
+        from .patches import EvaluationPatches
+
+        if self.evaluation_patches is None:
+            self.evaluation_patches = EvaluationPatches.create(self)
+        elif self.evaluation_patches.contract != EvaluationPatches.expected_contract(self):
+            raise ValueError("Cached evaluation patches differ from the requested grid or sampling")
+
+        return self.evaluation_patches
+
+    def save_evaluation_patches(self, path: Path, *, resume: bool = False) -> None:
+        """Load saved samples on resume; never replace an established collection."""
+        from .patches import EvaluationPatches
+
+        if path.exists():
+            saved = EvaluationPatches.load(path, self)
+            if self.evaluation_patches is not None and saved.samples != self.evaluation_patches.samples:
+                raise ValueError("Evaluation patches differ from the shared collection")
+            self.evaluation_patches = saved
+            return
+
+        settings = self.config.evaluation_patches
+        legacy_center = settings.sampling == "center" and not settings.left_right_pairs
+        if resume and not legacy_center:
+            raise FileNotFoundError(f"Cannot resume without saved evaluation patches: {path}")
+
+        collection = self.patch_collection()
+        collection.save(path)
 
     def make_split(self) -> SubjectSplit:
         """Generate new animal memberships from the experiment's fixed-split policy.
@@ -368,8 +400,9 @@ class PreparedData:
         self, ids: list[str] | tuple[str, ...], *, training: bool,
         batch_size: int | None = None,
     ) -> MultiTaskGenerator:
-        """Expand animals to scans; any repetition applies exclusively to training."""
+        """Expand training repetitions or saved validation/test patches per scan."""
         from ..preprocessing.generator import MultiTaskGenerator
+        from .patches import FixedPatchPreprocessor
 
         config = self.config
         keys = self.subjects.scan_keys(ids)
@@ -379,6 +412,15 @@ class PreparedData:
             keys = keys * config.training.data_multiplier
 
         pipeline = make_preprocessor(config, stage=stage)
+        sample_preprocessors = None
+        if not training:
+            collection = self.patch_collection()
+            selected = set(keys)
+            samples = [sample for sample in collection.samples if sample.scan in selected]
+            keys = [sample.scan for sample in samples]
+            pipeline = make_preprocessor(config, stage="inference")
+            size = config.preprocessing.patch_size
+            sample_preprocessors = [FixedPatchPreprocessor(pipeline, sample, size) for sample in samples]
         settings = {
             "dataset_path": str(config.data.root),
             "labels": list(config.labels.mapping),
@@ -393,6 +435,7 @@ class PreparedData:
             ids=keys, loader=self.loader, config=settings, shuffle=training,
             preprocessor=pipeline, drop_last=False, partial_labels=partial_labels,
             with_classifier=config.model.classifier, batch_size=batch_size,
+            sample_preprocessors=sample_preprocessors,
         )
 
 

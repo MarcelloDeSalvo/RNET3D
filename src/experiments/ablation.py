@@ -264,6 +264,7 @@ def run_study(
     timing_rows: list[dict[str, Any]] = []
     run_rows: list[dict[str, Any]] = []
     with run_lock(folder):
+        data.save_evaluation_patches(folder / "evaluation_patches.json", resume=resume)
         if not resume:
             write_json(folder / "study.json", contract)
             plan.to_csv(folder / "plan.csv", index=False)

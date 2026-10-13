@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 
 from src.experiments.config import (
-    DataConfig, DatasetSpec, ExperimentConfig, InferenceConfig, LabelConfig,
+    DataConfig, DatasetSpec, EvaluationPatchConfig, ExperimentConfig, InferenceConfig, LabelConfig,
     LossConfig, ModelConfig, PreprocessingConfig,
 )
 from src.experiments.data import SubjectSplit, annotation_values, make_split, prepare_data
@@ -73,6 +73,7 @@ def experiment(tmp_path):
         ),
         loss=LossConfig(regions="dice_ce_gradient_fix"),
         inference=InferenceConfig(enabled=True, stride=16),
+        evaluation_patches=EvaluationPatchConfig(patches_per_scan=1, sampling="center"),
     )
     return config
 

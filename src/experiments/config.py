@@ -134,7 +134,8 @@ class PreprocessingConfig:
     """Frozen geometry with centre-biased random crops enabled for training.
 
     crop_mode selects the sampling distribution, with automatic standard deviation.
-    Setting random_crop=False uses a fixed crop; validation always uses a fixed crop.
+    Setting random_crop=False uses a fixed training crop. Validation/test use
+    the separate, saved EvaluationPatchConfig collection.
     Flipping is off by default; D1 and rat notebooks explicitly enable anatomical LR flips.
     Intensity augmentation normally precedes resampling on the native grid.
     The resampled setting retains the earlier affine/blur/noise order for saved
@@ -196,6 +197,37 @@ class ModelConfig:
         flags = (self.residual, self.attention, self.max_pooling, self.classifier)
         if any(not isinstance(flag, bool) for flag in flags):
             raise ValueError("Model component flags must be booleans")
+
+
+@dataclass(frozen=True)
+class EvaluationPatchConfig:
+    """Validation/test crops sampled once, independently of training randomness.
+
+    Left-right pairs double the samples and reflect MRI and both masks together.
+    Keep pairs disabled for MouseFull. Training data_multiplier is independent.
+    """
+
+    patches_per_scan: int = 3
+    sampling: Literal["center_biased", "center"] = "center_biased"
+    seed: int = 42
+    left_right_pairs: bool = False
+
+    def validate(self) -> None:
+        """Require a reproducible, nonempty patch collection."""
+        if isinstance(self.patches_per_scan, bool) or not isinstance(self.patches_per_scan, int) or self.patches_per_scan < 1:
+            raise ValueError("Evaluation patches_per_scan must be a positive integer")
+
+        if self.sampling not in ("center_biased", "center"):
+            raise ValueError("Evaluation sampling must be center_biased or center")
+
+        if self.sampling == "center" and self.patches_per_scan != 1:
+            raise ValueError("A fixed center crop requires patches_per_scan=1")
+
+        if isinstance(self.seed, bool) or not isinstance(self.seed, int) or self.seed < 0:
+            raise ValueError("Evaluation patch seed must be a nonnegative integer")
+
+        if not isinstance(self.left_right_pairs, bool):
+            raise ValueError("Evaluation left_right_pairs must be boolean")
 
 
 @dataclass(frozen=True)
@@ -349,6 +381,7 @@ class ExperimentConfig:
     early_stopping_patience: int = 20  # Legacy fallback when a fixed-split caller supplies no callback list.
     cv_validation_fraction: float = 0.2
     fixed_split: FixedSplitConfig = field(default_factory=FixedSplitConfig)
+    evaluation_patches: EvaluationPatchConfig = field(default_factory=EvaluationPatchConfig)
 
     def validate(self) -> None:
         """Fail early on incompatible settings or inaccessible input locations."""
@@ -356,6 +389,10 @@ class ExperimentConfig:
         self.initialization.validate()
         self.fixed_split.validate()
         self.preprocessing.validate()
+        self.evaluation_patches.validate()
+        dataset_names = {dataset.name for dataset in self.data.datasets}
+        if "D3" in dataset_names and self.evaluation_patches.left_right_pairs:
+            raise ValueError("MouseFull evaluation must keep left-right pairs disabled")
         if not math.isfinite(self.cv_validation_fraction) or not 0 < self.cv_validation_fraction < 1:
             raise ValueError("CV validation fraction must be between zero and one")
         self.training.validate(n_subjects=2, cross_validation=False)
@@ -489,6 +526,11 @@ class ExperimentConfig:
         inference["postprocessing"] = PostprocessingConfig(**postprocessing)
 
         fixed_split = FixedSplitConfig(**values.pop("fixed_split", {}))
+        patch_settings = values.pop("evaluation_patches", None)
+        if patch_settings is None:
+            # Saved runs without this field used one fixed center crop.
+            patch_settings = {"patches_per_scan": 1, "sampling": "center"}
+        evaluation_patches = EvaluationPatchConfig(**patch_settings)
         loss = dict(values.pop("loss"))
         if loss.get("regions") == "dice_ce_gradient_fix" and "gradient_fix_version" not in loss:
             loss["gradient_fix_version"] = 1
@@ -498,7 +540,8 @@ class ExperimentConfig:
             training=TrainingConfig(**values.pop("training")), labels=LabelConfig(**labels),
             model=ModelConfig(**model), loss=LossConfig(**loss),
             inference=InferenceConfig(**inference),
-            initialization=InitializationConfig(**initialization), fixed_split=fixed_split, **values,
+            initialization=InitializationConfig(**initialization), fixed_split=fixed_split,
+            evaluation_patches=evaluation_patches, **values,
         )
 
     @classmethod

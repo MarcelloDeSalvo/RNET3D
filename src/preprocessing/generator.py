@@ -41,8 +41,9 @@ class MultiTaskGenerator(tf.keras.utils.Sequence):
         drop_last: bool = True,
         partial_labels: bool = False,
         with_classifier: bool = False,
+        sample_preprocessors: Sequence[Preprocessor] | None = None,
     ) -> None:
-        """Store batch settings; omit preprocessing for already prepared volumes."""
+        """Store settings and optional per-sample pipelines for saved evaluation crops."""
         self.ids: list[SubjectKey] = list(ids)
         self.loader: RodentDatasets = loader
         self.shuffle: bool = shuffle
@@ -50,6 +51,9 @@ class MultiTaskGenerator(tf.keras.utils.Sequence):
         self.drop_last: bool = drop_last
         self.partial_labels: bool = partial_labels
         self.with_classifier: bool = with_classifier
+        self.sample_preprocessors: Sequence[Preprocessor] | None = sample_preprocessors
+        if sample_preprocessors is not None and len(sample_preprocessors) != len(self.ids):
+            raise ValueError("Provide one sample preprocessor for each ID")
 
         self.config: dict[str, Any] = dict(config)
         self.labels: list[int] = list(self.config["labels"])
@@ -106,7 +110,11 @@ class MultiTaskGenerator(tf.keras.utils.Sequence):
         indexes: NDArray[np.int64] = self.indexes[start:stop]
         batch_ids: list[SubjectKey] = [self.ids[position] for position in indexes]
 
-        return self._generate_batch(batch_ids)
+        batch_preprocessors = None
+        if self.sample_preprocessors is not None:
+            batch_preprocessors = [self.sample_preprocessors[position] for position in indexes]
+
+        return self._generate_batch(batch_ids, batch_preprocessors)
 
     def __getcase__(self, index: int) -> SubjectKey:
         """Return an ID in original list order, independently of batch shuffling."""
@@ -120,15 +128,20 @@ class MultiTaskGenerator(tf.keras.utils.Sequence):
         if self.shuffle:
             np.random.shuffle(self.indexes)
 
-    def _prepare_sample(self, subject: Rodent) -> tuple[BatchArray, NDArray, BatchArray]:
+    def _prepare_sample(
+        self, subject: Rodent, preprocessor: Preprocessor | None = None,
+    ) -> tuple[BatchArray, NDArray, BatchArray]:
         """Prepare one image/mask group and validate class indexes before encoding."""
         image, roi_mask, brain_mask = subject.get_images()
         if brain_mask is None:
             raise ValueError(f"{subject.id}: a brain mask is required for multitask targets")
 
-        if self.preprocessor is not None:
+        if preprocessor is None:
+            preprocessor = self.preprocessor
+
+        if preprocessor is not None:
             masks = [roi_mask, brain_mask]
-            image, processed_masks = self.preprocessor.preprocess(image, masks)
+            image, processed_masks = preprocessor.preprocess(image, masks)
             roi_mask, brain_mask = processed_masks
 
         image_data: BatchArray = image.get_fdata()
@@ -160,7 +173,10 @@ class MultiTaskGenerator(tf.keras.utils.Sequence):
 
         return image_data, encoded_regions, brain_data
 
-    def _generate_batch(self, batch_ids: Sequence[SubjectKey]) -> Batch:
+    def _generate_batch(
+        self, batch_ids: Sequence[SubjectKey],
+        preprocessors: Sequence[Preprocessor] | None = None,
+    ) -> Batch:
         """Load each subject once and fill arrays with the historical float64 dtype."""
         sample_count: int = len(batch_ids)
         image_shape: tuple[int, ...] = (sample_count, *self.dim, self.n_input_channels)
@@ -175,7 +191,11 @@ class MultiTaskGenerator(tf.keras.utils.Sequence):
         for position, subject_key in enumerate(batch_ids):
             subject: Rodent = self.loader.get_subject(subject_key)
             subjects.append(subject)
-            image_data, region_data, brain_data = self._prepare_sample(subject)
+            preprocessor = None
+            if preprocessors is not None:
+                preprocessor = preprocessors[position]
+
+            image_data, region_data, brain_data = self._prepare_sample(subject, preprocessor)
 
             image_channels: NDArray = np.expand_dims(image_data, axis=-1)
             brain_channel: NDArray = np.expand_dims(brain_data, axis=-1)
