@@ -136,6 +136,9 @@ class PreprocessingConfig:
     crop_mode selects the sampling distribution, with automatic standard deviation.
     Setting random_crop=False uses a fixed crop; validation always uses a fixed crop.
     Flipping is off by default; D1 and rat notebooks explicitly enable anatomical LR flips.
+    Intensity augmentation normally precedes resampling on the native grid.
+    The resampled setting retains the earlier affine/blur/noise order for saved
+    runs. Blur bounds describe sigma; noise bounds describe standard deviation.
     """
 
     reference: Path
@@ -150,6 +153,31 @@ class PreprocessingConfig:
     scale_range: tuple[float, float] = (0.95, 1.05)
     augmentation_probability: float = 0.3
     flip_probability: float = 0.0
+    intensity_augmentation_grid: Literal["native", "resampled"] = "native"
+    blur_sigma_range: tuple[float, float] = (0.0, 0.6)
+    blur_sigma_units: Literal["voxels", "mm"] = "voxels"
+    noise_std_range: tuple[float, float] = (0.0, 0.05)
+    noise_std_units: Literal["intensity", "image_std"] = "intensity"
+
+    def validate(self) -> None:
+        """Validate acquisition-style augmentation ranges and their declared units."""
+        if self.intensity_augmentation_grid not in ("native", "resampled"):
+            raise ValueError("Intensity augmentation grid must be native or resampled")
+        if self.blur_sigma_units not in ("voxels", "mm"):
+            raise ValueError("Blur sigma units must be voxels or mm")
+        if self.noise_std_units not in ("intensity", "image_std"):
+            raise ValueError("Noise standard deviation units must be intensity or image_std")
+
+        ranges = (("Blur sigma", self.blur_sigma_range), ("Noise standard deviation", self.noise_std_range))
+        for name, bounds in ranges:
+            if len(bounds) != 2:
+                raise ValueError(f"{name} range must contain two nonnegative finite ordered bounds")
+            invalid_bounds = any(
+                isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+                for value in bounds
+            )
+            if invalid_bounds or bounds[0] < 0 or bounds[0] > bounds[1]:
+                raise ValueError(f"{name} range must contain two nonnegative finite ordered bounds")
 
 
 @dataclass(frozen=True)
@@ -327,6 +355,7 @@ class ExperimentConfig:
         self.labels.validate()
         self.initialization.validate()
         self.fixed_split.validate()
+        self.preprocessing.validate()
         if not math.isfinite(self.cv_validation_fraction) or not 0 < self.cv_validation_fraction < 1:
             raise ValueError("CV validation fraction must be between zero and one")
         self.training.validate(n_subjects=2, cross_validation=False)
@@ -435,8 +464,14 @@ class ExperimentConfig:
 
         preprocessing = dict(values.pop("preprocessing"))
         preprocessing["reference"] = Path(preprocessing["reference"])
+        # Older saved runs augmented intensities after resampling and affine.
+        # Preserve that protocol when loading; new configurations default native.
+        preprocessing.setdefault("intensity_augmentation_grid", "resampled")
         for name in ("patch_size", "spacing_mm", "rotation_range", "scale_range"):
             preprocessing[name] = tuple(preprocessing[name])
+        for name in ("blur_sigma_range", "noise_std_range"):
+            if name in preprocessing:
+                preprocessing[name] = tuple(preprocessing[name])
 
         labels = dict(values.pop("labels"))
         labels["mapping"] = {int(source): channel for source, channel in labels["mapping"].items()}

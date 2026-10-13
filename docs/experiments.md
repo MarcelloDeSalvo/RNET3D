@@ -232,13 +232,40 @@ performs the existing unit heuristic; omit it when geometry has been verified.
 Images use linear interpolation and masks nearest-neighbour interpolation.
 Existing N4 inputs are loaded without repeating bias correction.
 
-Before augmentation, all stages resample to an orthogonal grid. Some D1 sforms
+Before spatial affine augmentation, all stages resample to an orthogonal grid. Some D1 sforms
 contain small nonorthogonal coefficients consistent with rounded headers; this
 does not establish physical shear in the acquired images. The current physical
 transform and distance checks require orthogonal axes. Resampling uses the closest orthogonal axis basis,
 keeps the physical centre and covers the source field of view. It preserves
 reference axis orientation and obliquity rather than changing headers alone.
 The original grid remains available for prediction restoration.
+
+New training configurations explicitly set `intensity_augmentation_grid="native"`:
+reorientation and unit correction precede MRI-only blur/noise on the native
+acquisition grid, followed by linear target resampling, physical affine
+augmentation, normalization, cropping and optional LR flipping. Interpolation
+therefore acts on the injected noise field as it acts on acquisition noise.
+Mask interpolation stays nearest-neighbour for both resampling and affine.
+No spatial-transform fusion or interpolation sensitivity study is introduced.
+
+The notebook configuration exposes `blur_sigma_range=(0.0, 0.6)` with
+`blur_sigma_units="voxels"`, and `noise_std_range=(0.0, 0.05)` with
+`noise_std_units="intensity"`. These retain the previous default magnitudes;
+moving them to the native grid changes their effect. Native voxel blur follows
+the acquisition's anisotropic spacing. Select `blur_sigma_units="mm"` to convert
+sampled per-axis millimetre sigmas using input voxel sizes. Select
+`noise_std_units="image_std"` to multiply sampled noise standard deviations by
+the full input MRI standard deviation, including background. A value of 0.05
+then means 5% of that scale, not a specified MRI SNR. No dataset-level statistics
+are fitted. Noise means remain in intensity units. These switches are explicit;
+no default strength is silently retuned for a modality.
+
+Loading older configurations without the grid field resolves it to `resampled`,
+retaining their previous resampling -> affine -> blur -> noise sequence and
+default units. Newly constructed configurations default to `native`. Resuming
+requires the saved order/ranges/units, and a changed configuration is rejected.
+Evaluation has no augmentation, and old model weights remain usable. For a new
+native-order experiment, start a fresh run or explicitly initialize from weights.
 
 Only training applies affine, blur, noise and flip augmentation. Training uses
 `RandomCropping(mode="center", std=None)` by default. This samples patches

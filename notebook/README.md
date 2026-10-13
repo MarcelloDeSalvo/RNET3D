@@ -78,6 +78,8 @@ The diagnostic notebooks are:
   preprocessing/augmentation per short cell, and an editable combined pipeline
   at the end. MRI/ROI/brain overlays share the RIA reference; changes in shape,
   spacing, intensities and categorical IDs are displayed after each operation.
+  Blur/noise use the corrected native grid with explicit units; the combined
+  example applies them before linear target resampling and affine augmentation.
 - [check_postprocessing.ipynb](check_postprocessing.ipynb): a visible synthetic
   example by default, with normalized-scan and explicit-file options. Separate
   cells demonstrate ventricle separation, brain hole filling, small-object removal

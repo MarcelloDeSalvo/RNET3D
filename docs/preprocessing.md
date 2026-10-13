@@ -79,7 +79,36 @@ vocabulary is retained for the established experiments.
   output grid.
 - N4 receives the correct LPS spacing, origin, and direction. Sheared grids are
   rejected by ITK/ANTs conversion rather than treated as orthogonal. Gaussian
-  blur sigma remains in voxel units; noise magnitude remains in intensity units.
+  blur defaults to voxel sigma and noise to raw input intensity units.
+  Optional millimetre blur and image-relative noise scales are explicit.
+
+## Acquisition-style intensity augmentation
+
+The shared training factory reorients/corrects units first, then applies blur and
+noise on the native grid before target resampling. Physical affine augmentation
+follows on the orthogonal target grid; normalization, cropping and optional LR
+flipping come afterward. MRI interpolation remains linear and mask interpolation
+nearest-neighbour. Blur and noise leave both masks and all grid headers unchanged.
+This order lets interpolation mix an injected noise field, unlike adding fresh
+independent noise after resampling. It approximates acquisition variability;
+Gaussian noise does not reproduce a complete modality-specific acquisition model.
+
+`GaussianBlur(..., sigma_units="voxels")` samples sigma separately for each axis
+in native voxel units. `sigma_units="mm"` divides sampled values by the affine's
+voxel sizes before calling the Gaussian filter. `Noise(..., std_units="intensity")`
+uses the sampled standard deviation directly; `std_units="image_std"` multiplies
+it by the full input MRI standard deviation, including background. The latter
+is a per-image scale, not an SNR guarantee or a statistic fitted across subjects.
+The noise mean stays in intensity units; constant images with zero mean receive
+zero added noise in image-relative mode. Existing positional constructor calls
+retain the original unit conventions.
+
+Training notebooks expose ranges and units in `PreprocessingConfig`. Defaults
+remain blur sigma 0-0.6 voxels and noise standard deviation 0-0.05 intensity units.
+The native grid changes their physical/interpolated effect, so old runs retain
+their saved `intensity_augmentation_grid="resampled"` sequence when loaded.
+Missing grid fields in older saved configurations resolve to this prior order.
+No interpolation sensitivity analysis or spatial-transform fusion is performed.
 
 ## Restoring and saving predictions
 
@@ -171,6 +200,10 @@ shows each operation in a short before/after cell. Reorientation to the shared
 RARE reference runs first, then units correction and orthogonal resampling.
 Separate examples cover normalization, label mapping, padding/cropping, grid
 scaling, physical rotation/scaling, blur, noise and anatomical LR flipping.
+Blur/noise examples start from the corrected native volume with explicit units,
+while spatial examples use the normalized target volume. The custom combined
+pipeline demonstrates native blur/noise -> resampling -> affine -> normalization
+and cropping. Its relative noise strengths are illustrative, not production defaults.
 N4 is optional for inputs that are already corrected. The final cell contains
 an editable combined pipeline; masks retain original IDs unless label mapping
 is explicitly being demonstrated. Inspection flips do not change production

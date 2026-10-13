@@ -902,9 +902,17 @@ class Scale(PreprocessingStep):
 
 
 class Noise(PreprocessingStep):
-    """Add Gaussian intensity noise; the range is in image intensity units."""
+    """Add Gaussian MRI noise with a declared standard-deviation scale.
 
-    def __init__(self, noise_range: Sequence[float], probability: float = 0.3, mean: float = 0) -> None:
+    intensity uses raw input intensity units; image_std multiplies sampled
+    bounds by the full input image's standard deviation, including background.
+    Mean remains in intensity units. Masks and image geometry are unchanged.
+    """
+
+    def __init__(
+        self, noise_range: Sequence[float], probability: float = 0.3, mean: float = 0,
+        *, std_units: Literal["intensity", "image_std"] = "intensity",
+    ) -> None:
         """Validate and store the settings for this preprocessing step."""
         super().__init__(probability=probability, global_probability=True)
 
@@ -912,8 +920,11 @@ class Noise(PreprocessingStep):
 
         if not np.isfinite(mean):
             raise ValueError("Noise mean must be finite")
+        if std_units not in ("intensity", "image_std"):
+            raise ValueError("Noise standard deviation units must be intensity or image_std")
 
         self.mean: float = mean
+        self.std_units: Literal["intensity", "image_std"] = std_units
 
     def execute(self, image: NiftiImage, is_mask: bool = False, **parameters: Any) -> NiftiImage:
         """Add sampled noise to intensities only."""
@@ -923,6 +934,12 @@ class Noise(PreprocessingStep):
         std = np.random.uniform(*self.noise_range)
 
         source_data: NDArray = image.get_fdata()
+        if self.std_units == "image_std":
+            intensity_std: float = float(np.std(source_data))
+            if not np.isfinite(intensity_std):
+                raise ValueError("Relative noise requires finite input intensities")
+            std *= intensity_std
+
         noise: NDArray = np.random.normal(self.mean, std, image.shape)
         noisy_data: NDArray = source_data + noise
 
@@ -930,13 +947,24 @@ class Noise(PreprocessingStep):
 
 
 class GaussianBlur(PreprocessingStep):
-    """Smooth intensities; sigma is measured in voxels on each axis."""
+    """Smooth MRI intensities with per-axis sigma in voxels or millimetres.
 
-    def __init__(self, gaussian_blur_range: Sequence[float], probability: float = 0.3) -> None:
+    Millimetre bounds are converted using the input affine's voxel sizes.
+    Voxel bounds retain native anisotropy; masks and geometry stay unchanged.
+    """
+
+    def __init__(
+        self, gaussian_blur_range: Sequence[float], probability: float = 0.3,
+        *, sigma_units: Literal["voxels", "mm"] = "voxels",
+    ) -> None:
         """Validate and store the settings for this preprocessing step."""
         super().__init__(probability=probability, global_probability=True)
 
         self.gaussian_blur_range: tuple[float, float] = _range(gaussian_blur_range, "Gaussian sigma", minimum=0)
+        if sigma_units not in ("voxels", "mm"):
+            raise ValueError("Blur sigma units must be voxels or mm")
+
+        self.sigma_units: Literal["voxels", "mm"] = sigma_units
 
     def execute(self, image: NiftiImage, is_mask: bool = False, **parameters: Any) -> NiftiImage:
         """Apply independently sampled per-axis smoothing to images only."""
@@ -944,6 +972,9 @@ class GaussianBlur(PreprocessingStep):
             return image
 
         sigma = np.random.uniform(*self.gaussian_blur_range, size=3)
+        if self.sigma_units == "mm":
+            spacing: NDArray = nib.affines.voxel_sizes(image.affine)
+            sigma = sigma / spacing
 
         source_data: NDArray = image.get_fdata()
         blurred_data: NDArray = gaussian_filter(source_data, sigma)

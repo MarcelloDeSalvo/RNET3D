@@ -462,10 +462,14 @@ def make_preprocessor(
     config: ExperimentConfig, *, stage: Literal["training", "validation", "inference"],
     label_mapping: dict[int, int] | None = None,
 ) -> Preprocessor:
-    """Build shared geometry; optionally retain output label IDs in evaluation GT.
+    """Build shared geometry and acquisition-style MRI-only intensity augmentation.
 
     Training uses the configured channel mapping. Full-volume evaluation can
     supply a separate mapping so merged training classes do not erase GT sides.
+    New training runs blur/add noise on the native grid before resampling,
+    followed by physical affine augmentation. Saved resampled-grid protocols
+    retain affine/blur/noise after resampling. MRI uses linear interpolation,
+    masks nearest neighbour; validation and inference have no augmentation.
     """
     from ..preprocessing.preprocessor import (
         CorrectX10, Flip, GaussianBlur, MapLabels, Noise, Normalize, PadderCutter,
@@ -476,6 +480,7 @@ def make_preprocessor(
         raise ValueError("Unknown preprocessing stage")
 
     settings = config.preprocessing
+    settings.validate()
     reference = nib.load(str(settings.reference))
     steps: list[PreprocessingStep] = [Reorient(ref_img=reference)]
     if settings.correct_units:
@@ -488,19 +493,36 @@ def make_preprocessor(
         mapping = label_mapping
 
     steps.append(MapLabels(mapping=mapping, unknown=config.labels.unknown))
+    augment_training: bool = stage == "training" and settings.augment
+    intensity_steps: list[PreprocessingStep] = []
+    if augment_training:
+        probability = settings.augmentation_probability
+        blur_range = settings.blur_sigma_range
+        blur_units = settings.blur_sigma_units
+        noise_range = settings.noise_std_range
+        noise_units = settings.noise_std_units
+
+        blur = GaussianBlur(
+            gaussian_blur_range=blur_range, probability=probability, sigma_units=blur_units,
+        )
+        noise = Noise(noise_range=noise_range, probability=probability, std_units=noise_units)
+        intensity_steps = [blur, noise]
+        if settings.intensity_augmentation_grid == "native":
+            steps.extend(intensity_steps)
+
     resampling = Resample(
         target_resolution=settings.spacing_mm, interpolation=1, orthogonal=True,
     )
     steps.append(resampling)
 
-    if stage == "training" and settings.augment:
+    if augment_training:
         affine = RandomAffine(
             scale_range=settings.scale_range, rotation_range=settings.rotation_range,
             probability=settings.augmentation_probability,
         )
         steps.append(affine)
-        steps.append(GaussianBlur(gaussian_blur_range=(0.0, 0.6), probability=settings.augmentation_probability))
-        steps.append(Noise(noise_range=(0.0, 0.05), probability=settings.augmentation_probability))
+        if settings.intensity_augmentation_grid == "resampled":
+            steps.extend(intensity_steps)
 
     steps.append(Normalize(mode=settings.normalization))
 
