@@ -1,9 +1,9 @@
-"""Original training metric factories and separate physical full-volume scores."""
+"""Training metrics for complete/partial targets and physical full-volume scores."""
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 import tensorflow as tf
 import tensorflow.keras.backend as K
@@ -15,6 +15,112 @@ from .losses import ignore_unavailable_ground_truth
 
 
 MetricFunction: TypeAlias = Callable[[tf.Tensor, tf.Tensor], tf.Tensor]
+
+
+@tf.keras.utils.register_keras_serializable(package="rnet")
+class PartialLabelDice(tf.keras.metrics.Metric):
+    """Epoch-pooled macro soft Dice for full-volume available ROI annotations.
+
+    Convert logits using full softmax, matching inference probabilities. Entries
+    marked -1 contribute nothing; available ROI negatives remain supervised even
+    where no available class has a positive target. Annotated empty ROIs count.
+    Classes with no supervision throughout the epoch are excluded from the mean.
+    This reports patch-level overlap, not full-volume animal Dice or conditional
+    probabilities from the gradient-fixed loss. Metric inputs are detached.
+    """
+
+    def __init__(
+        self, num_classes: int, *, from_logits: bool = True,
+        exclude_background: bool = True, ignore_value: float = -1,
+        smooth: float = 1e-5, name: str = "mean_dice", dtype: str = "float32",
+        **kwargs: Any,
+    ) -> None:
+        """Create per-class overlap accumulators without changing model weights."""
+        if isinstance(num_classes, bool) or not isinstance(num_classes, int) or num_classes < 2:
+            raise ValueError("Partial-label Dice requires at least two classes")
+        if not np.isfinite(smooth) or smooth <= 0:
+            raise ValueError("Dice smoothing must be positive and finite")
+        if not np.isfinite(ignore_value) or ignore_value >= 0:
+            raise ValueError("Ignore value must be finite and negative")
+
+        super().__init__(name=name, dtype=dtype, **kwargs)
+        self.num_classes: int = num_classes
+        self.from_logits: bool = from_logits
+        self.exclude_background: bool = exclude_background
+        self.ignore_value: float = ignore_value
+        self.smooth: float = smooth
+
+        shape = (num_classes,)
+        self.intersection: tf.Variable = self.add_weight(name="intersection", shape=shape, initializer="zeros")
+        self.prediction_mass: tf.Variable = self.add_weight(name="prediction_mass", shape=shape, initializer="zeros")
+        self.truth_mass: tf.Variable = self.add_weight(name="truth_mass", shape=shape, initializer="zeros")
+        self.annotated_voxels: tf.Variable = self.add_weight(name="annotated_voxels", shape=shape, initializer="zeros")
+
+    def update_state(
+        self, y_true: tf.Tensor, y_pred: tf.Tensor, sample_weight: tf.Tensor | None = None,
+    ) -> None:
+        """Pool class overlap across batches; accept scalar, sample or voxel weights."""
+        target = tf.cast(tf.stop_gradient(y_true), self.dtype)
+        predicted = tf.cast(tf.stop_gradient(y_pred), self.dtype)
+        tf.debugging.assert_rank(target, 5, message="Expected channels-last 3D batches")
+        tf.debugging.assert_equal(tf.shape(target), tf.shape(predicted))
+        tf.debugging.assert_equal(tf.shape(target)[-1], self.num_classes)
+
+        if self.from_logits:
+            predicted = tf.nn.softmax(predicted, axis=-1)
+
+        available = tf.not_equal(target, self.ignore_value)
+        zeros = tf.zeros_like(target)
+        clean_target = tf.where(available, target, zeros)
+        weights = tf.cast(available, self.dtype)
+
+        if sample_weight is not None:
+            sample_weight = tf.cast(sample_weight, self.dtype)
+            tf.debugging.assert_all_finite(sample_weight, "Metric weights must be finite")
+            tf.debugging.assert_greater_equal(sample_weight, tf.cast(0, self.dtype))
+            trailing_axes = tf.rank(target) - tf.rank(sample_weight)
+            trailing_shape = tf.ones(trailing_axes, dtype=tf.int32)
+            weight_shape = tf.concat([tf.shape(sample_weight), trailing_shape], axis=0)
+            sample_weight = tf.reshape(sample_weight, weight_shape)
+            weights = weights * sample_weight
+
+        axes = (0, 1, 2, 3)
+        overlap = predicted * clean_target * weights
+        weighted_prediction = predicted * weights
+        weighted_target = clean_target * weights
+        self.intersection.assign_add(tf.reduce_sum(overlap, axis=axes))
+        self.prediction_mass.assign_add(tf.reduce_sum(weighted_prediction, axis=axes))
+        self.truth_mass.assign_add(tf.reduce_sum(weighted_target, axis=axes))
+        self.annotated_voxels.assign_add(tf.reduce_sum(weights, axis=axes))
+
+    def result(self) -> tf.Tensor:
+        """Average supervised foreground class scores, returning zero without supervision."""
+        union = self.prediction_mass + self.truth_mass
+        scores = (2 * self.intersection + self.smooth) / (union + self.smooth)
+        active = self.annotated_voxels > 0
+        if self.exclude_background:
+            scores = scores[1:]
+            active = active[1:]
+
+        active_scores = tf.where(active, scores, tf.zeros_like(scores))
+        score_sum = tf.reduce_sum(active_scores)
+        class_count = tf.reduce_sum(tf.cast(active, self.dtype))
+        return tf.math.divide_no_nan(score_sum, class_count)
+
+    def reset_state(self) -> None:
+        """Reset all class totals between training and validation passes/epochs."""
+        for variable in self.variables:
+            variable.assign(tf.zeros_like(variable))
+
+    def get_config(self) -> dict[str, Any]:
+        """Preserve metric settings for standard Keras serialization."""
+        config = super().get_config()
+        config.update({
+            "num_classes": self.num_classes, "from_logits": self.from_logits,
+            "exclude_background": self.exclude_background, "ignore_value": self.ignore_value,
+            "smooth": self.smooth,
+        })
+        return config
 
 
 def dice_coefficient(

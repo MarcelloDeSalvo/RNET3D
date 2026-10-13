@@ -308,17 +308,24 @@ def diceCELoss_gradient_fix(
     gamma: float = 0.5, smooth: float = 1e-5, batch_wise: bool = False,
     focal_gamma: float | None = None, *, ignore_value: float = -1,
 ) -> LossFunction:
-    """Return partial-label Dice/CE on RAW ROI LOGITS, not softmax outputs.
+    """Return version-2 foreground Dice/CE on RAW ROI LOGITS.
 
-    Mask unavailable classes before softmax, then reduce only supervised entries
-    and sample/class groups. Voxels with no positive available target and batches
-    with no supervision contribute zero loss and zero gradient. This conditional
-    objective supplies no negative-only supervision at those unknown voxels.
+    Channel zero remains a softmax competitor, with no explicit background loss.
+    Unavailable anatomical logits are masked before normalization. Each available
+    foreground ROI must be completely delineated across the volume: Dice uses
+    its positive and known negative entries, including annotated empty masks.
+    CE/focal uses only voxels with a positive available foreground target and
+    averages over available foreground entries at those voxels.
 
-    Dice smoothing and CE's mean-over-classes convention match diceCELoss when
-    all classes are available and every voxel has a positive target. Existing
-    diceCELoss and inference models are unchanged. Do not compile this callback
-    directly against an existing softmax head: expose its pre-activation logits.
+    Dice averages available foreground sample/class groups (classes when batch
+    wise), using (2 * intersection + smooth) / (union + smooth). It supplies
+    negative-only supervision where CE has none. Entirely unavailable foreground
+    batches contribute zero loss and gradient. A background competitor is needed
+    to suppress isolated foreground false positives; keep channel zero available.
+
+    This foreground objective intentionally differs from the previous correction
+    and legacy diceCELoss, even for complete targets. Inference outputs and the
+    legacy loss are unchanged. Expose pre-activation logits for this callback.
     """
     if not 0 <= gamma <= 1:
         raise ValueError("gamma must be between zero and one")
@@ -339,8 +346,10 @@ def diceCELoss_gradient_fix(
         reduction_axes = (1, 2, 3)
 
     def loss_gradient_fix(target: tf.Tensor, logits: tf.Tensor) -> tf.Tensor:
-        """Compute conditional overlap/CE without dependence on ignored logits."""
+        """Separate full-volume ROI Dice validity from positive-foreground CE validity."""
         tf.debugging.assert_rank(logits, 5, message="Expected channels-last 3D batches")
+        channel_count: tf.Tensor = tf.shape(logits)[-1]
+        tf.debugging.assert_greater_equal(channel_count, 2, message="Expected background and foreground channels")
         probabilities: tf.Tensor = masked_softmax_gradient_fix(target, logits, ignore_value)
         target = tf.cast(target, probabilities.dtype)
         available: tf.Tensor = tf.not_equal(target, ignore_value)
@@ -351,19 +360,27 @@ def diceCELoss_gradient_fix(
         tf.debugging.assert_greater_equal(clean_target, lower_target_bound, message="Available targets must be nonnegative")
         tf.debugging.assert_less_equal(clean_target, upper_target_bound, message="Available targets must not exceed one")
 
-        target_mass: tf.Tensor = tf.reduce_sum(clean_target, axis=-1, keepdims=True)
-        supervised_voxels: tf.Tensor = target_mass > 0
-        valid_entries: tf.Tensor = tf.logical_and(available, supervised_voxels)
-        probabilities = tf.where(supervised_voxels, probabilities, zeros)
+        foreground_target: tf.Tensor = clean_target[..., 1:]
+        foreground_available: tf.Tensor = available[..., 1:]
+        foreground_probabilities: tf.Tensor = probabilities[..., 1:]
 
-        overlap: tf.Tensor = probabilities * clean_target
+        has_foreground_annotation: tf.Tensor = tf.reduce_any(foreground_available, axis=-1)
+        missing_background: tf.Tensor = tf.logical_not(available[..., 0])
+        missing_competitor: tf.Tensor = tf.logical_and(has_foreground_annotation, missing_background)
+        has_missing_competitor: tf.Tensor = tf.reduce_any(missing_competitor)
+        tf.debugging.assert_equal(
+            has_missing_competitor, False,
+            message="Background must remain available as a softmax competitor for foreground annotations",
+        )
+
+        overlap: tf.Tensor = foreground_probabilities * foreground_target
         intersection: tf.Tensor = tf.reduce_sum(overlap, axis=reduction_axes)
-        prediction_mass: tf.Tensor = tf.reduce_sum(probabilities, axis=reduction_axes)
-        truth_mass: tf.Tensor = tf.reduce_sum(clean_target, axis=reduction_axes)
+        prediction_mass: tf.Tensor = tf.reduce_sum(foreground_probabilities, axis=reduction_axes)
+        truth_mass: tf.Tensor = tf.reduce_sum(foreground_target, axis=reduction_axes)
         union: tf.Tensor = prediction_mass + truth_mass
-        dice_terms: tf.Tensor = 1 - 2 * (intersection + smooth) / (union + smooth)
+        dice_terms: tf.Tensor = 1 - (2 * intersection + smooth) / (union + smooth)
 
-        active_classes: tf.Tensor = tf.reduce_any(valid_entries, axis=reduction_axes)
+        active_classes: tf.Tensor = tf.reduce_any(foreground_available, axis=reduction_axes)
         zero_dice: tf.Tensor = tf.zeros_like(dice_terms)
         dice_terms = tf.where(active_classes, dice_terms, zero_dice)
         class_weights: tf.Tensor = tf.cast(active_classes, probabilities.dtype)
@@ -371,18 +388,23 @@ def diceCELoss_gradient_fix(
         class_count: tf.Tensor = tf.reduce_sum(class_weights)
         dice_loss: tf.Tensor = tf.math.divide_no_nan(dice_sum, class_count)
 
+        foreground_mass: tf.Tensor = tf.reduce_sum(foreground_target, axis=-1, keepdims=True)
+        foreground_voxels: tf.Tensor = foreground_mass > 0
+        ce_entries: tf.Tensor = tf.logical_and(foreground_available, foreground_voxels)
+        foreground_zeros: tf.Tensor = tf.zeros_like(foreground_probabilities)
+
         upper_bound: float = 1 - smooth
-        clipped: tf.Tensor = tf.clip_by_value(probabilities, smooth, upper_bound)
+        clipped: tf.Tensor = tf.clip_by_value(foreground_probabilities, smooth, upper_bound)
         log_probabilities: tf.Tensor = tf.math.log(clipped)
-        ce_terms: tf.Tensor = -clean_target * log_probabilities
+        ce_terms: tf.Tensor = -foreground_target * log_probabilities
 
         if focal_gamma is not None:
             complement: tf.Tensor = 1 - clipped
             focal_weights: tf.Tensor = tf.pow(complement, focal_gamma)
             ce_terms = focal_weights * ce_terms
 
-        ce_terms = tf.where(valid_entries, ce_terms, zeros)
-        entry_weights: tf.Tensor = tf.cast(valid_entries, probabilities.dtype)
+        ce_terms = tf.where(ce_entries, ce_terms, foreground_zeros)
+        entry_weights: tf.Tensor = tf.cast(ce_entries, probabilities.dtype)
         ce_sum: tf.Tensor = tf.reduce_sum(ce_terms)
         entry_count: tf.Tensor = tf.reduce_sum(entry_weights)
         ce_loss: tf.Tensor = tf.math.divide_no_nan(ce_sum, entry_count)

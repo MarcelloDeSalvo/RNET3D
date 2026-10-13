@@ -17,10 +17,43 @@ was changed, and the notebooks were not executed.
 
 `Resample` and `Scale` use SciPy orders (`0` or `1`). `RandomAffine` retains its
 SimpleITK enum argument (`sitkNearestNeighbor` or `sitkLinear`). These numeric
-conventions are different; using the defaults is recommended. The legacy
-`Scale(..., interpolation=...)` spelling still works with a deprecation warning.
+conventions are different; using the defaults is recommended.
+`Scale(..., interpolation=...)` is the regular image-interpolation argument.
 
 ## Geometry and transformations
+
+MRI notebooks use `example/RARE/TBI_fm_19_49/Anat/TBI_fm_19_49_N4.nii.gz`
+as the common reorientation reference. Its axis codes are **R, I, A**. This
+means LR is axis 0, IS is axis 1, and AP is axis 2. The reference determines
+axis ordering/signs, not output voxel size or shape. Spatial parameters are
+sampled once per aligned MRI/ROI/brain-mask group. Masks use nearest-neighbour
+interpolation even when MRI uses linear interpolation.
+
+`Flip(anatomical_axis="LR")` resolves LR from each input affine, avoiding fixed
+voxel-axis assumptions when the reference changes. `Flip(axis_list=[...])`
+remains available for an explicitly selected array axis. Reorientation preserves
+physical anatomy; augmentation reflects voxel values on a fixed grid.
+
+Flipping is off by default. D1 training/study notebooks opt into LR flipping at
+0.5; rat fine-tuning/CV retain 0.5 and MouseFull uses 0.0. Validation and inference never flip
+randomly. The historical D1 notebook's validation and inference flips were
+removed as well; its training flip remains aligned with the RIA reference.
+
+Ipsi/contra labels in these datasets are relative to the lesion or craniotomy.
+Reflecting MRI and masks together also reflects that side, so the class IDs
+remain unchanged. Swapping them would reverse their meaning. Class permutation
+is a different policy for labels defined as absolute anatomical left/right.
+Unavailable-label channels likewise retain their current identities because
+relative class IDs do not change during this augmentation.
+
+For a future unmerged ipsi/contra model, an explicit surgery-side signal would
+avoid relying on lesion visibility to resolve symmetric anatomy in SHAM. One
+option is a normalized LR coordinate channel whose sign is relative to the
+known lesion/craniotomy hemisphere, generated on the full scan before cropping
+and transformed with the MRI/masks. This is a proposed new input variant; it is
+not added to the current one-channel architecture. It would require the actual
+surgical hemisphere to be verified, and new training. The existing D1 merged
+vocabulary is retained for the established experiments.
 
 - Resampling preserves physical center and orientation and constructs an affine
   for the actual output shape. Reference-grid resampling targets the specified
@@ -130,3 +163,21 @@ aligned image, ROI-mask, and brain-mask headers under the new grid checks.
 
 These changes alter preprocessing behavior; historical metrics have not been
 recomputed. No model training or interpolation sensitivity analysis was run.
+
+## Visual step checks
+
+`notebook/check_preprocessing.ipynb` selects one normalized animal/timepoint and
+shows each operation in a short before/after cell. Reorientation to the shared
+RARE reference runs first, then units correction and orthogonal resampling.
+Separate examples cover normalization, label mapping, padding/cropping, grid
+scaling, physical rotation/scaling, blur, noise and anatomical LR flipping.
+N4 is optional for inputs that are already corrected. The final cell contains
+an editable combined pipeline; masks retain original IDs unless label mapping
+is explicitly being demonstrated. Inspection flips do not change production
+augmentation settings.
+
+`utils/inspection.py` groups MRI and masks in `InspectionVolume`, applies shared
+transforms, and shows aligned native Plotly overlays with numeric summaries.
+Seeded previews restore the global NumPy RNG state after processing. Panels
+use relative slice positions within their own grids, rather than pretending to
+compare a common world-space slice after cropping/resampling.

@@ -21,10 +21,128 @@ from sklearn.decomposition import PCA
 
 if TYPE_CHECKING:
     from skimage.measure._regionprops import RegionProperties
+    from ..experiments.config import LabelConfig, PostprocessingConfig
 
 Mask: TypeAlias = NDArray[Any]
 FloatArray: TypeAlias = NDArray[np.float64]
 PostprocessCallback: TypeAlias = Callable[[Mask], Mask]
+
+
+@dataclass(frozen=True)
+class OutputLabels:
+    """Mappings for predictions and source GT, plus the exported region names."""
+
+    prediction_mapping: dict[int, int]
+    ground_truth_mapping: dict[int, int]
+    names: dict[int, str]
+
+    @classmethod
+    def resolve(
+        cls, labels: LabelConfig, *, split_ventricles: bool, original_label_ids: bool,
+    ) -> OutputLabels:
+        """Resolve label IDs without pretending a merged class has an inverse."""
+        source_mapping = dict(labels.mapping)
+        names = dict(enumerate(labels.names))
+
+        if split_ventricles:
+            expected = {0: 0, 1: 1, 3: 2, 13: 2, 21: 3}
+            if source_mapping != expected:
+                raise ValueError("Ventricle splitting requires the four-class merged D1/rat mapping")
+
+            source_mapping = {0: 0, 1: 1, 3: 2, 13: 3, 21: 4}
+            names = {0: "Background", 1: "Lesion", 2: "Contra ventricle",
+                     3: "Ipsi ventricle", 4: "Third ventricle"}
+
+        prediction_mapping = {channel: channel for channel in names}
+        if original_label_ids:
+            sources_by_channel: dict[int, list[int]] = {}
+            for source, channel in source_mapping.items():
+                sources_by_channel.setdefault(channel, []).append(source)
+            ambiguous = any(
+                channel != 0 and len(sources) != 1
+                for channel, sources in sources_by_channel.items()
+            )
+            if ambiguous:
+                raise ValueError("Original label IDs require separating merged ventricles; enable split_ventricles")
+
+            prediction_mapping = {0: 0}
+            for channel, sources in sources_by_channel.items():
+                if channel != 0:
+                    prediction_mapping[channel] = sources[0]
+
+        ground_truth_mapping = {
+            source: prediction_mapping[channel] for source, channel in source_mapping.items()
+        }
+        output_names = {prediction_mapping[channel]: name for channel, name in names.items()}
+        return cls(prediction_mapping, ground_truth_mapping, output_names)
+
+
+@dataclass(frozen=True)
+class ProcessedVolume:
+    """Full-volume masks after postprocessing, with final export label IDs."""
+
+    regions: Mask
+    brain_mask: Mask | None
+
+
+class FullVolumePostprocessor:
+    """Apply historical callbacks, then map categorical predictions to export IDs.
+
+    Brain morphology acts only on the binary brain head. It neither changes
+    categorical ROI anatomy nor gates ROI predictions with the brain mask.
+    Ground truth is mapped from its source IDs and is never postprocessed.
+    """
+
+    def __init__(
+        self, labels: LabelConfig, settings: PostprocessingConfig, *, original_label_ids: bool,
+    ) -> None:
+        """Prepare callbacks and verify that the output vocabulary is unambiguous."""
+        self.settings: PostprocessingConfig = settings
+        self.labels: OutputLabels = OutputLabels.resolve(
+            labels, split_ventricles=settings.split_ventricles,
+            original_label_ids=original_label_ids,
+        )
+        self.split: PostprocessCallback | None = None
+        self.clean: PostprocessCallback | None = None
+
+        if settings.split_ventricles:
+            self.split = ipsi_contra_division_callback(
+                use_centroids=settings.use_centroids,
+                default_hemisphere=settings.default_hemisphere,
+                lesion_voxels_threshold=settings.lesion_voxels_threshold,
+            )
+
+        if settings.clean_brain_mask:
+            self.clean = morphology_refinement_callback(
+                fill_small_holes=settings.fill_small_holes,
+                remove_small_objects=settings.remove_small_objects,
+                holes_max_area=settings.holes_max_area,
+                object_min_area=settings.object_min_area,
+            )
+
+    def process(self, regions: Mask, brain_mask: Mask | None) -> ProcessedVolume:
+        """Process copies so raw model predictions remain available to the caller."""
+        processed_regions = regions.copy()
+        if self.split is not None:
+            processed_regions = self.split(processed_regions)
+
+        mapping = self.labels.prediction_mapping
+        valid_labels = list(mapping)
+        if not np.isin(processed_regions, valid_labels).all():
+            raise ValueError("Predicted labels do not match the postprocessing vocabulary")
+
+        exported_regions = np.zeros(regions.shape, dtype=np.int16)
+        for channel, output_id in mapping.items():
+            exported_regions[processed_regions == channel] = output_id
+
+        processed_brain = None
+        if brain_mask is not None:
+            processed_brain = brain_mask.copy()
+            if self.clean is not None:
+                processed_brain = self.clean(processed_brain)
+            processed_brain = processed_brain.astype(np.int16)
+
+        return ProcessedVolume(exported_regions, processed_brain)
 
 
 def morphology_refinement_callback(

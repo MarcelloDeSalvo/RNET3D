@@ -1,0 +1,230 @@
+"""Exercise explicit notebook callbacks, independent fold state and recovery."""
+
+import json
+import ast
+from dataclasses import replace
+from pathlib import Path
+
+import numpy as np
+import pytest
+import tensorflow as tf
+
+from test_experiments import experiment
+from src.evaluation.k_fold import FoldContext, FoldSplit, _build_callbacks
+from src.experiments.config import InferenceConfig
+from src.experiments.data import SubjectSplit, make_cv_splits, prepare_data
+from src.experiments.training import (
+    _copy_callbacks, callback_configuration, run_cross_validation, run_training,
+)
+
+
+def test_callbacks_are_copied_with_separate_fold_paths_and_exact_options(experiment, tmp_path):
+    callbacks = [
+        tf.keras.callbacks.ReduceLROnPlateau(factor=0.5, patience=10, min_lr=1e-7, verbose=1),
+        tf.keras.callbacks.TensorBoard(log_dir='tensorboard', histogram_freq=1),
+        tf.keras.callbacks.EarlyStopping(patience=20, mode='min', restore_best_weights=False),
+        tf.keras.callbacks.CSVLogger('logs/training.csv', append=True),
+    ]
+    clone_lists = []
+    for index in (0, 1):
+        folder = tmp_path / f'fold_{index}'
+        context = FoldContext(
+            split=FoldSplit(index=index, train_ids=['train'], val_ids=['val']),
+            output_dir=folder, config=experiment.training, checkpoint_path=folder / 'best.weights.h5',
+        )
+        cloned = _build_callbacks(context, lambda context: _copy_callbacks(callbacks, context))
+        clone_lists.append(cloned)
+        assert [type(callback).__name__ for callback in cloned] == [
+            'ReduceLROnPlateau', 'TensorBoard', 'EarlyStopping', 'CSVLogger', 'ModelCheckpoint',
+        ]
+        assert cloned[0].min_lr == 1e-7
+        assert cloned[1].histogram_freq == 1
+        assert cloned[1].log_dir == str(folder / 'tensorboard')
+        assert cloned[3].filename == str(folder / 'logs/training.csv')
+        assert Path(cloned[3].filename).parent.is_dir()
+    assert clone_lists[0][0] is not clone_lists[1][0]
+    clone_lists[0][0].wait = 9
+    assert clone_lists[1][0].wait == callbacks[0].wait == 0
+    assert callbacks[1].log_dir == 'tensorboard'
+    assert callbacks[3].filename == 'logs/training.csv'
+    assert all(callback.model is None for callback in callbacks)
+
+
+def test_explicit_callbacks_resume_optimizer_lr_state_and_csv_without_mutating_templates(experiment):
+    config = replace(experiment, training=replace(experiment.training, epochs=2, batch_size=1),
+                     inference=InferenceConfig(enabled=False, stride=16))
+    data = prepare_data(config)
+    split = SubjectSplit(train=('D1/SUBJ_0000', 'D1/SUBJ_0001'),
+                         validation=('D1/SUBJ_0002',), test=('D1/SUBJ_0003',))
+    control = {'interrupt': True}
+
+    class Interrupt(tf.keras.callbacks.Callback):
+        def on_epoch_begin(self, epoch, logs=None):
+            if epoch == 1 and control['interrupt']:
+                raise RuntimeError('stop after one saved epoch')
+
+    callbacks = [
+        tf.keras.callbacks.ReduceLROnPlateau(patience=1, min_lr=1e-7),
+        tf.keras.callbacks.CSVLogger('training.csv', append=True), Interrupt(),
+    ]
+    configuration = callback_configuration(callbacks)
+    with pytest.raises(RuntimeError, match='saved epoch'):
+        run_training(data, split, callbacks=callbacks)
+    run = next((Path(config.training.output_dir) / config.training.model_name).iterdir())
+    state = json.loads((run / 'fold_0/training_state.json').read_text())
+    assert state['completed_epochs'] == 1
+    assert json.loads((run / 'callbacks.json').read_text()) == configuration
+    control['interrupt'] = False
+    result = run_training(data, split, resume_run=run, callbacks=callbacks)
+    assert len(result.histories[0]['loss']) == 2
+    lines = (run / 'fold_0/training.csv').read_text().splitlines()
+    assert len(lines) == 3 and lines[1].startswith('0,') and lines[2].startswith('1,')
+    assert all(callback.model is None for callback in callbacks)
+    assert callback_configuration(callbacks) == configuration
+    callbacks[0].patience = 2
+    with pytest.raises(ValueError, match='callback settings differ'):
+        run_training(data, split, resume_run=run, callbacks=callbacks)
+
+
+def test_cv_runs_full_budget_without_implicit_early_stopping(experiment):
+    config = replace(experiment, training=replace(experiment.training, k=2, epochs=2, batch_size=1),
+                     inference=InferenceConfig(enabled=False, stride=16), early_stopping_patience=0)
+    data = prepare_data(config)
+    folds = make_cv_splits(data.subjects.subject_ids, k=2, seed=42)
+    callbacks = [tf.keras.callbacks.ReduceLROnPlateau(factor=0.5, patience=10, min_lr=1e-7)]
+    result = run_cross_validation(data, folds=folds, callbacks=callbacks)
+    assert all(len(history['loss']) == 2 for history in result.histories)
+    for index in (0, 1):
+        state = json.loads((result.run_dir / f'fold_{index}/training_state.json').read_text())
+        assert [entry['class'] for entry in state['callbacks']] == [
+            'ReduceLROnPlateau', 'ModelCheckpoint', 'EpochCheckpoint',
+        ]
+    assert callbacks[0].model is None and callbacks[0].wait == 0 and np.isinf(callbacks[0].best)
+    callbacks[0].min_lr = 1e-6
+    with pytest.raises(ValueError, match='callback settings differ'):
+        run_cross_validation(data, folds=folds, callbacks=callbacks, resume_run=result.run_dir)
+
+
+def test_study_forwards_same_explicit_list_and_records_settings(experiment, tmp_path, monkeypatch):
+    from src.experiments import ablation
+    from src.evaluation.k_fold import TrainingResult
+    from src.experiments.data import make_split
+
+    data = prepare_data(experiment)
+    split = make_split(data.subjects, seed=42)
+    received = []
+
+    def runner(prepared, selection, *, resume_run, callbacks):
+        received.append(callbacks)
+        path = prepared.config.training.start_run()
+        return TrainingResult(run_dir=path)
+
+    monkeypatch.setattr(ablation, 'run_training', runner)
+    callbacks = [tf.keras.callbacks.ReduceLROnPlateau(min_lr=1e-7)]
+    variants = [ablation.AblationVariant('reference'), ablation.AblationVariant('augmented', 'augment', True)]
+    folder = tmp_path / 'study'
+    ablation.run_ablation(data, variants, study_dir=folder, split=split, callbacks=callbacks)
+    assert len(received) == 2 and all(value is callbacks for value in received)
+    contract = json.loads((folder / 'study.json').read_text())
+    assert contract['callbacks'] == callback_configuration(callbacks)
+    callbacks[0].min_lr = 1e-6
+    with pytest.raises(ValueError, match='Resume study'):
+        ablation.run_ablation(data, variants, study_dir=folder, split=split, callbacks=callbacks, resume=True)
+
+
+def test_visible_notebook_lists_match_original_single_and_cv_policies():
+    root = Path(__file__).resolve().parents[1] / 'notebook'
+    for path in root.glob('0*.ipynb'):
+        cells = json.loads(path.read_text(encoding='utf-8'))['cells']
+        sources = [''.join(cell['source']) for cell in cells if cell['cell_type'] == 'code']
+        for index, source in enumerate(sources):
+            compile(source, f'{path.name}:{index}', 'exec')
+            for node in ast.walk(ast.parse(source)):
+                if isinstance(node, ast.Call) and any(keyword.arg == 'callbacks' for keyword in node.keywords):
+                    function_name = getattr(node.func, 'id', None)
+                    assert function_name in ('run_training', 'run_cross_validation', 'run_ablation', 'run_model_comparison')
+        configs = [source for source in sources if 'training = TrainingConfig(' in source]
+        if not configs:
+            continue
+        config = configs[0]
+        assert 'default_callbacks=False' in config
+        source = next(source for source in sources if 'callbacks: list[tf.keras.callbacks.Callback]' in source)
+        namespace = {'MODE': 'fixed_split'}
+        exec(source, namespace)
+        callbacks = namespace['callbacks']
+        assert callbacks[0].factor == 0.5 and callbacks[0].patience == 10 and callbacks[0].min_lr == 1e-7
+        if path.name.startswith(('02_', '04_', '06_')):
+            assert len(callbacks) == 1
+        else:
+            assert [type(callback).__name__ for callback in callbacks] == [
+                'ReduceLROnPlateau', 'TensorBoard', 'EarlyStopping', 'CSVLogger',
+            ]
+            assert callbacks[1].histogram_freq == 1
+            assert callbacks[2].patience == 20
+        if path.name.startswith(('07_', '07f_', '08_')):
+            namespace['MODE'] = 'cross_validation'
+            exec(source, namespace)
+            assert len(namespace['callbacks']) == 1
+        calls = [source for source in sources if any(name in source for name in [
+            'result = run_training(', 'result = run_cross_validation(',
+            'study = run_ablation(', 'study = run_model_comparison(',
+        ])]
+        assert len(calls) == 1 and 'callbacks=callbacks' in calls[0]
+
+
+def test_extra_checkpoint_uses_its_own_file_and_cannot_replace_managed_best(experiment, tmp_path):
+    folder = tmp_path / 'fold_0'
+    folder.mkdir()
+    context = FoldContext(
+        split=FoldSplit(index=0, train_ids=['train'], val_ids=['val']), output_dir=folder,
+        config=experiment.training, checkpoint_path=folder / 'best.weights.h5',
+    )
+    extra = tf.keras.callbacks.ModelCheckpoint('extra.weights.h5', save_weights_only=True)
+    cloned = _build_callbacks(context, lambda context: _copy_callbacks([extra], context))
+    assert cloned[0].filepath == str(folder / 'extra.weights.h5')
+    assert cloned[1].filepath == str(context.checkpoint_path)
+    duplicate = tf.keras.callbacks.ModelCheckpoint('best.weights.h5')
+    with pytest.raises(ValueError, match='different file'):
+        _build_callbacks(context, lambda context: _copy_callbacks([duplicate], context))
+
+
+def test_recovery_uses_managed_selection_when_an_extra_checkpoint_has_another_monitor(tmp_path):
+    from src.evaluation.training_state import EpochCheckpoint
+
+    folder = tmp_path / 'fold_0'
+    folder.mkdir()
+    image = tf.keras.Input((1,))
+    output = tf.keras.layers.Dense(1)(image)
+    model = tf.keras.Model(image, output)
+    model.compile(optimizer='adam', loss='mse')
+    model.stop_training = False
+    managed_file = folder / 'best.weights.h5'
+    model.save_weights(str(managed_file))
+    extra = tf.keras.callbacks.ModelCheckpoint(str(folder / 'extra.weights.h5'), monitor='loss')
+    managed = tf.keras.callbacks.ModelCheckpoint(str(managed_file), monitor='val_loss')
+    extra.best = 0.1
+    managed.best = 0.5
+    state = EpochCheckpoint(folder, [extra, managed], resume=False, monitor='val_loss')
+    state.set_model(model)
+    state.on_epoch_begin(0)
+    state.on_epoch_end(0, {'val_loss': 0.5, 'loss': 0.1})
+    assert state.record['selected_metric'] == 0.5
+    assert (folder / state.record['selected_checkpoint']).is_file()
+
+
+def test_fixed_split_stock_list_writes_tensorboard_histograms_and_csv(experiment):
+    config = replace(experiment, inference=InferenceConfig(enabled=False, stride=16))
+    data = prepare_data(config)
+    split = SubjectSplit(train=('D1/SUBJ_0000', 'D1/SUBJ_0001'),
+                         validation=('D1/SUBJ_0002',), test=('D1/SUBJ_0003',))
+    callbacks = [
+        tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=10, min_lr=1e-7),
+        tf.keras.callbacks.TensorBoard(log_dir='tensorboard', histogram_freq=1),
+        tf.keras.callbacks.EarlyStopping(monitor='val_loss', mode='min', patience=20, restore_best_weights=False),
+        tf.keras.callbacks.CSVLogger('training.csv', append=True),
+    ]
+    result = run_training(data, split, callbacks=callbacks)
+    folder = result.run_dir / 'fold_0'
+    assert (folder / 'training.csv').is_file()
+    assert list((folder / 'tensorboard').rglob('events.out.tfevents.*'))
+    assert all(callback.model is None for callback in callbacks)

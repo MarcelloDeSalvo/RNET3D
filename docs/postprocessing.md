@@ -45,5 +45,23 @@ The hard split still applies to missing/undersized lesions in either mode.
 Verification: 18 focused tests, including crossing components, on-plane points
 and empty ipsilateral selections. Exact output comparison against the previous
 committed version passed for 96 synthetic cases spanning both split modes,
-both fallback hemispheres and absent/tiny/valid lesions. No inference or
-training notebooks were changed.
+both fallback hemispheres and absent/tiny/valid lesions.
+
+## Visual step checks
+
+`notebook/check_postprocessing.ipynb` provides a short runnable flow with
+separate cells for merged-ventricle separation, brain-hole filling, small-object
+removal and restoration of original annotation IDs. A synthetic prediction
+with known sides, a brain hole and an island makes the default behavior visible.
+Select normalized annotations as a demonstration input or explicit MRI/ROI/brain
+files to inspect real outputs; specify whether the ROI file contains original
+or raw model IDs. All inputs first follow the shared RIA reference. Real inputs
+also use the configured units correction and 0.1 mm orthogonal grid.
+
+Intermediate figures name their model/postprocessed class IDs explicitly. The
+last cell uses `FullVolumePostprocessor` with editable `PostprocessingConfig`
+settings and restores original IDs. MouseFull keeps its directly predicted
+sides. Brain cleanup does not modify categorical ROI masks. Displays remain on
+the prepared reference grid; full-volume evaluation restores the original MRI
+grid when exporting predictions. No source files or performance results are
+rewritten by this diagnostic notebook.

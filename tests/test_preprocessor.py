@@ -92,9 +92,8 @@ def test_linear_integer_images_and_discrete_masks(step):
     assert values[voxel] == pytest.approx(source_coordinate[0])
 
 
-def test_legacy_scale_keyword_keeps_masks_discrete():
-    with pytest.warns(DeprecationWarning, match="interpolation"):
-        step = p.Scale(2, interpolation=1)
+def test_scale_keeps_masks_discrete_with_linear_image_interpolation():
+    step = p.Scale(2, interpolation=1)
     output = step.execute(image(np.pad(np.ones((2, 2, 2)), 1)), is_mask=True)
     assert set(np.unique(output.get_fdata())) == {0, 1}
 

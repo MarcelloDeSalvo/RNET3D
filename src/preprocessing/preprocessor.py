@@ -8,7 +8,7 @@ import warnings
 from itertools import product
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 import ants
 import nibabel as nib
@@ -1040,29 +1040,61 @@ class RandomAffine(PreprocessingStep):
 
 
 class Flip(PreprocessingStep):
-    """Reflect anatomy within a fixed grid for augmentation, not reorientation."""
+    """Reflect aligned MRI/masks on a fixed grid, retaining semantic label IDs.
+
+    Anatomical axes are resolved from the image affine rather than assumed voxel
+    indices. Lesion/craniotomy-relative ipsi/contra labels travel with anatomy;
+    they must not be swapped when the lesion/surgical side is reflected too.
+    This step does not implement fixed-left/right label permutations.
+    """
 
     spatial = True
 
-    def __init__(self, axis_list: Sequence[int], probability: float = 0.5, verbose: bool = False) -> None:
+    def __init__(
+        self, axis_list: Sequence[int] | None = None, probability: float = 0.5,
+        verbose: bool = False, *, anatomical_axis: Literal["LR", "AP", "IS"] | None = None,
+    ) -> None:
         """Validate and store the settings for this preprocessing step."""
         super().__init__(verbose, probability, global_probability=True)
 
-        if len(axis_list) == 0 or any(not isinstance(axis, (int, np.integer)) or axis not in (0, 1, 2) for axis in axis_list):
-            raise ValueError("Flip axes must be chosen from 0, 1, 2")
+        if (axis_list is None) == (anatomical_axis is None):
+            raise ValueError("Choose voxel axes or one anatomical axis")
+        if anatomical_axis is not None and anatomical_axis not in ("LR", "AP", "IS"):
+            raise ValueError("Anatomical flip axis must be LR, AP or IS")
+        if axis_list is not None:
+            if len(axis_list) == 0 or any(not isinstance(axis, (int, np.integer)) or axis not in (0, 1, 2) for axis in axis_list):
+                raise ValueError("Flip axes must be chosen from 0, 1, 2")
 
-        self.axis_list: list[int] = list(axis_list)
+        self.axis_list: list[int] | None = None
+        if axis_list is not None:
+            self.axis_list = list(axis_list)
+        self.anatomical_axis: Literal["LR", "AP", "IS"] | None = anatomical_axis
+
+    def _axes(self, image: NiftiImage) -> list[int]:
+        """Resolve the chosen anatomical direction to a voxel axis on this grid."""
+        if self.axis_list is not None:
+            return self.axis_list
+        directions = {"LR": ("L", "R"), "AP": ("A", "P"), "IS": ("I", "S")}
+        codes = nib.aff2axcodes(image.affine)
+        expected = directions[self.anatomical_axis]
+        axes = [index for index, code in enumerate(codes) if code in expected]
+        if len(axes) != 1:
+            raise ValueError("Cannot identify a unique anatomical flip axis from the image affine")
+        return axes
 
     def sample_parameters(self, image: NiftiImage) -> dict[str, Any]:
         """Choose a shared augmentation axis."""
-        sampled_axis = np.random.choice(self.axis_list)
+        axes = self._axes(image)
+        sampled_axis = np.random.choice(axes)
         axis: int = int(sampled_axis)
 
         return {"axis": axis}
 
     def execute(self, image: NiftiImage, is_mask: bool = False, *, axis: int | None = None) -> NiftiImage:
         """Flip voxel values on the unchanged grid; repeating the same flip undoes it."""
-        axis = int(np.random.choice(self.axis_list)) if axis is None else axis
+        if axis is None:
+            parameters = self.sample_parameters(image)
+            axis = parameters["axis"]
 
         if axis not in (0, 1, 2):
             raise ValueError("Flip axis must be 0, 1, or 2")

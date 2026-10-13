@@ -2,7 +2,7 @@
 
 `src/evaluation/losses.py` and `metrics.py` now have typed factories/callbacks,
 short docstrings, named intermediate values and blank lines between logical
-sections. Factory signatures, returned callback names, smoothing placement,
+sections. Legacy factory signatures, returned callback names, smoothing placement,
 thresholds, class/background selection and reduction formulas are preserved.
 
 Combined losses construct their component callbacks once. Metrics reuse the
@@ -68,7 +68,7 @@ For softmax probabilities `p = softmax(z)`, a masked channel `j` can have
 `dL/dp_j = 0` while `dL/dz_j = -p_j * sum_i(p_i * dL/dp_i)` remains nonzero.
 Its logit still changes the normalization of valid probabilities.
 
-**Conclusion:** the current implementation does not guarantee zero ROI-loss
+**Conclusion:** the legacy implementation does not guarantee zero ROI-loss
 gradient for unannotated logits. This is a property of the implemented loss and
 activation, not a numerical artifact introduced by the refactor. The check does
 not measure segmentation performance or independently establish the provenance
@@ -77,8 +77,8 @@ of every historical training run.
 If MouseFull results must satisfy that zero-gradient requirement, the objective
 needs correction and the affected model must be trained/evaluated under the
 corrected protocol. Check the actual run configuration before deciding which
-reported results require replacement. This refactor deliberately does not choose
-a new partial-label objective, change softmax, or launch retraining.
+reported results require replacement. The separate correction below changes the
+training objective while retaining the inference softmax and architecture.
 
 ## Other existing behaviors retained for later decisions
 
@@ -102,7 +102,7 @@ The original refactor did not add a new objective or launch training. The
 subsequent opt-in correction is described below; the original loss and metrics
 remain available with their existing computations.
 
-## Separate partial-label gradient correction
+## Version-2 foreground partial-label gradient correction
 
 `diceCELoss_gradient_fix` in `src/evaluation/losses.py` consumes **raw logits**.
 It replaces unavailable logits with negative infinity before softmax, removing
@@ -112,29 +112,71 @@ explicitly without producing NaNs. Half precision is promoted to float32.
 
 The target is a channels-last 3D batch `(N, X, Y, Z, C)`: `-1` means unavailable,
 and available entries lie in `[0, 1]`. The sentinel can be configured with
-`ignore_value`. Voxels without a positive available target are excluded from
-both terms. This avoids assigning an unknown true class to an available class,
-but provides no negative-only supervision at those voxels. A single available
-class gives no class-competition signal.
+`ignore_value`. **Channel zero must remain available wherever foreground ROIs
+are available.** It is a competing output, not an explicit Dice or CE target.
+Removing it would leave no trainable background competitor when only one ROI
+is annotated. An entirely unavailable vector is still permitted.
 
-Dice averages over active sample/class groups (or active classes when
-`batch_wise=True`); CE/focal averages over supervised available entries.
-Unavailable groups and entries no longer dilute the loss. An unsupervised batch
-returns zero loss and zero gradient. The historical Dice smoothing and CE
-mean-over-classes convention are retained. Fully annotated one-hot inputs match
-the original loss values and logit gradients. Partial-label loss magnitudes
-change because normalization and reductions change.
+An available foreground ROI means complete annotation throughout the volume:
+its positive voxels and its negative entries both supply Dice supervision.
+Zero-valued source voxels need not identify anatomical background; they may be
+unselected anatomy or unavailable regions. Those voxels are nevertheless known
+negatives for a completely annotated selected ROI. This assumption does not
+support scribbles, limited annotated slices or incomplete ROI contours without
+an additional spatial validity mask.
+
+Foreground Dice uses `(2 * intersection + smooth) / (prediction + truth + smooth)`
+and averages only available foreground sample/class groups (classes when
+`batch_wise=True`). Annotated empty groups remain in the mean and retain
+negative-only supervision. Perfect empty reference/prediction gives zero Dice
+loss, rather than the legacy doubled-smoothing constant. Empty-ROI gradients
+can be small when prediction mass greatly exceeds smoothing; gradient checks
+do not establish practical convergence.
+
+CE/focal uses only voxels with a positive available foreground target. There is
+no background-target CE. It retains class-mean scaling: sum foreground CE terms
+and divide by the number of available foreground entries at those positive
+voxels. For one positive voxel and two available foreground classes, the CE is
+`-log(p_target) / 2`. Batches with no foreground positives have zero CE but still
+receive Dice supervision if an ROI is annotated. No foreground annotations at
+all gives zero combined loss and gradient. Background receives indirect gradients
+through normalization; unavailable anatomical logits receive exactly zero ROI
+loss gradient. Zeroing only post-softmax terms cannot provide that guarantee.
+
+This objective intentionally differs from both the version-1 correction and the
+legacy loss, including on complete targets. Gamma/focal options remain available,
+but changed supervision and reductions mean historical loss magnitudes are not
+directly comparable. Legacy loss factories retain their original computations.
 
 Use [check_partial_label_loss_gradient.ipynb](../notebook/check_partial_label_loss_gradient.ipynb)
 for probability/gradient tables, native Plotly comparisons, finite differences,
-extreme-logit checks, fully annotated equivalence, mixed annotation patterns,
-and an example training view of the real network. The training view shares
+extreme-logit checks, foreground/background cases, false-positive penalties,
+mixed annotation patterns, and an example training view of the real network.
+The training view shares
 weights and exposes the tensor before the existing `regions` softmax through a
 linear float32 output. Original builders and inference outputs are unchanged.
 Do not attach the new loss directly to an existing softmax output, or attach
 probability-based ROI metrics unchanged to the logits output. Saving the training
 view produces a logits-output model; save/use the original inference view when
 probabilities are required.
+
+`PartialLabelDice` supplies epoch-pooled macro soft Dice for logits-based training.
+It uses full softmax probabilities, then masks unavailable target entries,
+retaining available ROI negatives even without a positive target.
+Background and classes with no
+supervision are excluded from the macro mean. Its accumulators pool batches
+within each class, avoiding dilution by entirely unavailable classes/samples.
+The experiment builder logs `regions_logits_mean_dice` and
+`val_regions_logits_mean_dice`. Metric inputs are detached; ROI loss values,
+gradients, network weights and inference outputs remain unchanged. This is a
+patch-level training monitor, not a substitute for full-volume animal Dice.
+
+New experiments record `LossConfig.gradient_fix_version=2`. Older saved
+`dice_ce_gradient_fix` configurations without this field are identified as
+version 1: offline evaluation and backbone initialization remain available,
+but fitting/resuming under the revised objective requires a new run/study.
+No old checkpoint is retroactively corrected by the new loss. Legacy
+`dice_ce` configurations still load and resume under their existing objective.
 
 The zero-gradient contract applies to the ROI loss derivative with respect to
 unavailable ROI logits. Auxiliary tasks and fully annotated samples can still

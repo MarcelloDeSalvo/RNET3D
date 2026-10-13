@@ -13,7 +13,7 @@ from src.evaluation.losses import diceCELoss, diceCELoss_gradient_fix, masked_so
 @pytest.mark.parametrize("compiled", [False, True])
 def test_unavailable_logits_have_zero_gradient_and_no_effect(batch_wise, focal_gamma, compiled):
     """Check exact zero gradients and robustness to extreme ignored logits."""
-    target = tf.constant([[[[[1., 0., -1.], [0., 1., -1.]]]]])
+    target = tf.constant([[[[[0., 1., -1.], [1., 0., -1.]]]]])
     values = np.array([[[[[0.3, -0.2, 0.8], [-0.3, 0.6, 0.1]]]]], dtype=np.float32)
     logits = tf.Variable(values)
     objective = diceCELoss_gradient_fix(gamma=0.8, batch_wise=batch_wise, focal_gamma=focal_gamma)
@@ -35,32 +35,41 @@ def test_unavailable_logits_have_zero_gradient_and_no_effect(batch_wise, focal_g
 
 @pytest.mark.parametrize("batch_wise", [False, True])
 @pytest.mark.parametrize("focal_gamma", [None, 2.0])
-def test_fully_annotated_values_and_gradients_match_existing_loss(batch_wise, focal_gamma):
-    """The new normalization/reduction equals the old one on fully known voxels."""
-    rng = np.random.default_rng(7)
-    indexes = rng.integers(0, 3, size=(2, 2, 2, 2))
-    target = tf.one_hot(indexes, depth=3)
-    logits = tf.Variable(rng.normal(size=target.shape).astype(np.float32))
-    original = diceCELoss(gamma=0.8, batch_wise=batch_wise, focal_gamma=focal_gamma)
-    fixed = diceCELoss_gradient_fix(gamma=0.8, batch_wise=batch_wise, focal_gamma=focal_gamma)
+def test_foreground_objective_matches_known_overlap_and_finite_difference(batch_wise, focal_gamma):
+    """Two voxels have foreground probabilities 0.8/0.2 and one foreground target."""
+    target = tf.constant([[[[[0., 1.], [1., 0.]]]]])
+    probabilities = np.array([[[[[0.2, 0.8], [0.8, 0.2]]]]], dtype=np.float32)
+    values = np.log(probabilities)
+    logits = tf.Variable(values)
+    smooth = 1e-5
+    objective = diceCELoss_gradient_fix(gamma=0.8, smooth=smooth, batch_wise=batch_wise, focal_gamma=focal_gamma)
+
+    dice = 1 - (2 * 0.8 + smooth) / (1 + 0.8 + 0.2 + smooth)
+    ce = -np.log(0.8)
+    if focal_gamma is not None:
+        ce *= (1 - 0.8) ** focal_gamma
+    expected = 0.8 * ce + 0.2 * dice
 
     with tf.GradientTape() as tape:
-        probabilities = tf.nn.softmax(logits, axis=-1)
-        expected = original(target, probabilities)
-    expected_gradient = tape.gradient(expected, logits)
+        actual = objective(target, logits)
+    gradient = tape.gradient(actual, logits).numpy()
+    np.testing.assert_allclose(actual.numpy(), expected, rtol=1e-6, atol=1e-7)
 
-    with tf.GradientTape() as tape:
-        actual = fixed(target, logits)
-    actual_gradient = tape.gradient(actual, logits)
-
-    np.testing.assert_allclose(actual.numpy(), expected.numpy(), rtol=1e-6, atol=1e-7)
-    np.testing.assert_allclose(actual_gradient.numpy(), expected_gradient.numpy(), rtol=1e-6, atol=1e-7)
+    epsilon = 1e-3
+    for voxel in (0, 1):
+        for channel in (0, 1):
+            upper = values.copy()
+            lower = values.copy()
+            upper[0, 0, 0, voxel, channel] += epsilon
+            lower[0, 0, 0, voxel, channel] -= epsilon
+            derivative = (objective(target, upper).numpy() - objective(target, lower).numpy()) / (2 * epsilon)
+            np.testing.assert_allclose(derivative, gradient[0, 0, 0, voxel, channel], rtol=0.01, atol=3e-5)
 
 
 @pytest.mark.parametrize("batch_wise", [False, True])
-@pytest.mark.parametrize("target_values", [[-1., -1., -1.], [0., 0., -1.]])
-def test_no_supervised_positive_target_gives_zero_loss_and_gradient(batch_wise, target_values):
-    """All-ignored and negative-only unknown voxels do not invent supervision."""
+@pytest.mark.parametrize("target_values", [[-1., -1., -1.], [1., -1., -1.]])
+def test_no_foreground_annotation_gives_zero_loss_and_gradient(batch_wise, target_values):
+    """Background alone is never an explicit optimization target."""
     target = tf.constant([[[[target_values]]]])
     logits = tf.Variable(tf.ones_like(target))
     objective = diceCELoss_gradient_fix(batch_wise=batch_wise)
@@ -127,3 +136,79 @@ def test_supported_floating_dtypes(dtype):
     assert np.isfinite(value.numpy())
     assert np.isfinite(gradient).all()
     assert gradient[..., 2].item() == 0
+
+
+@pytest.mark.parametrize("batch_wise", [False, True])
+def test_known_foreground_negatives_penalize_false_positives_without_background_ce(batch_wise):
+    """A zero at an annotated ROI is a known negative even if its anatomy is unknown."""
+    target = tf.constant([[[[[0., 1., -1.], [0., 0., -1.]]]]])
+    clean = tf.constant([[[[[0., 2., 100.], [2., 0., 100.]]]]])
+    false_positive = tf.Variable([[[[[0., 2., 100.], [0., 2., 100.]]]]])
+    dice = diceCELoss_gradient_fix(gamma=0, batch_wise=batch_wise)
+    ce = diceCELoss_gradient_fix(gamma=1, batch_wise=batch_wise)
+
+    with tf.GradientTape() as tape:
+        value = dice(target, false_positive)
+    gradient = tape.gradient(value, false_positive).numpy()
+    assert value.numpy() > dice(target, clean).numpy()
+    assert gradient[0, 0, 0, 1, 1] > 0
+    assert gradient[0, 0, 0, 1, 0] < 0
+    np.testing.assert_array_equal(gradient[..., 2], 0)
+    np.testing.assert_allclose(ce(target, false_positive), ce(target, clean))
+
+
+@pytest.mark.parametrize("batch_wise", [False, True])
+def test_background_targets_are_omitted_but_the_background_logit_competes(batch_wise):
+    foreground = tf.constant([[[[[0., 1., -1.]]]]])
+    background = tf.constant([[[[[1., 0., -1.]]]]])
+    unknown_anatomy = tf.constant([[[[[0., 0., -1.]]]]])
+    logits = tf.Variable(tf.zeros_like(foreground))
+    ce = diceCELoss_gradient_fix(gamma=1, batch_wise=batch_wise)
+    dice = diceCELoss_gradient_fix(gamma=0, batch_wise=batch_wise)
+
+    with tf.GradientTape() as tape:
+        value = ce(foreground, logits)
+    gradient = tape.gradient(value, logits).numpy().reshape(-1)
+    assert gradient[0] > 0
+    assert gradient[1] < 0
+    assert gradient[2] == 0
+    assert ce(background, logits).numpy() == 0
+    assert ce(unknown_anatomy, logits).numpy() == 0
+    np.testing.assert_array_equal(dice(background, logits), dice(unknown_anatomy, logits))
+
+
+def test_annotated_empty_roi_has_finite_nonnegative_loss_and_negative_supervision():
+    target = tf.constant([[[[[1., 0., -1.]]]]])
+    logits = tf.Variable(tf.zeros_like(target))
+    objective = diceCELoss_gradient_fix(gamma=0)
+    with tf.GradientTape() as tape:
+        value = objective(target, logits)
+    gradient = tape.gradient(value, logits).numpy().reshape(-1)
+    assert 0 <= value.numpy() <= 1
+    assert gradient[1] > 0
+    assert gradient[0] < 0
+    assert gradient[2] == 0
+    perfect_background = tf.constant([[[[[1000., -1000., 0.]]]]])
+    assert objective(target, perfect_background).numpy() == 0
+
+
+def test_ce_retains_mean_over_available_foreground_entries():
+    target = tf.constant([[[[[0., 1., 0., -1.]]]]])
+    logits = tf.zeros_like(target)
+    objective = diceCELoss_gradient_fix(gamma=1)
+    np.testing.assert_allclose(objective(target, logits), np.log(3) / 2, rtol=1e-6)
+
+
+def test_foreground_policy_is_intentionally_different_from_legacy_complete_loss():
+    target = tf.constant([[[[[0., 1., 0.], [1., 0., 0.]]]]])
+    logits = tf.zeros_like(target)
+    old = diceCELoss(gamma=0.8, batch_wise=True)
+    new = diceCELoss_gradient_fix(gamma=0.8, batch_wise=True)
+    assert not np.isclose(new(target, logits).numpy(), old(target, tf.nn.softmax(logits)).numpy())
+
+
+def test_background_cannot_be_removed_from_foreground_normalization():
+    target = tf.constant([[[[[-1., 1., 0.]]]]])
+    objective = diceCELoss_gradient_fix()
+    with pytest.raises(tf.errors.InvalidArgumentError, match="Background must remain available"):
+        objective(target, tf.zeros_like(target))

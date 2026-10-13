@@ -5,14 +5,14 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal, Mapping, Sequence
 
 import nibabel as nib
 import numpy as np
 import pandas as pd
 
-from .config import ExperimentConfig
-from ..evaluation.k_fold import SubjectIndex
+from .config import ExperimentConfig, FixedSplitConfig
+from ..evaluation.k_fold import FoldSplit, SubjectIndex
 from ..utils.loader import Rodent, RodentDatasets
 
 if TYPE_CHECKING:
@@ -29,7 +29,11 @@ ANNOTATED_VALUES: dict[str, int] = {
 
 @dataclass(frozen=True)
 class SubjectSplit:
-    """Disjoint animals used for fitting, checkpoint selection, and final testing."""
+    """Disjoint animals used for fitting, checkpoint selection, and final testing.
+
+    All registered scans of an animal inherit its role. Saved memberships are
+    authoritative, even when their proportions differ from generation defaults.
+    """
 
     train: tuple[str, ...]
     validation: tuple[str, ...]
@@ -56,7 +60,7 @@ class SubjectSplit:
 
     @classmethod
     def load(cls, path: Path, index: SubjectIndex) -> SubjectSplit:
-        """Read and validate a previously selected animal split."""
+        """Read exact memberships without regenerating or enforcing default fractions."""
         payload = json.loads(path.read_text(encoding="utf-8"))
         split = cls(
             train=tuple(payload["train"]),
@@ -76,11 +80,12 @@ def make_split(
     For longitudinal/small cohorts or matched manuscript experiments, load a
     scientifically selected split instead. The local RNG does not alter training.
     """
-    fractions = (validation_fraction, test_fraction)
-    if any(not np.isfinite(value) or not 0 < value < 1 for value in fractions):
-        raise ValueError("Split fractions must be finite and between zero and one")
-    if sum(fractions) >= 1:
-        raise ValueError("Validation and test fractions must leave training animals")
+    settings = FixedSplitConfig(
+        validation_fraction=validation_fraction, test_fraction=test_fraction,
+    )
+    settings.validate()
+    if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+        raise ValueError("Split seed must be a nonnegative integer")
 
     ids = np.asarray(index.subject_ids)
     rng = np.random.default_rng(seed)
@@ -105,10 +110,16 @@ def annotation_values(scan: Rodent) -> set[int]:
     label_mapping describes a vocabulary and is not an annotation declaration.
     In particular SHAM metadata may include Lesion in that vocabulary while
     has_lesion_annotation is false.
+    Declared foreground regions are complete masks, including known negatives
+    and annotated empty regions. Zero is included for target encoding only;
+    it does not establish verified background supervision.
     """
     names = scan.metadata.get("annotated_regions")
     if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
         raise ValueError(f"{scan.id}: supply available_labels or valid annotated_regions")
+
+    if len(names) != len(set(names)):
+        raise ValueError(f"{scan.id}: annotated_regions must not contain duplicates")
 
     unknown = set(names) - ANNOTATED_VALUES.keys()
     if unknown:
@@ -119,12 +130,115 @@ def annotation_values(scan: Rodent) -> set[int]:
         available.add(ANNOTATED_VALUES[name])
 
     lesion_annotation = scan.metadata.get("has_lesion_annotation")
+    if lesion_annotation is not None and not isinstance(lesion_annotation, bool):
+        raise ValueError(f"{scan.id}: has_lesion_annotation must be a boolean when declared")
     if lesion_annotation is True:
         available.add(1)
     elif lesion_annotation is False:
         available.discard(1)
 
     return available
+
+
+def make_cv_splits(
+    subjects: list[str], *, k: int, seed: int, validation_fraction: float = 0.2,
+    strata: Mapping[str, str] | None = None,
+) -> list[FoldSplit]:
+    """Create outer holdouts with optional stratification of biological animals.
+
+    strata maps each selected animal to one group. Stratified folds distribute
+    each group's available animals approximately evenly; they do not force a
+    50/50 group ratio or oversample animals. Inner validation remains random.
+    """
+    from sklearn.model_selection import KFold, StratifiedKFold
+
+    if len(subjects) != len(set(subjects)):
+        raise ValueError("CV animals must be unique")
+    if not np.isfinite(validation_fraction) or not 0 < validation_fraction < 1:
+        raise ValueError("Validation fraction must be between zero and one")
+    ids = np.asarray(sorted(subjects))
+    if strata is None:
+        splitter = KFold(n_splits=k, shuffle=True, random_state=seed)
+        partitions = splitter.split(ids)
+    else:
+        if set(strata) != set(subjects):
+            raise ValueError("CV strata must cover exactly the selected animals")
+        if any(not isinstance(group, str) or not group.strip() for group in strata.values()):
+            raise ValueError("CV strata must contain nonempty group names")
+        groups = np.asarray([strata[subject] for subject in ids])
+        splitter = StratifiedKFold(n_splits=k, shuffle=True, random_state=seed)
+        partitions = splitter.split(ids, groups)
+
+    folds: list[FoldSplit] = []
+    for index, (pool_indexes, test_indexes) in enumerate(partitions):
+        pool = ids[pool_indexes]
+        rng = np.random.default_rng(seed + index)
+        shuffled = rng.permutation(pool)
+        validation_count = max(1, int(np.ceil(len(pool) * validation_fraction)))
+        if validation_count >= len(pool):
+            raise ValueError("Too few animals for separate training and checkpoint validation")
+        fold = FoldSplit(
+            index=index, train_ids=sorted(shuffled[validation_count:].tolist()),
+            val_ids=sorted(shuffled[:validation_count].tolist()), test_ids=sorted(ids[test_indexes].tolist()),
+        )
+        fold.validate(set(subjects))
+        folds.append(fold)
+    return folds
+
+
+def make_leave_one_animal_out_splits(subjects: list[str]) -> list[FoldSplit]:
+    """Match historical rat CV: select/evaluate one animal, train on all others.
+
+    These two-role folds use the omitted animal for checkpoint selection and
+    full-volume validation. They do not provide an independent outer test set.
+    Scan expansion remains the responsibility of SubjectIndex and the factories.
+    """
+    if len(subjects) < 2:
+        raise ValueError("Leave-one-animal-out requires at least two animals")
+    if any(not isinstance(subject, str) or not subject.strip() for subject in subjects):
+        raise ValueError("Animal IDs must be nonempty strings")
+    if len(subjects) != len(set(subjects)):
+        raise ValueError("CV animals must be unique")
+
+    ids: list[str] = sorted(subjects)
+    folds: list[FoldSplit] = []
+    for index, animal in enumerate(ids):
+        training_ids = [subject for subject in ids if subject != animal]
+        fold = FoldSplit(index=index, train_ids=training_ids, val_ids=[animal])
+        fold.validate(set(ids))
+        folds.append(fold)
+
+    return folds
+
+
+def fold_summary(folds: list[FoldSplit], subjects: SubjectIndex) -> pd.DataFrame:
+    """Show animals and scans separately for all training/validation/holdout roles."""
+    rows = []
+    for fold in folds:
+        for role, ids in (("train", fold.train_ids), ("validation", fold.val_ids), ("holdout", fold.test_ids)):
+            rows.append({"Fold": fold.index, "Role": role, "Animals": len(ids),
+                         "Scans": len(subjects.scan_keys(ids))})
+    return pd.DataFrame(rows)
+
+
+def fold_annotation_summary(
+    folds: list[FoldSplit], data: PreparedData, *, include_lesion: bool = False,
+) -> pd.DataFrame:
+    """Audit complete/partial animal counts for each split role and outer fold.
+
+    Anatomy-only coverage is the default. A complete animal has every required
+    source label declared available in all its registered scans.
+    """
+    groups = data.annotation_groups(include_lesion=include_lesion)
+    rows: list[dict[str, str | int]] = []
+    for fold in folds:
+        roles = (("train", fold.train_ids), ("validation", fold.val_ids), ("holdout", fold.test_ids))
+        for role, ids in roles:
+            data.subjects.scan_keys(ids)
+            complete = sum(groups[animal] == "complete" for animal in ids)
+            rows.append({"Fold": fold.index, "Role": role, "Complete": complete,
+                         "Partial": len(ids) - complete})
+    return pd.DataFrame(rows)
 
 
 @dataclass
@@ -135,13 +249,119 @@ class PreparedData:
     loader: RodentDatasets
     subjects: SubjectIndex
 
+    def make_split(self) -> SubjectSplit:
+        """Generate new animal memberships from the experiment's fixed-split policy.
+
+        Load SubjectSplit instead for saved or manuscript memberships. Fractions
+        apply to the complete cohort; integer rounding may change realized ratios.
+        """
+        settings = self.config.fixed_split
+        seed = self.config.split_seed
+        validation_fraction = settings.validation_fraction
+        test_fraction = settings.test_fraction
+
+        return make_split(
+            self.subjects, seed=seed,
+            validation_fraction=validation_fraction, test_fraction=test_fraction,
+        )
+
+    def annotation_groups(
+        self, subject_ids: Sequence[str] | None = None, *, include_lesion: bool = False,
+    ) -> dict[str, str]:
+        """Classify animals by declared coverage, independent of lesion presence.
+
+        By default require selected anatomical classes, excluding background and
+        lesion. include_lesion=True also requires lesion annotation. An animal
+        with any required label unavailable in any scan is partial. Merged
+        classes require all contributing source labels, matching target masking.
+        """
+        if subject_ids is None:
+            subject_ids = self.subjects.subject_ids
+        self.subjects.scan_keys(subject_ids)
+        excluded_channels = {0}
+        if not include_lesion:
+            excluded_channels.add(1)
+        required_sources = {
+            source for source, channel in self.config.labels.mapping.items()
+            if channel not in excluded_channels
+        }
+        if not required_sources:
+            raise ValueError("Annotation balancing requires at least one selected region")
+
+        groups: dict[str, str] = {}
+        for subject_id in subject_ids:
+            group = "complete"
+            for key in self.subjects.scan_keys([subject_id]):
+                scan = self.loader.get_subject(key)
+                unavailable = set(scan.unavailable_labels or ())
+                if required_sources & unavailable:
+                    group = "partial"
+                    break
+            groups[subject_id] = group
+        return groups
+
+    def contract(self) -> list[dict[str, Any]]:
+        """Snapshot identities, annotation availability, geometry and source-file stamps."""
+        records = []
+        for key in sorted(self.loader.get_subjects_list()):
+            scan = self.loader.get_subject(key)
+            files = []
+            for source in (scan.image_path, scan.labels_path, scan.brain_mask_path):
+                if source is not None:
+                    path = Path(source).resolve()
+                    stamp = path.stat()
+                    files.append({"path": str(path), "size": stamp.st_size, "mtime_ns": stamp.st_mtime_ns})
+            records.append({
+                "scan": list(key), "animal": self.subjects.subject_for_scan(key),
+                "metadata": scan.metadata, "unavailable_labels": scan.unavailable_labels,
+                "shape": list(scan.image.shape), "affine": scan.image.affine.tolist(), "files": files,
+            })
+        return records
+
     def split_summary(self, split: SubjectSplit) -> pd.DataFrame:
-        """Show animal and scan counts separately, before starting training."""
+        """Show realized animal fractions and scan counts, including saved splits."""
         split.validate(self.subjects)
-        rows: list[dict[str, str | int]] = []
+        rows: list[dict[str, str | int | float]] = []
+        total_animals = len(self.subjects.subject_ids)
         for role, ids in (("train", split.train), ("validation", split.validation), ("test", split.test)):
             keys = self.subjects.scan_keys(ids)
-            rows.append({"Role": role, "Animals": len(ids), "Scans": len(keys)})
+            animal_fraction = len(ids) / total_animals
+            rows.append({"Role": role, "Animals": len(ids), "AnimalFraction": animal_fraction,
+                         "Scans": len(keys)})
+        return pd.DataFrame(rows)
+
+    def annotation_summary(self) -> pd.DataFrame:
+        """Count declared annotation coverage per dataset and output class.
+
+        Foreground availability means full-volume delineation, including empty
+        annotated masks. Background rows describe target encoding, not verified
+        background annotation. Merged classes require all contributing sources.
+        """
+        mapping = self.config.labels.mapping
+        rows: list[dict[str, Any]] = []
+        keys = self.loader.get_subjects_list()
+        scans = [self.loader.get_subject(key) for key in keys]
+        datasets = sorted({scan.subject_group[0] for scan in scans})
+        for dataset in datasets:
+            selected = [scan for scan in scans if scan.subject_group[0] == dataset]
+            for channel, name in enumerate(self.config.labels.names):
+                sources = [source for source, target in mapping.items() if target == channel]
+                unavailable = 0
+                for scan in selected:
+                    if set(sources) & set(scan.unavailable_labels or ()):
+                        unavailable += 1
+
+                meaning = "full-volume ROI, including known negatives"
+                if channel == 0:
+                    meaning = "task remainder; background supervision is loss-specific"
+
+                rows.append({
+                    "Dataset": dataset, "ClassIndex": channel, "Class": name,
+                    "AnnotationMeaning": meaning,
+                    "SourceLabels": sources, "AnnotatedScans": len(selected) - unavailable,
+                    "UnannotatedScans": unavailable, "TotalScans": len(selected),
+                })
+
         return pd.DataFrame(rows)
 
     def make_generator(
@@ -176,9 +396,16 @@ class PreparedData:
         )
 
 
-def prepare_data(config: ExperimentConfig) -> PreparedData:
-    """Register explicit datasets and resolve missing source labels per scan."""
+def prepare_data(config: ExperimentConfig, *, require_training_loss: bool = True) -> PreparedData:
+    """Register datasets and resolve missing source labels per scan.
+
+    Training requires a partial-label-aware loss for incomplete annotations.
+    Offline evaluation can disable that loss check because it does not fit; all
+    vocabulary and annotation checks still apply, including missing-label masks.
+    """
     config.validate()
+    if require_training_loss:
+        config.loss.validate_for_training()
     labels = list(config.labels.mapping)
     loader = RodentDatasets(labels=labels)
 
@@ -204,6 +431,9 @@ def prepare_data(config: ExperimentConfig) -> PreparedData:
 
         for key in added:
             scan = loader.get_subject(key)
+            declared_scope = scan.metadata.get("annotation_scope", dataset.annotation_scope)
+            if declared_scope != dataset.annotation_scope:
+                raise ValueError(f"{scan.id}: annotation scope must be full_volume; sparse annotations need a spatial validity mask")
             if dataset.available_labels is None:
                 available = annotation_values(scan)
             else:
@@ -212,17 +442,31 @@ def prepare_data(config: ExperimentConfig) -> PreparedData:
                     raise ValueError("Explicit available_labels must include background zero")
 
             scan.unavailable_labels = sorted(set(labels) - available)
-            if scan.unavailable_labels and config.loss.regions != "dice_ce_gradient_fix":
+            if require_training_loss and scan.unavailable_labels and config.loss.regions != "dice_ce_gradient_fix":
                 raise ValueError(f"{scan.id}: partial annotations require dice_ce_gradient_fix")
 
     subjects = SubjectIndex(loader)
+    if config.data.animal_ids:
+        unknown_animals = set(config.data.animal_ids) - set(subjects.subject_ids)
+        if unknown_animals:
+            raise ValueError(f"Animal identity overrides contain unknown IDs: {sorted(unknown_animals)}")
+        overrides = {}
+        for original, animal in config.data.animal_ids.items():
+            for key in subjects.scan_keys([original]):
+                overrides[key] = animal
+        subjects = SubjectIndex(loader, subject_overrides=overrides)
     return PreparedData(config=config, loader=loader, subjects=subjects)
 
 
 def make_preprocessor(
     config: ExperimentConfig, *, stage: Literal["training", "validation", "inference"],
+    label_mapping: dict[int, int] | None = None,
 ) -> Preprocessor:
-    """Reorient first; use linear intensities, nearest masks, and deterministic validation."""
+    """Build shared geometry; optionally retain output label IDs in evaluation GT.
+
+    Training uses the configured channel mapping. Full-volume evaluation can
+    supply a separate mapping so merged training classes do not erase GT sides.
+    """
     from ..preprocessing.preprocessor import (
         CorrectX10, Flip, GaussianBlur, MapLabels, Noise, Normalize, PadderCutter,
         Preprocessor, PreprocessingStep, RandomAffine, RandomCropping, Reorient, Resample,
@@ -237,7 +481,13 @@ def make_preprocessor(
     if settings.correct_units:
         steps.append(CorrectX10(reference_resolution=settings.spacing_mm))
 
-    steps.append(MapLabels(mapping=config.labels.mapping, unknown=config.labels.unknown))
+    mapping = config.labels.mapping
+    if label_mapping is not None:
+        if stage != "inference":
+            raise ValueError("Label mapping overrides are only supported for full-volume inference")
+        mapping = label_mapping
+
+    steps.append(MapLabels(mapping=mapping, unknown=config.labels.unknown))
     resampling = Resample(
         target_resolution=settings.spacing_mm, interpolation=1, orthogonal=True,
     )
@@ -256,12 +506,15 @@ def make_preprocessor(
 
     if stage != "inference":
         if stage == "training" and settings.random_crop:
-            crop = RandomCropping(dim=settings.patch_size, mode="random", padding=True)
+            crop = RandomCropping(
+                dim=settings.patch_size, mode=settings.crop_mode, std=None, padding=True,
+            )
         else:
             crop = PadderCutter(img_size=settings.patch_size)
         steps.append(crop)
 
-    if stage == "training" and settings.augment:
-        steps.append(Flip(axis_list=[0], probability=settings.flip_probability))
+    if stage == "training" and settings.augment and settings.flip_probability > 0:
+        flip = Flip(anatomical_axis="LR", probability=settings.flip_probability)
+        steps.append(flip)
 
     return Preprocessor(steps=steps)

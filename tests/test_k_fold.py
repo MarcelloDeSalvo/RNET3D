@@ -86,11 +86,11 @@ def test_splits_round_trip_and_coverage(tmp_path):
     payload = [{'train': fold.train_ids, 'validation': fold.val_ids} for fold in folds]
     path = tmp_path / 'splits.json'
     path.write_text(json.dumps(payload))
-    assert cv._load_splits(path, list(reversed(ids)), 2) == folds
+    assert cv.load_fold_splits(path, list(reversed(ids)), 2) == folds
     payload[1] = payload[0]
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match='once'):
-        cv._load_splits(path, ids, 2)
+        cv.load_fold_splits(path, ids, 2)
 
 
 @pytest.mark.parametrize('payload', [[None, {}], [{'train': [[1]], 'validation': ['a']}, {}]])
@@ -98,7 +98,7 @@ def test_malformed_split_files_fail_clearly(tmp_path, payload):
     path = tmp_path / 'bad.json'
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError):
-        cv._load_splits(path, ['a', 'b'], 2)
+        cv.load_fold_splits(path, ['a', 'b'], 2)
 
 
 def test_cohort_leakage_and_scan_tuples_fail_before_creating_run(tmp_path, indexed_data):
@@ -163,7 +163,7 @@ def test_small_keras_run_exports_manifest_and_reusable_splits(tmp_path, indexed_
     manifest = pd.read_csv(result.run_dir / 'subjects.csv')
     assert len(manifest) == 9
     assert set(manifest['DatasetRole']) == {'cv', 'external'}
-    restored = cv._load_splits(result.run_dir / 'splits.json', cv_ids, 2)
+    restored = cv.load_fold_splits(result.run_dir / 'splits.json', cv_ids, 2)
     assert len(restored) == 2
     table = pd.read_csv(result.run_dir / 'summary' / 'all_evaluations.csv')
     assert len(table[table['DatasetRole'] == 'validation']) == 4

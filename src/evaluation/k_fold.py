@@ -66,7 +66,7 @@ if TYPE_CHECKING:
     from ..utils.loader import RodentDatasets, SubjectKey
 
 LOGGER = logging.getLogger(__name__)
-History: TypeAlias = dict[str, list[float]]
+History: TypeAlias = dict[str, list[float | None]]
 DatasetFactory: TypeAlias = Callable[[list[str]], Any]
 ModelFactory: TypeAlias = Callable[[], Any]
 CallbackFactory: TypeAlias = Callable[["FoldContext"], Sequence[Any]]
@@ -304,7 +304,7 @@ class TrainingConfig:
             raise ValueError("monitor_mode must be 'min' or 'max' and monitor cannot be empty")
         if self.histogram_freq < 0:
             raise ValueError("histogram_freq must be nonnegative")
-        reserved = {"x", "validation_data", "epochs", "callbacks", "steps_per_epoch", "validation_steps"}
+        reserved = {"x", "validation_data", "epochs", "initial_epoch", "callbacks", "steps_per_epoch", "validation_steps"}
         if reserved.intersection(self.fit_kwargs):
             raise ValueError(f"fit_kwargs contains managed model.fit parameters: {reserved & self.fit_kwargs.keys()}")
 
@@ -381,26 +381,36 @@ class FoldTiming:
 
 @dataclass(frozen=True)
 class FoldSplit:
-    """One fold's subject-disjoint training and validation IDs."""
+    """One fold's disjoint training, selection-validation and optional holdout animals."""
 
     index: int
     train_ids: list[str]
     val_ids: list[str]
+    test_ids: list[str] = field(default_factory=list)
 
     def validate(self, all_ids: set[str]) -> None:
         """Ensure no duplicated, unknown, or overlapping subjects occur."""
         if not self.train_ids or not self.val_ids:
             raise ValueError(f"Fold {self.index}: training and validation cannot be empty")
-        if len(set(self.train_ids)) != len(self.train_ids) or len(set(self.val_ids)) != len(self.val_ids):
+        selected = self.train_ids + self.val_ids + self.test_ids
+        roles = (self.train_ids, self.val_ids, self.test_ids)
+        if any(len(role) != len(set(role)) for role in roles):
             raise ValueError(f"Fold {self.index}: duplicate IDs")
-        if set(self.train_ids) & set(self.val_ids):
+        if len(selected) != len(set(selected)):
             raise ValueError(f"Fold {self.index}: subject leakage")
-        if set(self.train_ids) | set(self.val_ids) != all_ids:
-            raise ValueError(f"Fold {self.index}: train and validation must cover all subjects")
+        if set(selected) != all_ids:
+            raise ValueError(f"Fold {self.index}: split roles must cover all subjects")
+
+    def to_dict(self) -> dict[str, list[str]]:
+        """Serialize the roles without implying validation is an independent test."""
+        payload = {"train": self.train_ids, "validation": self.val_ids}
+        if self.test_ids:
+            payload["test"] = self.test_ids
+        return payload
 
     def save(self, folder: Path) -> None:
         """Save the exact subject split for reproducibility."""
-        payload = {"train": self.train_ids, "validation": self.val_ids}
+        payload = self.to_dict()
         (folder / "split.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
@@ -490,10 +500,12 @@ def _subjects_at_indices(ids: list[str], indices: Sequence[int]) -> list[str]:
     return selected
 
 
-def _load_splits(path: str | Path, ids: list[str], k: int) -> list[FoldSplit]:
+def load_fold_splits(path: str | Path, ids: list[str], k: int) -> list[FoldSplit]:
     """Read precomputed splits in JSON format and validate full CV coverage.
 
-    Expected format: [{"train": ["s1"], "validation": ["s2"]}, ...].
+    Expected format: [{"train": ["s1"], "validation": ["s2"], "test": ["s3"]}, ...].
+    Optional test lists represent independent outer holdouts. Without them,
+    validation lists provide diagnostic coverage and checkpoint selection.
     Keys ``train_ids`` and ``val_ids`` are accepted for interoperability.
     """
     entries = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -506,17 +518,23 @@ def _load_splits(path: str | Path, ids: list[str], k: int) -> list[FoldSplit]:
             raise ValueError(f"Fold {index}: expected a JSON object")
         train_ids = entry.get("train", entry.get("train_ids"))
         val_ids = entry.get("validation", entry.get("val_ids"))
+        test_ids = entry.get("test", [])
         if not isinstance(train_ids, list) or not isinstance(val_ids, list):
             raise ValueError(f"Fold {index}: missing train/validation lists")
-        if any(not isinstance(subject, str) for subject in train_ids + val_ids):
+        if not isinstance(test_ids, list) or any(not isinstance(subject, str) for subject in train_ids + val_ids + test_ids):
             raise ValueError(f"Fold {index}: subject IDs must be strings")
-        split = FoldSplit(index, train_ids, val_ids)
+        split = FoldSplit(index, train_ids, val_ids, test_ids)
         split.validate(set(ids))
         folds.append(split)
-        for subject in val_ids:
+        evaluation_ids = val_ids
+        if test_ids:
+            evaluation_ids = test_ids
+        for subject in evaluation_ids:
             counts[subject] += 1
     if any(count != 1 for count in counts.values()):
-        raise ValueError("Each CV subject must appear in validation once")
+        raise ValueError("Each CV subject must appear in the evaluated fold role once")
+    if any(fold.test_ids for fold in folds) and not all(fold.test_ids for fold in folds):
+        raise ValueError("Cannot mix selection-only folds and independent holdout folds")
     return folds
 
 
@@ -575,7 +593,9 @@ def _best_epoch(history: History, monitor: str, mode: str) -> int:
     return int(np.argmin(values) if mode == "min" else np.argmax(values))
 
 
-def _build_callbacks(context: FoldContext, factory: CallbackFactory | None) -> list[Any]:
+def _build_callbacks(
+    context: FoldContext, factory: CallbackFactory | None, *, resume: bool = False,
+) -> list[Any]:
     """Create fresh callbacks per fold, always appending the runner checkpoint."""
     import tensorflow as tf
 
@@ -586,10 +606,19 @@ def _build_callbacks(context: FoldContext, factory: CallbackFactory | None) -> l
         callbacks.extend([
             tf.keras.callbacks.TensorBoard(log_dir=str(folder / "tensorboard"), histogram_freq=config.histogram_freq),
             tf.keras.callbacks.ReduceLROnPlateau(monitor=config.monitor, mode=config.monitor_mode, factor=0.5, patience=10),
-            tf.keras.callbacks.CSVLogger(str(folder / "training.csv")),
+            tf.keras.callbacks.CSVLogger(str(folder / "training.csv"), append=resume),
         ])
     if factory is not None:
         callbacks.extend(factory(context))
+
+    for callback in callbacks:
+        if isinstance(callback, tf.keras.callbacks.EarlyStopping) and callback.restore_best_weights:
+            raise ValueError("The runner restores its selected checkpoint; use restore_best_weights=False")
+        if isinstance(callback, tf.keras.callbacks.ModelCheckpoint):
+            requested_path = Path(callback.filepath).resolve()
+            managed_path = context.checkpoint_path.resolve()
+            if requested_path == managed_path:
+                raise ValueError("An extra ModelCheckpoint must use a different file from the managed best checkpoint")
 
     # The checkpoint is appended last, and always uses the same monitor as reporting.
     callbacks.append(tf.keras.callbacks.ModelCheckpoint(
@@ -625,7 +654,7 @@ def _save_summary(result: TrainingResult, config: TrainingConfig, metrics: Seque
     """Aggregate training histories independently of optional evaluators."""
     folder = result.run_dir / "summary"
     folder.mkdir(exist_ok=True)
-    selected: list[dict[str, float]] = []
+    selected: list[dict[str, float | None]] = []
     keys = [config.monitor, "val_loss", *(f"val_{key}" for key in metrics)]
 
     for history in result.histories:
@@ -671,14 +700,39 @@ def train_fold(
     result: TrainingResult,
     evaluation: EvaluationConfig,
     model_exporter: Callable[[Any, Path], None] | None = None,
+    resume: bool = False,
 ) -> None:
     """Train a fresh model, restore its best checkpoint and evaluate one fold."""
     import tensorflow as tf
+    from .training_state import EpochCheckpoint, write_json
 
     split = context.split
     config = context.config
     folder = context.output_dir
-    split.save(folder)
+    if resume and (folder / "split.json").exists():
+        saved = json.loads((folder / "split.json").read_text(encoding="utf-8"))
+        if saved != split.to_dict():
+            raise ValueError("Resume split differs from the saved fold")
+    else:
+        split.save(folder)
+
+    completion_path = folder / "completed.json"
+    if resume and completion_path.exists():
+        required = [context.checkpoint_path, folder / "history.csv", folder / "timing.json"]
+        if config.save_model:
+            required.append(folder / "model.keras")
+        for path in required:
+            if not path.is_file():
+                raise FileNotFoundError(f"Completed fold is missing an artifact: {path}")
+        completed = json.loads(completion_path.read_text(encoding="utf-8"))
+        result.histories.append(completed["history"])
+        result.timings.append(FoldTiming(**completed["timing"]))
+        for entry in completed["evaluations"]:
+            table = pd.read_json(folder / entry["path"], orient="table")
+            _record_evaluation(result, entry["name"], entry["role"], split.index, table, entry["subjects"])
+        return
+    if resume and context.checkpoint_path.exists() and not (folder / "training_state.json").exists():
+        raise ValueError("Best weights alone cannot resume training; epoch recovery state is missing")
 
     tf.keras.backend.clear_session()
     tf.keras.utils.set_random_seed(config.seed + split.index)
@@ -690,15 +744,28 @@ def train_fold(
             raise ValueError(f"Fold {split.index}: {role} generator has no complete batches; reduce batch_size")
 
     model = model_factory()
-    callbacks = _build_callbacks(context, callback_factory)
+    initialization = getattr(model, "initialization_report", None)
+    if initialization is not None:
+        write_json(folder / "initialization.json", initialization)
+
+    callbacks = _build_callbacks(context, callback_factory, resume=resume)
+    state = EpochCheckpoint(folder, callbacks, resume=resume, monitor=config.monitor)
+    state.set_model(model)
+    callbacks.append(state)
     steps = config.fit_steps(len(split.train_ids), len(split.val_ids))
     fit_options = {**config.fit_kwargs, **steps}
 
     LOGGER.info("Fold %d: %d training, %d validation subjects", split.index, len(split.train_ids), len(split.val_ids))
-    start_training = time.perf_counter()
-    fitted = model.fit(train_data, validation_data=val_data, epochs=config.epochs, callbacks=callbacks, **fit_options)
-    training_seconds = time.perf_counter() - start_training
-    history = {key: [float(value) for value in values] for key, values in fitted.history.items()}
+    if isinstance(val_data, tf.keras.utils.Sequence) and config.validation_steps is not None:
+        if config.validation_steps != len(val_data):
+            raise ValueError("validation_steps must cover every validation batch exactly once")
+    if not state.fit_complete and state.completed_epochs < config.epochs:
+        model.fit(
+            train_data, validation_data=val_data, epochs=config.epochs,
+            initial_epoch=state.completed_epochs, callbacks=callbacks, **fit_options,
+        )
+    training_seconds = state.training_seconds
+    history = state.history
     best_epoch = _best_epoch(history, config.monitor, config.monitor_mode)
     if not context.checkpoint_path.is_file():
         raise FileNotFoundError(f"No best-weights checkpoint at {context.checkpoint_path}")
@@ -714,8 +781,10 @@ def train_fold(
     result.histories.append(history)
 
     eval_start = time.perf_counter()
+    saved_evaluations: list[dict[str, Any]] = []
     cohorts = {
         "validation": split.val_ids if evaluation.evaluate_validation else (),
+        "holdout": split.test_ids,
         "test": evaluation.test_ids,
         "external": evaluation.external_ids,
     }
@@ -732,6 +801,12 @@ def train_fold(
             evaluator = evaluator_factory(model, selected_ids, options)
             table = evaluator.evaluate()
             _record_evaluation(result, name, role, split.index, table, subject_ids)
+            table_path = evaluator_dir / "metrics.json"
+            table.to_json(table_path, orient="table", indent=2)
+            saved_evaluations.append({
+                "name": name, "role": role, "subjects": selected_ids,
+                "path": str(table_path.relative_to(folder)),
+            })
 
     timing = FoldTiming(
         fold=split.index,
@@ -743,6 +818,7 @@ def train_fold(
     )
     result.timings.append(timing)
     (folder / "timing.json").write_text(json.dumps(asdict(timing), indent=2), encoding="utf-8")
+    write_json(completion_path, {"history": history, "timing": asdict(timing), "evaluations": saved_evaluations})
 
     del model, train_data, val_data
     gc.collect()
@@ -774,6 +850,8 @@ def k_fold_loop(
     model_exporter: Callable[[Any, Path], None] | None = None,
     split_seed: int | None = None,
     run_setup: Callable[[Path], None] | None = None,
+    resume_run: str | Path | None = None,
+    fold_splits: Sequence[FoldSplit] | None = None,
 ) -> TrainingResult:
     """Run a fresh TensorFlow/Keras training and validation experiment per fold.
 
@@ -805,6 +883,9 @@ def k_fold_loop(
         model_exporter: Optional inference-graph exporter after best-weight restoration.
         split_seed: Optional split RNG seed independent of model initialization.
         run_setup: Optional provenance writer invoked before fitting any fold.
+        resume_run: Existing matching run; restore saved splits and skip completed folds.
+        fold_splits: Explicit grouped roles, optionally including independent
+            outer holdouts. Mutually exclusive with split files and a splitter.
 
     Returns:
         TrainingResult: Run location, per-fold histories and evaluations, and
@@ -821,7 +902,8 @@ def k_fold_loop(
 
     settings = TrainingConfig.from_input(config)
     settings.validate(len(ids))
-    if splitter is not None and precomputed_splits is not None:
+    choices = (splitter is not None, precomputed_splits is not None, fold_splits is not None)
+    if sum(choices) > 1:
         raise ValueError("Provide either splitter or precomputed_splits, not both")
     if evaluation is None:
         evaluation = EvaluationConfig()
@@ -832,70 +914,124 @@ def k_fold_loop(
         if settings.infer_steps_from_ids:
             raise ValueError("SubjectIndex expands animals to scans; use generator cardinality or explicit steps")
 
-    if precomputed_splits is None:
+    resume: bool = resume_run is not None
+    if resume:
+        run_dir = Path(resume_run).resolve()
+        if not run_dir.is_dir():
+            raise FileNotFoundError(run_dir)
+        if splitter is not None:
+            raise ValueError("Resume uses the saved splits, not a new splitter")
+        saved_config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
+        current_config = {**asdict(settings), "run_id": run_dir.name}
+        current_config = json.loads(json.dumps(current_config, default=str))
+        if saved_config != current_config:
+            raise ValueError("Resume training configuration differs from the saved run")
+        saved_metadata = json.loads((run_dir / "metadata.json").read_text(encoding="utf-8"))
+        current_evaluation = json.loads(json.dumps(asdict(evaluation)))
+        if saved_metadata["evaluation"] != current_evaluation:
+            raise ValueError("Resume evaluation cohorts or options differ")
+        folds = load_fold_splits(run_dir / "splits.json", ids, settings.k)
+        if precomputed_splits is not None:
+            requested = load_fold_splits(precomputed_splits, ids, settings.k)
+            if requested != folds:
+                raise ValueError("Resume splits differ from the saved run")
+        if fold_splits is not None and list(fold_splits) != folds:
+            raise ValueError("Resume folds differ from the saved run")
+    elif fold_splits is not None:
+        folds = list(fold_splits)
+        if len(folds) != settings.k or [fold.index for fold in folds] != list(range(settings.k)):
+            raise ValueError("Fold indexes must cover the configured folds in order")
+        counts = dict.fromkeys(ids, 0)
+        has_holdout = any(fold.test_ids for fold in folds)
+        for fold in folds:
+            fold.validate(set(ids))
+            evaluation_ids = fold.val_ids
+            if has_holdout:
+                if not fold.test_ids:
+                    raise ValueError("Every outer fold needs independent holdout animals")
+                evaluation_ids = fold.test_ids
+            for subject in evaluation_ids:
+                counts[subject] += 1
+        if any(count != 1 for count in counts.values()):
+            raise ValueError("Every animal must appear in the evaluated fold role exactly once")
+    elif precomputed_splits is None:
         split_settings = settings
         if split_seed is not None:
             split_settings = replace(settings, seed=split_seed)
         folds = _splits(ids, split_settings, splitter)
     else:
-        folds = _load_splits(precomputed_splits, ids, settings.k)
+        folds = load_fold_splits(precomputed_splits, ids, settings.k)
     evaluators = _named_evaluators(fve_callbacks)
     metrics = list(metrics_dictionary or {})
 
-    run_dir = settings.start_run()
-    if subject_index is not None:
-        manifest: pd.DataFrame = subject_index.manifest(selected_subjects)
-        roles = dict.fromkeys(ids, "cv")
-        roles.update(dict.fromkeys(evaluation.test_ids, "test"))
-        roles.update(dict.fromkeys(evaluation.external_ids, "external"))
-        manifest["DatasetRole"] = manifest["Subject"].map(roles)
-        manifest_path: Path = run_dir / "subjects.csv"
-        manifest.to_csv(manifest_path, index=False)
+    if not resume:
+        run_dir = settings.start_run()
+    from .training_state import run_lock
 
-    evaluation_config = {**asdict(settings), "run_id": run_dir.name}
-    (run_dir / "config.json").write_text(json.dumps(evaluation_config, indent=2, default=str), encoding="utf-8")
-    provenance = {
-        "experiment": asdict(metadata or ExperimentMetadata()),
-        "runtime": _runtime_metadata(),
-        "evaluation": asdict(evaluation),
-        "cv_subject_count": len(ids),
-        "cv_subject_sha256": hashlib.sha256(json.dumps(sorted(ids)).encode()).hexdigest(),
-        "precomputed_splits": str(precomputed_splits) if precomputed_splits else None,
-        "split_seed": settings.seed if split_seed is None else split_seed,
-    }
-    (run_dir / "metadata.json").write_text(json.dumps(provenance, indent=2), encoding="utf-8")
-    split_payload = [{"train": fold.train_ids, "validation": fold.val_ids} for fold in folds]
-    (run_dir / "splits.json").write_text(json.dumps(split_payload, indent=2), encoding="utf-8")
-    if run_setup is not None:
-        run_setup(run_dir)
-    experiment_metadata = metadata or ExperimentMetadata()
-    result = TrainingResult(
-        run_dir=run_dir, evaluations={name: [] for name in evaluators},
-        metadata=experiment_metadata,
-    )
+    with run_lock(run_dir):
+        if subject_index is not None:
+            manifest: pd.DataFrame = subject_index.manifest(selected_subjects)
+            roles = dict.fromkeys(ids, "cv")
+            roles.update(dict.fromkeys(evaluation.test_ids, "test"))
+            roles.update(dict.fromkeys(evaluation.external_ids, "external"))
+            manifest["DatasetRole"] = manifest["Subject"].map(roles)
+            manifest_path: Path = run_dir / "subjects.csv"
+            if resume:
+                saved_manifest = pd.read_csv(manifest_path, dtype=str).fillna("")
+                current_manifest = manifest.fillna("").astype(str)
+                if not saved_manifest.equals(current_manifest):
+                    raise ValueError("Resume subject-to-scan manifest differs")
+            else:
+                manifest.to_csv(manifest_path, index=False)
 
-    for split in folds:
-        folder = run_dir / f"fold_{split.index}"
-        folder.mkdir()
-        checkpoint_path = folder / "best.weights.h5"
-        context = FoldContext(split=split, output_dir=folder, config=settings, checkpoint_path=checkpoint_path)
-
-        train_fold(
-            context=context,
-            train_factory=train_gen,
-            val_factory=val_gen,
-            model_factory=model_callback,
-            callback_factory=callbacks_factory,
-            evaluators=evaluators,
-            evaluation_config=evaluation_config,
-            result=result,
-            evaluation=evaluation,
-            model_exporter=model_exporter,
+        evaluation_config = {**asdict(settings), "run_id": run_dir.name}
+        if not resume:
+            (run_dir / "config.json").write_text(json.dumps(evaluation_config, indent=2, default=str), encoding="utf-8")
+        provenance = {
+            "experiment": asdict(metadata or ExperimentMetadata()),
+            "runtime": _runtime_metadata(),
+            "evaluation": asdict(evaluation),
+            "cv_subject_count": len(ids),
+            "cv_subject_sha256": hashlib.sha256(json.dumps(sorted(ids)).encode()).hexdigest(),
+            "precomputed_splits": str(precomputed_splits) if precomputed_splits else None,
+            "split_seed": settings.seed if split_seed is None else split_seed,
+        }
+        if not resume:
+            (run_dir / "metadata.json").write_text(json.dumps(provenance, indent=2), encoding="utf-8")
+        split_payload = [fold.to_dict() for fold in folds]
+        if not resume:
+            (run_dir / "splits.json").write_text(json.dumps(split_payload, indent=2), encoding="utf-8")
+        if run_setup is not None:
+            run_setup(run_dir)
+        experiment_metadata = metadata or ExperimentMetadata()
+        result = TrainingResult(
+            run_dir=run_dir, evaluations={name: [] for name in evaluators},
+            metadata=experiment_metadata,
         )
 
-    _save_summary(result, settings, metrics)
-    _save_evaluations(result)
-    pd.DataFrame(asdict(timing) for timing in result.timings).to_csv(
-        run_dir / "summary" / "fold_timings.csv", index=False
-    )
-    return result
+        for split in folds:
+            folder = run_dir / f"fold_{split.index}"
+            folder.mkdir(exist_ok=resume)
+            checkpoint_path = folder / "best.weights.h5"
+            context = FoldContext(split=split, output_dir=folder, config=settings, checkpoint_path=checkpoint_path)
+
+            train_fold(
+                context=context,
+                train_factory=train_gen,
+                val_factory=val_gen,
+                model_factory=model_callback,
+                callback_factory=callbacks_factory,
+                evaluators=evaluators,
+                evaluation_config=evaluation_config,
+                result=result,
+                evaluation=evaluation,
+                model_exporter=model_exporter,
+                resume=resume,
+            )
+
+        _save_summary(result, settings, metrics)
+        _save_evaluations(result)
+        pd.DataFrame(asdict(timing) for timing in result.timings).to_csv(
+            run_dir / "summary" / "fold_timings.csv", index=False
+        )
+        return result
