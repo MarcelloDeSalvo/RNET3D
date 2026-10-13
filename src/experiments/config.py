@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 from dataclasses import asdict, dataclass, field
+from numbers import Real
 from pathlib import Path
 from typing import Any, Literal
 
@@ -232,7 +233,9 @@ class EvaluationPatchConfig:
 
 @dataclass(frozen=True)
 class LossConfig:
-    """ROI objective and historical brain-head loss parameters.
+    """ROI objective, brain loss parameters and explicit task contributions.
+
+    Task weights scale active head losses only; metrics retain their computation.
 
     gradient_fix_version=2 selects foreground-only Dice/CE with full-volume ROI
     negatives. Version 1 identifies older saved objectives for evaluation and
@@ -246,6 +249,23 @@ class LossConfig:
     brain_gamma: float = 0.5
     brain_alpha: float = 0.6
     gradient_fix_version: Literal[1, 2] = 2
+    regions_weight: float = 1.0
+    brain_weight: float = 1.0
+    classifier_weight: float = 1.0
+
+    def validate_weights(self, *, with_classifier: bool) -> None:
+        """Allow disabled tasks while requiring a finite, nonzero active objective."""
+        weights = (self.regions_weight, self.brain_weight, self.classifier_weight)
+        for weight in weights:
+            if isinstance(weight, bool) or not isinstance(weight, Real) or not math.isfinite(weight) or weight < 0:
+                raise ValueError("Task loss weights must be finite, nonnegative numbers")
+
+        active_weight = self.regions_weight + self.brain_weight
+        if with_classifier:
+            active_weight += self.classifier_weight
+
+        if active_weight <= 0:
+            raise ValueError("At least one active task loss weight must be positive")
 
     def validate_for_training(self) -> None:
         """Require a new run when the saved partial-label objective is obsolete."""
@@ -389,6 +409,7 @@ class ExperimentConfig:
         self.initialization.validate()
         self.fixed_split.validate()
         self.preprocessing.validate()
+        self.loss.validate_weights(with_classifier=self.model.classifier)
         self.evaluation_patches.validate()
         dataset_names = {dataset.name for dataset in self.data.datasets}
         if "D3" in dataset_names and self.evaluation_patches.left_right_pairs:

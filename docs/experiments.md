@@ -512,7 +512,9 @@ prediction postprocessing never determines the ground-truth sides.
 `InferenceConfig.original_label_ids=True` controls this export vocabulary.
 Its `postprocessing: PostprocessingConfig` exposes brain-mask hole filling and
 small-object removal, voxel thresholds (20,000 and 30,000), ventricle splitting,
-centroid/voxel assignment, default hemisphere and lesion threshold. Morphology
+centroid/voxel assignment, default hemisphere and lesion threshold. All D1/rat
+notebooks, including their checkpoint cells and notebook 09, select centroid
+assignment. MouseFull leaves ventricle splitting disabled. Morphology
 acts on the binary brain head only; it does not overwrite or gate categorical
 ROI predictions. Both masks receive the same original-geometry restoration.
 Thresholds apply on the processed 0.1 mm grid before restoring geometry.
@@ -584,3 +586,20 @@ option disabled. Evaluation has no noise, blur, affine augmentation or shuffling
 and keeps the last incomplete batch. Full-volume evaluation remains uncropped.
 Several patches do not increase animal counts; small scans may yield identical
 coordinates when no additional crop positions exist.
+
+## Explicit task loss weights
+
+Every training/study notebook exposes `LossConfig.regions_weight`, `brain_weight`
+and `classifier_weight`. The compiled objective is the sum of each active head's
+loss multiplied by its configured weight. Defaults remain 1.0 for every head,
+matching the current pipeline. Classifier weight is unused when the model has no
+classifier. A zero weight disables that task's contribution while keeping its
+loss and metrics observable. Values must be finite and nonnegative, with at least
+one active task's weight positive.
+
+The original fixed-split TBI notebook used zero brain-loss weight. Set
+`brain_weight=0.0` explicitly to reproduce that choice; current notebooks retain
+1.0. Task weighting does not change any individual loss or metric computation,
+model architecture or inference outputs. Weights are saved in the experiment and
+study contracts, so changing them requires a new run rather than resuming. Saved
+configurations without these fields retain equal weights.

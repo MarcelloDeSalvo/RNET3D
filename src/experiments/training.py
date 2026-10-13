@@ -83,6 +83,7 @@ def training_view(model: Any, config: ExperimentConfig) -> Any:
 def build_model(config: ExperimentConfig) -> Any:
     """Build, initialize and compile the existing training architecture."""
     config.loss.validate_for_training()
+    config.loss.validate_weights(with_classifier=config.model.classifier)
     import tensorflow as tf
     from ..evaluation.losses import diceBCELoss, diceCELoss, diceCELoss_gradient_fix, weightedBinaryCrossentropy
     from ..evaluation.metrics import PartialLabelDice, dice_coefficient
@@ -116,12 +117,14 @@ def build_model(config: ExperimentConfig) -> Any:
     )
     brain_dice = dice_coefficient(exclude_background=False)
     losses = {roi_head: roi_loss, "brain_mask": brain_loss}
+    task_weights = {roi_head: loss_settings.regions_weight, "brain_mask": loss_settings.brain_weight}
     metrics["brain_mask"] = [brain_dice]
     if settings.classifier:
         losses["classifier"] = weightedBinaryCrossentropy()
+        task_weights["classifier"] = loss_settings.classifier_weight
 
     optimizer = tf.keras.optimizers.Nadam(learning_rate=config.learning_rate)
-    model.compile(optimizer=optimizer, loss=losses, metrics=metrics)
+    model.compile(optimizer=optimizer, loss=losses, loss_weights=task_weights, metrics=metrics)
     model.initialization_report = initialization_report
     return model
 

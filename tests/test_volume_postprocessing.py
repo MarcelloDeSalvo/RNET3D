@@ -176,6 +176,7 @@ def test_every_training_notebook_has_explicit_full_volume_and_checkpoint_setting
         if path.name.startswith('09_'):
             assert any('ORIGINAL_LABEL_IDS: bool = True' in source for source in sources)
             assert any('postprocessing=postprocessing_settings' in source for source in sources)
+            assert any('USE_VENTRICLE_CENTROIDS: bool = True' in source for source in sources)
             continue
         config = next(source for source in sources if 'inference_settings = InferenceConfig(' in source)
         checkpoint = next(source for source in sources if 'RUN_CHECKPOINT_EVALUATION: bool' in source)
@@ -185,6 +186,10 @@ def test_every_training_notebook_has_explicit_full_volume_and_checkpoint_setting
         split = not path.name.startswith(('05_', '06_', '07f_'))
         assert f'split_ventricles={split}' in config
         assert f'split_ventricles={split}' in checkpoint
+        if split:
+            assert 'use_centroids=True' in config
+            assert 'use_centroids=True' in checkpoint
+        assert 'regions_weight=1.0, brain_weight=1.0, classifier_weight=1.0' in config
         if path.name.startswith('01_'):
             assert 'RESUME_RUN: Path | None = None' in config
             assert 'SPLIT_FILE: Path | None = None' in config

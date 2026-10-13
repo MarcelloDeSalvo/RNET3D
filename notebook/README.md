@@ -132,3 +132,10 @@ orientation receive a changed input convention; evaluation provenance records
 both references. Reopening saved results can change the viewing orientation
 without recomputing the stored metrics. Resume still requires the saved training
 configuration; changing reference/augmentation settings defines a new run.
+
+Validation/test patch coverage is configured separately from training repetitions
+with `EvaluationPatchConfig`. Saved coordinates are shared across epochs and study
+members. Each training notebook also exposes the three task loss weights. D1/rat
+full-volume evaluation and checkpoint cells use centroid ventricle separation;
+MouseFull preserves its already separate labels. Missing or small lesions retain
+the documented voxel-wise fallback.
