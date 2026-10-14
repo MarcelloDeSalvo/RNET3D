@@ -11,7 +11,7 @@ from typing import Any, Literal, Protocol, Sequence
 import numpy as np
 import pandas as pd
 
-from .config import ExperimentConfig
+from .config import ExperimentConfig, InitializationConfig
 from .data import PreparedData, SubjectSplit, fold_summary, make_cv_splits
 from .training import callback_configuration, run_cross_validation, run_training
 from ..evaluation.k_fold import FoldSplit, TrainingResult, load_fold_splits
@@ -25,6 +25,8 @@ class AblationVariant:
     parameter: Literal["residual", "attention", "max_pooling", "classifier",
                        "augment", "random_crop", "data_multiplier"] | None = None
     value: bool | int | None = None
+    initialization: InitializationConfig | None = None
+    initialization_by_fold: dict[int, InitializationConfig] | None = None
 
     @property
     def category(self) -> str:
@@ -43,7 +45,12 @@ class AblationVariant:
         if parameter is None:
             if self.value is not None:
                 raise ValueError("A reference variant cannot change a value")
-            return base
+            config = base
+            if self.initialization is not None:
+                config = replace(config, initialization=self.initialization)
+            if self.initialization_by_fold is not None:
+                config = replace(config, initialization_by_fold=self.initialization_by_fold)
+            return config
 
         if parameter == "data_multiplier":
             if isinstance(self.value, bool) or not isinstance(self.value, int) or self.value < 1:
@@ -69,6 +76,10 @@ class AblationVariant:
 
         if previous == self.value:
             raise ValueError(f"Variant {self.name} does not change {parameter}")
+        if self.initialization is not None:
+            config = replace(config, initialization=self.initialization)
+        if self.initialization_by_fold is not None:
+            config = replace(config, initialization_by_fold=self.initialization_by_fold)
         config.validate()
         return config
 
@@ -104,6 +115,7 @@ class AblationResult:
     runs: dict[str, TrainingResult] = field(default_factory=dict)
     metrics: pd.DataFrame = field(default_factory=pd.DataFrame)
     timings: pd.DataFrame = field(default_factory=pd.DataFrame)
+    patch_metrics: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 class StudyVariant(Protocol):
@@ -234,6 +246,21 @@ def run_study(
     else:
         raise ValueError("Unknown study mode")
 
+    from .initialization import pretraining_audit
+
+    for variant in variants:
+        variant_config = variant.configuration(base)
+        variant_data = replace(data, config=variant_config)
+        if split is not None:
+            protected_ids = [*split.validation, *split.test]
+            pretraining_audit(variant_data, variant_data.config.initialization, protected_ids)
+        else:
+            for fold in folds:
+                initializations = variant_data.config.initialization_by_fold
+                initialization = initializations.get(fold.index, variant_data.config.initialization)
+                protected_ids = [*fold.val_ids, *fold.test_ids]
+                pretraining_audit(variant_data, initialization, protected_ids)
+
     folder = Path(study_dir).resolve()
     contract = {"base": base.to_dict(), "variants": [asdict(variant) for variant in variants],
                 "seeds": seeds, "mode": mode, "splits": selection, "data": data.contract()}
@@ -261,6 +288,7 @@ def run_study(
 
     result = AblationResult(study_dir=folder)
     metric_tables: list[pd.DataFrame] = []
+    patch_tables: list[pd.DataFrame] = []
     timing_rows: list[dict[str, Any]] = []
     run_rows: list[dict[str, Any]] = []
     with run_lock(folder):
@@ -295,6 +323,9 @@ def run_study(
                     run = run_cross_validation(prepared, folds=folds, **run_options)
 
                 result.runs[f"{variant.name}/{run_id}"] = run
+                if not run.patch_metrics.empty:
+                    patch_table = run.patch_metrics.assign(Variant=variant.name, Seed=seed)
+                    patch_tables.append(patch_table)
                 run_rows.append({"Variant": variant.name, "Seed": seed, "RunDir": str(run.run_dir),
                                  "ConfigurationSHA256": config.fingerprint()})
                 for evaluator, tables in run.evaluations.items():
@@ -307,7 +338,11 @@ def run_study(
 
         if metric_tables:
             result.metrics = pd.concat(metric_tables, ignore_index=True)
-            result.metrics.to_csv(folder / "full_volume_metrics.csv", index=False)
+        if patch_tables:
+            result.patch_metrics = pd.concat(patch_tables, ignore_index=True)
+        from .evaluation import export_evaluation_tables
+
+        export_evaluation_tables(result.patch_metrics, result.metrics, folder)
         result.timings = pd.DataFrame(timing_rows)
         result.timings.to_csv(folder / "timings.csv", index=False)
     return result

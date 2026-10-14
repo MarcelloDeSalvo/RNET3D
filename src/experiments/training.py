@@ -8,6 +8,7 @@ import platform
 import subprocess
 import sys
 from copy import deepcopy
+from dataclasses import replace
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -72,10 +73,14 @@ def training_view(model: Any, config: ExperimentConfig) -> Any:
     """Expose the exact fitting outputs, including logits for the corrected loss."""
     import tensorflow as tf
 
-    if config.loss.regions != "dice_ce_gradient_fix":
+    if config.loss.regions != "dice_ce_gradient_fix" or model.output_names[0] == "regions_logits":
         return model
-    logits = model.get_layer("regions").input
-    logits_output = tf.keras.layers.Activation("linear", dtype="float32", name="regions_logits")(logits)
+    names = {layer.name for layer in model.layers}
+    if "regions_logits" in names:
+        logits_output = model.get_layer("regions_logits").output
+    else:
+        logits = model.get_layer("regions").input
+        logits_output = tf.keras.layers.Activation("linear", dtype="float32", name="regions_logits")(logits)
     outputs = [logits_output, *model.outputs[1:]]
     return tf.keras.Model(inputs=model.inputs, outputs=outputs, name="training_logits")
 
@@ -85,11 +90,21 @@ def build_model(config: ExperimentConfig) -> Any:
     config.loss.validate_for_training()
     config.loss.validate_weights(with_classifier=config.model.classifier)
     import tensorflow as tf
+    model = build_network(config)
+    initialization_report = initialize_model(model, config.initialization)
+    model = compile_model(model, config)
+    model.initialization_report = initialization_report
+    return model
+
+
+def compile_model(model: Any, config: ExperimentConfig) -> Any:
+    """Attach the native objectives/metrics without loading weights or fitting."""
+    import tensorflow as tf
     from ..evaluation.losses import diceBCELoss, diceCELoss, diceCELoss_gradient_fix, weightedBinaryCrossentropy
     from ..evaluation.metrics import PartialLabelDice, dice_coefficient
 
-    model = build_network(config)
-    initialization_report = initialize_model(model, config.initialization)
+    config.loss.validate_for_training()
+    config.loss.validate_weights(with_classifier=config.model.classifier)
     model = training_view(model, config)
     settings = config.model
     num_classes = len(config.labels.names)
@@ -128,7 +143,6 @@ def build_model(config: ExperimentConfig) -> Any:
 
     optimizer = tf.keras.optimizers.Nadam(learning_rate=config.learning_rate)
     model.compile(optimizer=optimizer, loss=losses, loss_weights=task_weights, metrics=metrics)
-    model.initialization_report = initialization_report
     return model
 
 
@@ -273,9 +287,22 @@ class ExperimentFactories:
         """Prepare every validation scan without random preprocessing."""
         return self.data.make_generator(ids, training=False)
 
+    def evaluate_patches(self, model: Any, ids: Sequence[str], options: dict[str, Any]) -> Any:
+        """Measure native objectives on every deterministic evaluation patch."""
+        from .evaluation import evaluate_patches
+
+        return evaluate_patches(model, self.data, ids, options)
+
     def model(self) -> Any:
         """Build a fresh compiled architecture with the configured head semantics."""
         return build_model(self.data.config)
+
+    def model_for_fold(self, context: FoldContext) -> Any:
+        """Use the audited source assigned to this fold, with a fresh optimizer."""
+        config = self.data.config
+        initialization = config.initialization_by_fold.get(context.split.index, config.initialization)
+        selected_config = replace(config, initialization=initialization)
+        return build_model(selected_config)
 
     def callbacks(self, context: FoldContext) -> list[Any]:
         """Copy notebook callbacks; never add implicit early stopping to CV."""
@@ -382,6 +409,18 @@ def validate_resume(data: PreparedData, run_dir: Path) -> None:
     data.save_evaluation_patches(run_dir / "evaluation_patches.json", resume=True)
 
 
+def _save_pretraining_audits(audits: dict[str, Any], run_dir: Path, *, resume: bool) -> None:
+    """Persist source identities/hashes and reject changed sources on resumption."""
+    path = run_dir / "pretraining_audit.json"
+    if resume and path.is_file():
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        if saved != audits:
+            raise ValueError("Resume pretraining provenance differs from the saved audit")
+        return
+
+    path.write_text(json.dumps(audits, indent=2), encoding="utf-8")
+
+
 def run_training(
     data: PreparedData, split: SubjectSplit, *, resume_run: Path | None = None,
     callbacks: Sequence[Any] | None = None,
@@ -397,6 +436,12 @@ def run_training(
     config = data.config
     config.validate()
     split.validate(data.subjects)
+    if config.initialization_by_fold:
+        raise ValueError("Fixed-split training uses initialization; initialization_by_fold is for CV")
+    from .initialization import pretraining_audit
+
+    protected_ids = [*split.validation, *split.test]
+    audit = pretraining_audit(data, config.initialization, protected_ids)
     settings = config.training
     count: int = len(split.train) + len(split.validation)
     settings.validate(count, cross_validation=False)
@@ -414,6 +459,7 @@ def run_training(
         split.save(run_dir / "splits.json")
         save_provenance(config, data, run_dir)
     _callback_contract(callbacks, run_dir, resume=resume)
+    _save_pretraining_audits({"0": audit}, run_dir, resume=resume)
     folder = run_dir / "fold_0"
     folder.mkdir(exist_ok=resume)
     fold = FoldSplit(index=0, train_ids=list(split.train), val_ids=list(split.validation))
@@ -427,7 +473,7 @@ def run_training(
     evaluators = evaluation_factories(data)
     result = TrainingResult(run_dir=run_dir, evaluations={name: [] for name in evaluators}, metadata=metadata)
     evaluation = EvaluationConfig(
-        test_ids=split.test, evaluate_validation=False,
+        test_ids=split.test, evaluate_validation=True,
         save_predictions=config.inference.save_predictions,
     )
 
@@ -439,6 +485,7 @@ def run_training(
             model_factory=factories.model, callback_factory=factories.callbacks,
             evaluators=evaluators, evaluation_config=config.to_dict(), result=result,
             evaluation=evaluation, model_exporter=export_model, resume=resume,
+            patch_evaluator=factories.evaluate_patches,
         )
         save_training_result(result, settings)
     return result
@@ -463,7 +510,7 @@ def run_cross_validation(
     if subject_ids is None:
         subject_ids = data.subjects.subject_ids
     if evaluation is None:
-        evaluation = EvaluationConfig(evaluate_validation=False, save_predictions=config.inference.save_predictions)
+        evaluation = EvaluationConfig(evaluate_validation=True, save_predictions=config.inference.save_predictions)
     if resume_run is not None:
         validate_resume(data, Path(resume_run))
     elif folds is None and precomputed_splits is None:
@@ -473,6 +520,15 @@ def run_cross_validation(
         )
 
     factories = ExperimentFactories(data, callback_list=callbacks, fixed_split=False)
+    from .initialization import pretraining_audit
+
+    audits: dict[str, Any] = {}
+
+    def validate_fold(fold: FoldSplit) -> None:
+        """Audit every source against selection and all independent cohorts."""
+        initialization = config.initialization_by_fold.get(fold.index, config.initialization)
+        protected_ids = [*fold.val_ids, *fold.test_ids, *evaluation.test_ids, *evaluation.external_ids]
+        audits[str(fold.index)] = pretraining_audit(data, initialization, protected_ids)
     dataset_name = "+".join(dataset.name for dataset in config.data.datasets)
     metadata = ExperimentMetadata(
         experiment_name=config.training.model_name, model_variant=config.model.architecture,
@@ -484,6 +540,7 @@ def run_cross_validation(
         if resume_run is None:
             save_provenance(config, data, run_dir)
         _callback_contract(callbacks, run_dir, resume=resume_run is not None)
+        _save_pretraining_audits(audits, run_dir, resume=resume_run is not None)
 
     result = k_fold_loop(
         train_gen=factories.training_data, val_gen=factories.validation_data,
@@ -495,6 +552,8 @@ def run_cross_validation(
         split_seed=config.split_seed, run_setup=write_provenance,
         resume_run=resume_run,
         fold_splits=folds,
+        fold_validator=validate_fold, fold_model_factory=factories.model_for_fold,
+        patch_evaluator=factories.evaluate_patches,
     )
     return result
 

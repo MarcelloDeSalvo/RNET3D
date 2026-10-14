@@ -505,7 +505,43 @@ def prepare_data(config: ExperimentConfig, *, require_training_loss: bool = True
             for key in subjects.scan_keys([original]):
                 overrides[key] = animal
         subjects = SubjectIndex(loader, subject_overrides=overrides)
-    return PreparedData(config=config, loader=loader, subjects=subjects)
+    prepared = PreparedData(config=config, loader=loader, subjects=subjects)
+    validate_inventory(prepared)
+    return prepared
+
+
+def validate_inventory(data: PreparedData) -> pd.DataFrame:
+    """Cross-check registered normalized scans against mapping.xlsx when present.
+
+    Compare exact cohort, normalized ID, timepoint and original ID; similar
+    original names never establish biological identity across cohorts.
+    Legacy layouts or datasets without a workbook retain their explicit contracts.
+    """
+    manifest = data.subjects.manifest(data.subjects.subject_ids)
+    inventory_path = data.config.data.root / "mapping.xlsx"
+    if not inventory_path.is_file():
+        return manifest
+
+    inventory = pd.read_excel(inventory_path, sheet_name="Mapping", dtype=str).fillna("")
+    columns = ["dataset", "anonymized_subject_id", "timepoint_or_context", "original_subject_id"]
+    if not set(columns).issubset(inventory.columns):
+        raise ValueError("mapping.xlsx is missing scan identity columns")
+
+    normalized = {dataset.name for dataset in data.config.data.datasets if dataset.layout == "normalized"}
+    selected = inventory.loc[inventory["dataset"].isin(normalized), columns]
+    keys = columns[:3]
+    if selected.duplicated(keys).any():
+        raise ValueError("mapping.xlsx contains duplicated normalized scan identities")
+    declared = selected.set_index(keys)["original_subject_id"].to_dict()
+    for row in manifest.itertuples():
+        if row.Dataset not in normalized:
+            continue
+        timepoint = row.Timepoint or ""
+        key = (row.Dataset, row.SubjectID, timepoint)
+        if declared.get(key) != row.OriginalID:
+            raise ValueError(f"{row.Subject}/{row.Scan}: metadata identity differs from mapping.xlsx")
+
+    return manifest
 
 
 def make_preprocessor(
@@ -561,7 +597,7 @@ def make_preprocessor(
             steps.extend(intensity_steps)
 
     resampling = Resample(
-        target_resolution=settings.spacing_mm, interpolation=1, orthogonal=True,
+        target_resolution=settings.spacing_mm, interpolation=1, orthogonal=False,
     )
     steps.append(resampling)
 

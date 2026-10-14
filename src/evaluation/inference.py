@@ -8,7 +8,7 @@ patches retain the historical weighting; classifier output is a majority vote.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from itertools import product
 from pathlib import Path
 import time
@@ -463,7 +463,11 @@ class ExperimentVolumeEvaluator:
             for key in self.data.subjects.scan_keys([subject_id]):
                 scan = self.data.loader.get_subject(key)
                 started = time.perf_counter()
-                image, reference = pipeline.preprocess(scan.image, scan.labels)
+                reference_masks = [scan.labels]
+                if scan.brain_mask is not None:
+                    reference_masks.append(scan.brain_mask)
+                image, references = pipeline.preprocess(scan.image, reference_masks)
+                reference = references[0]
                 preprocessing_seconds = time.perf_counter() - started
 
                 if image.shape != reference.shape or not np.allclose(image.affine, reference.affine):
@@ -495,7 +499,24 @@ class ExperimentVolumeEvaluator:
                     regions=regions, subject=subject_id, scan=scan.id,
                     dataset=scan.subject_group[0], available_labels=available_classes,
                 )
+                table = table.assign(Head="regions", EvaluationStage="full_volume", Aggregation="scan")
                 tables.append(table)
+
+                brain_reference = np.zeros(image.shape, dtype=np.uint8)
+                brain_available: list[int] = []
+                if scan.brain_mask is not None:
+                    reference_brain = references[1]
+                    if reference_brain.shape != image.shape or not np.allclose(reference_brain.affine, image.affine):
+                        raise ValueError(f"{scan.id}: brain reference must share the inference grid")
+                    brain_reference = reference_brain.get_fdata() != 0
+                    brain_available = [1]
+                brain_table = segmentation_metrics_table(
+                    reference=brain_reference, prediction=processed.brain_mask, spacing_mm=spacing,
+                    regions={1: "Brain"}, subject=subject_id, scan=scan.id,
+                    dataset=scan.subject_group[0], available_labels=brain_available,
+                )
+                brain_table = brain_table.assign(Head="brain_mask", EvaluationStage="full_volume", Aggregation="scan")
+                tables.append(brain_table)
 
                 if save_predictions:
                     group, scan_id = key
@@ -563,6 +584,7 @@ class SavedModelEvaluationConfig:
     checkpoint_kind: Literal["model", "weights"] = "model"
     original_label_ids: bool | None = None
     postprocessing: PostprocessingConfig | None = None
+    evaluate_patches: bool = False
 
 
 @dataclass(frozen=True)
@@ -574,12 +596,14 @@ class SavedModelEvaluationResult:
     timings: pd.DataFrame
     manifest: pd.DataFrame
     data: PreparedData
+    patch_metrics: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def best_checkpoint_settings(
     run_dir: Path, *, fold: int = 0, role: str = "test", output_dir: Path | None = None,
     reference: Path | None = None,
     original_label_ids: bool | None = None, postprocessing: PostprocessingConfig | None = None,
+    evaluate_patches: bool = False,
 ) -> SavedModelEvaluationConfig:
     """Select the saved cohort and best committed weights of a stopped/completed run.
 
@@ -644,6 +668,7 @@ def best_checkpoint_settings(
         subject_ids=subject_ids, role=role, variant=variant, seed=config.training.seed,
         fold=fold, checkpoint_kind="weights", save_predictions=True, reference=reference,
         original_label_ids=original_label_ids, postprocessing=postprocessing,
+        evaluate_patches=evaluate_patches,
     )
 
 
@@ -656,7 +681,7 @@ def evaluate_saved_model(settings: SavedModelEvaluationConfig) -> SavedModelEval
     """
     from ..experiments.config import ExperimentConfig, InitializationConfig
     from ..experiments.data import prepare_data
-    from ..experiments.training import build_network, configure_runtime, inference_model, training_view
+    from ..experiments.training import build_network, compile_model, configure_runtime, inference_model, training_view
 
     if settings.role not in ("test", "holdout", "validation", "external"):
         raise ValueError("Use an explicit test, holdout, validation or external role")
@@ -680,7 +705,7 @@ def evaluate_saved_model(settings: SavedModelEvaluationConfig) -> SavedModelEval
         raise FileExistsError(folder)
 
     saved = ExperimentConfig.load(settings.experiment_file)
-    config = replace(saved, initialization=InitializationConfig())
+    config = replace(saved, initialization=InitializationConfig(), initialization_by_fold={})
     if settings.data is not None:
         config = replace(config, data=settings.data)
     preprocessing = config.preprocessing
@@ -741,6 +766,30 @@ def evaluate_saved_model(settings: SavedModelEvaluationConfig) -> SavedModelEval
     }
     (folder / "evaluation.json").write_text(json.dumps(provenance, indent=2), encoding="utf-8")
     manifest.to_csv(folder / "subjects.csv", index=False)
+    patch_metrics = pd.DataFrame()
+    if settings.evaluate_patches:
+        from ..experiments.evaluation import evaluate_patches
+        from ..experiments.patches import EvaluationPatches
+
+        sampling_source = "new evaluation sampling"
+        saved_patches = source_run / "evaluation_patches.json"
+        if saved_patches.is_file():
+            payload = json.loads(saved_patches.read_text(encoding="utf-8"))
+            digest_payload = {key: value for key, value in payload.items() if key != "sha256"}
+            patch_digest = hashlib.sha256(json.dumps(digest_payload, sort_keys=True).encode()).hexdigest()
+            if patch_digest != payload["sha256"]:
+                raise ValueError("Saved evaluation patches were modified")
+            if payload["contract"] == EvaluationPatches.expected_contract(data):
+                data.evaluation_patches = EvaluationPatches.load(saved_patches, data)
+                sampling_source = "saved training-run patches"
+        data.patch_collection().save(folder / "evaluation_patches.json")
+        native_model = compile_model(model, config)
+        patch_metrics = evaluate_patches(native_model, data, settings.subject_ids)
+        patch_metrics = patch_metrics.assign(
+            DatasetRole=settings.role, Variant=settings.variant, Seed=settings.seed, Fold=settings.fold,
+        )
+        provenance["patch_sampling_source"] = sampling_source
+        (folder / "evaluation.json").write_text(json.dumps(provenance, indent=2), encoding="utf-8")
     options = {"evaluation_dir": folder, "save_predictions": settings.save_predictions}
     evaluator = ExperimentVolumeEvaluator(
         model=model, data=data, subject_ids=settings.subject_ids, options=options,
@@ -749,9 +798,12 @@ def evaluate_saved_model(settings: SavedModelEvaluationConfig) -> SavedModelEval
     metrics = metrics.assign(
         DatasetRole=settings.role, Variant=settings.variant, Seed=settings.seed, Fold=settings.fold,
     )
-    metrics.to_csv(folder / "full_volume_metrics.csv", index=False)
+    from ..experiments.evaluation import export_evaluation_tables
+
+    export_evaluation_tables(patch_metrics, metrics, folder)
     timings = pd.read_csv(folder / "inference_timings.csv")
-    return SavedModelEvaluationResult(output_dir=folder, metrics=metrics, timings=timings, manifest=manifest, data=data)
+    return SavedModelEvaluationResult(output_dir=folder, metrics=metrics, timings=timings,
+                                      manifest=manifest, data=data, patch_metrics=patch_metrics)
 
 
 def load_saved_evaluation(
@@ -775,8 +827,16 @@ def load_saved_evaluation(
     metrics = pd.read_csv(folder / "full_volume_metrics.csv")
     timings = pd.read_csv(folder / "inference_timings.csv")
     manifest = pd.read_csv(folder / "subjects.csv")
+    patch_metrics = pd.DataFrame()
+    patch_file = folder / "patch_metrics.csv"
+    if patch_file.is_file() and patch_file.read_text(encoding="utf-8").strip():
+        patch_metrics = pd.read_csv(patch_file)
+        for column in ("Subject", "Scan"):
+            if column in patch_metrics:
+                patch_metrics[column] = patch_metrics[column].fillna("")
     return SavedModelEvaluationResult(
         output_dir=folder, metrics=metrics, timings=timings, manifest=manifest, data=data,
+        patch_metrics=patch_metrics,
     )
 
 

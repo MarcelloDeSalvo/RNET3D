@@ -635,3 +635,17 @@ supervision change. The architecture, auxiliary classifier
 and inference outputs are unchanged. See [loss documentation](losses_metrics.md)
 for the configuration and limitations, and the v3 section in
 [the gradient notebook](../notebook/check_partial_label_loss_gradient.ipynb).
+
+## Audited pretraining and complete best-checkpoint evaluation
+
+Training now checks source fitting/selection animals and initialization ancestors
+against all target validation/test cohorts before any fold starts. Fold-specific
+sources are saved in `initialization_by_fold`; standalone weights need a saved
+source manifest/split to establish eligibility. Reused original names are qualified
+by subgroup, and normalized identities are cross-checked against `mapping.xlsx`.
+
+Native validation/test patch metrics and postprocessed full-volume brain/region
+metrics are exported together in `summary/evaluation_metrics.xlsx`, with distinct
+aggregation stages. Study folders provide the same tables. The final notebook cells
+and 09 measure saved checkpoints without fitting. See
+[the detailed workflow and current-source audit](reviewer_workflow_steps_1_3.md).

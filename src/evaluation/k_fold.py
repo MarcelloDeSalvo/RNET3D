@@ -194,6 +194,7 @@ class SubjectIndex:
                 "Subject": subject_id, "Group": scan_key[0], "Scan": scan_key[1],
                 "Dataset": group[0], "SubjectID": scan.subject_id,
                 "OriginalID": scan.original_id, "Timepoint": scan.timepoint,
+                "Subgroup": scan.metadata.get("subgroup", ""),
                 "Modality": scan.modality, "ImagePath": str(scan.image_path),
             })
 
@@ -436,6 +437,7 @@ class TrainingResult:
     """Run folder, training histories, and optional full-volume results."""
 
     run_dir: Path
+    patch_metrics: pd.DataFrame = field(default_factory=pd.DataFrame)
     histories: list[History] = field(default_factory=list)
     evaluations: dict[str, list[pd.DataFrame]] = field(default_factory=dict)
     summaries: dict[str, float] = field(default_factory=dict)
@@ -686,6 +688,12 @@ def _save_evaluations(result: TrainingResult) -> None:
         pd.concat(all_tables, ignore_index=True).to_csv(
             result.run_dir / "summary" / "all_evaluations.csv", index=False
         )
+    from ..experiments.evaluation import export_evaluation_tables
+
+    full_volume = pd.DataFrame()
+    if all_tables:
+        full_volume = pd.concat(all_tables, ignore_index=True)
+    export_evaluation_tables(result.patch_metrics, full_volume, result.run_dir / "summary")
 
 
 
@@ -701,6 +709,7 @@ def train_fold(
     evaluation: EvaluationConfig,
     model_exporter: Callable[[Any, Path], None] | None = None,
     resume: bool = False,
+    patch_evaluator: Callable[[Any, Sequence[str], Mapping[str, Any]], pd.DataFrame] | None = None,
 ) -> None:
     """Train a fresh model, restore its best checkpoint and evaluate one fold."""
     import tensorflow as tf
@@ -725,6 +734,12 @@ def train_fold(
             if not path.is_file():
                 raise FileNotFoundError(f"Completed fold is missing an artifact: {path}")
         completed = json.loads(completion_path.read_text(encoding="utf-8"))
+        patch_path = completed.get("patch_metrics")
+        if patch_evaluator is not None and patch_path is None:
+            raise ValueError("Completed fold predates patch evaluation; evaluate its best checkpoint separately")
+        if patch_path is not None:
+            patch_table = pd.read_json(folder / patch_path, orient="table")
+            result.patch_metrics = pd.concat([result.patch_metrics, patch_table], ignore_index=True)
         result.histories.append(completed["history"])
         result.timings.append(FoldTiming(**completed["timing"]))
         for entry in completed["evaluations"]:
@@ -767,10 +782,16 @@ def train_fold(
     training_seconds = state.training_seconds
     history = state.history
     best_epoch = _best_epoch(history, config.monitor, config.monitor_mode)
+    selected_epoch = best_epoch + 1
     if not context.checkpoint_path.is_file():
         raise FileNotFoundError(f"No best-weights checkpoint at {context.checkpoint_path}")
 
-    model.load_weights(str(context.checkpoint_path))
+    selected_checkpoint = context.checkpoint_path
+    state_file = folder / "training_state.json"
+    if state_file.is_file():
+        saved_state = json.loads(state_file.read_text(encoding="utf-8"))
+        selected_checkpoint = folder / saved_state["selected_checkpoint"]
+    model.load_weights(str(selected_checkpoint))
     if config.save_model:
         model_path: Path = folder / "model.keras"
         if model_exporter is None:
@@ -782,6 +803,28 @@ def train_fold(
 
     eval_start = time.perf_counter()
     saved_evaluations: list[dict[str, Any]] = []
+    patch_path = None
+    if patch_evaluator is not None:
+        patch_tables = []
+        patch_cohorts = {"validation": split.val_ids, "holdout": split.test_ids,
+                         "test": evaluation.test_ids, "external": evaluation.external_ids}
+        for role, subject_ids in patch_cohorts.items():
+            if not subject_ids:
+                continue
+            patch_dir = folder / "evaluations" / role / "patches"
+            patch_options = {"evaluation_dir": patch_dir}
+            patch_table = patch_evaluator(model, subject_ids, patch_options)
+            patch_table = patch_table.assign(
+                Fold=split.index, DatasetRole=role, Seed=config.seed, BestEpoch=selected_epoch,
+                ModelVariant=result.metadata.model_variant, ExperimentName=result.metadata.experiment_name,
+                RunID=result.run_dir.name,
+            )
+            patch_tables.append(patch_table)
+        if patch_tables:
+            patch_table = pd.concat(patch_tables, ignore_index=True)
+            patch_path = "patch_metrics.json"
+            patch_table.to_json(folder / patch_path, orient="table", indent=2)
+            result.patch_metrics = pd.concat([result.patch_metrics, patch_table], ignore_index=True)
     cohorts = {
         "validation": split.val_ids if evaluation.evaluate_validation else (),
         "holdout": split.test_ids,
@@ -800,6 +843,7 @@ def train_fold(
             selected_ids: list[str] = list(subject_ids)
             evaluator = evaluator_factory(model, selected_ids, options)
             table = evaluator.evaluate()
+            table = table.assign(Seed=config.seed, BestEpoch=selected_epoch)
             _record_evaluation(result, name, role, split.index, table, subject_ids)
             table_path = evaluator_dir / "metrics.json"
             table.to_json(table_path, orient="table", indent=2)
@@ -818,7 +862,8 @@ def train_fold(
     )
     result.timings.append(timing)
     (folder / "timing.json").write_text(json.dumps(asdict(timing), indent=2), encoding="utf-8")
-    write_json(completion_path, {"history": history, "timing": asdict(timing), "evaluations": saved_evaluations})
+    write_json(completion_path, {"history": history, "timing": asdict(timing),
+                                "evaluations": saved_evaluations, "patch_metrics": patch_path})
 
     del model, train_data, val_data
     gc.collect()
@@ -852,6 +897,9 @@ def k_fold_loop(
     run_setup: Callable[[Path], None] | None = None,
     resume_run: str | Path | None = None,
     fold_splits: Sequence[FoldSplit] | None = None,
+    fold_validator: Callable[[FoldSplit], None] | None = None,
+    fold_model_factory: Callable[[FoldContext], Any] | None = None,
+    patch_evaluator: Callable[[Any, Sequence[str], Mapping[str, Any]], pd.DataFrame] | None = None,
 ) -> TrainingResult:
     """Run a fresh TensorFlow/Keras training and validation experiment per fold.
 
@@ -886,6 +934,9 @@ def k_fold_loop(
         resume_run: Existing matching run; restore saved splits and skip completed folds.
         fold_splits: Explicit grouped roles, optionally including independent
             outer holdouts. Mutually exclusive with split files and a splitter.
+        fold_validator: Preflight every fold before creating a run or fitting.
+        fold_model_factory: Optional context-aware model factory for fold-specific initialization.
+        patch_evaluator: Native compiled-model measurements on complete deterministic patch cohorts.
 
     Returns:
         TrainingResult: Run location, per-fold histories and evaluations, and
@@ -963,6 +1014,9 @@ def k_fold_loop(
         folds = load_fold_splits(precomputed_splits, ids, settings.k)
     evaluators = _named_evaluators(fve_callbacks)
     metrics = list(metrics_dictionary or {})
+    if fold_validator is not None:
+        for fold in folds:
+            fold_validator(fold)
 
     if not resume:
         run_dir = settings.start_run()
@@ -979,6 +1033,8 @@ def k_fold_loop(
             if resume:
                 saved_manifest = pd.read_csv(manifest_path, dtype=str).fillna("")
                 current_manifest = manifest.fillna("").astype(str)
+                if "Subgroup" not in saved_manifest.columns:
+                    current_manifest = current_manifest.drop(columns="Subgroup")
                 if not saved_manifest.equals(current_manifest):
                     raise ValueError("Resume subject-to-scan manifest differs")
             else:
@@ -1015,11 +1071,17 @@ def k_fold_loop(
             checkpoint_path = folder / "best.weights.h5"
             context = FoldContext(split=split, output_dir=folder, config=settings, checkpoint_path=checkpoint_path)
 
+            selected_model_factory = model_callback
+            if fold_model_factory is not None:
+                def selected_model_factory() -> Any:
+                    """Build the current fold with its explicit initialization."""
+                    return fold_model_factory(context)
+
             train_fold(
                 context=context,
                 train_factory=train_gen,
                 val_factory=val_gen,
-                model_factory=model_callback,
+                model_factory=selected_model_factory,
                 callback_factory=callbacks_factory,
                 evaluators=evaluators,
                 evaluation_config=evaluation_config,
@@ -1027,6 +1089,7 @@ def k_fold_loop(
                 evaluation=evaluation,
                 model_exporter=model_exporter,
                 resume=resume,
+                patch_evaluator=patch_evaluator,
             )
 
         _save_summary(result, settings, metrics)

@@ -292,7 +292,14 @@ def test_tiny_training_exports_probabilities_and_held_out_metrics(experiment, ro
     result = run_training(data, split)
     cached = run_training(data, split, resume_run=result.run_dir)
     assert cached.histories == result.histories
-    assert set(cached.evaluations["regions"][0]["Scan"]) == {"SUBJ_0003_7days", "SUBJ_0003_14days"}
+    cached_volume = pd.concat(cached.evaluations["regions"], ignore_index=True)
+    cached_test = cached_volume.loc[cached_volume["DatasetRole"] == "test"]
+    assert set(cached_test["Scan"]) == {"SUBJ_0003_7days", "SUBJ_0003_14days"}
+    pd.testing.assert_frame_equal(cached.patch_metrics, result.patch_metrics, check_dtype=False)
+    assert set(result.patch_metrics["DatasetRole"]) == {"validation", "test"}
+    assert set(result.patch_metrics["Head"]) >= {"regions", "brain_mask", "total"}
+    assert result.patch_metrics["BestEpoch"].eq(1).all()
+    assert (result.run_dir / "summary" / "evaluation_metrics.xlsx").is_file()
     assert len(result.histories[0]["loss"]) == 1
     if roi_loss == "dice_ce_gradient_fix":
         for key in ("regions_logits_mean_dice", "val_regions_logits_mean_dice"):
@@ -307,7 +314,10 @@ def test_tiny_training_exports_probabilities_and_held_out_metrics(experiment, ro
     inputs = np.zeros((1, 16, 16, 16, 1), dtype=np.float32)
     probabilities = model(inputs, training=False)[0].numpy()
     np.testing.assert_allclose(probabilities.sum(axis=-1), 1, atol=1e-6)
-    table = result.evaluations["regions"][0]
+    volume = pd.concat(result.evaluations["regions"], ignore_index=True)
+    table = volume.loc[volume["DatasetRole"] == "test"]
+    assert set(table["Head"]) == {"regions", "brain_mask"}
+    assert set(volume["DatasetRole"]) == {"validation", "test"}
     assert set(table["Subject"]) == set(split.test)
     if roi_loss == "dice_ce_gradient_fix":
         assert set(table.loc[table["Region"] == "CC", "Status"]) == {"unavailable"}
@@ -637,7 +647,8 @@ def test_tiny_mouse_full_run_combines_partial_cohorts_and_classifier(experiment,
     restored = tf.keras.models.load_model(result.run_dir / "fold_0" / "model.keras", compile=False)
     assert restored.output_names == ["regions", "brain_mask", "classifier"]
     assert restored.output_shape[0][-1] == 11
-    table = result.evaluations["regions"][0]
+    volume = pd.concat(result.evaluations["regions"], ignore_index=True)
+    table = volume.loc[volume["DatasetRole"] == "test"]
     assert set(table["Scan"]) == {"SUBJ_0001", "SUBJ_0003_7days", "SUBJ_0003_14days"}
     missing = table.loc[table["Region"] == "il-Ctx"]
     assert missing["Status"].eq("unavailable").all()

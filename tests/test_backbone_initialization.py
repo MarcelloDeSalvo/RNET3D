@@ -130,18 +130,19 @@ def test_initialization_paths_roundtrip_and_missing_source_errors(experiment, tm
 
 def test_mousefull_notebooks_expose_transfer_and_keep_preview_safe():
     root = Path(__file__).resolve().parents[1] / 'notebook'
-    for filename in ('05_mouse_full_training.ipynb', '06_mouse_full_kfold.ipynb'):
+    for filename in ('05_mouse_full_training.ipynb', '06_mouse_full_kfold.ipynb', '07f_ablation.ipynb'):
         cells = json.loads((root / filename).read_text(encoding='utf-8'))['cells']
         for index, cell in enumerate(cells):
             if cell['cell_type'] == 'code':
                 compile(''.join(cell['source']), f'{filename}:{index}', 'exec')
         config = ''.join(cells[3]['source'])
         assert 'USE_TBI_PRETRAINING: bool = True' in config
-        assert 'TBI_RUN: Path | None = None' in config
+        assert 'TBI_RUN: Path | None =' in config
+        assert 'gradient_fix_version=1' in config
         assert 'FREEZE_BACKBONE: bool = False' in config
         assert 'InitializationConfig.from_run(' in config
         sources = [''.join(cell['source']) for cell in cells if cell['cell_type'] == 'code']
-        assert any('if USE_TBI_PRETRAINING and config.initialization.mode == "scratch":' in source for source in sources)
+        assert any('USE_TBI_PRETRAINING' in source and 'raise ValueError' in source for source in sources)
 
 
 def test_graph_signature_normalizes_names_without_corrupting_operation_literals():

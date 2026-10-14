@@ -405,6 +405,7 @@ class ExperimentConfig:
     loss: LossConfig = field(default_factory=LossConfig)
     inference: InferenceConfig = field(default_factory=InferenceConfig)
     initialization: InitializationConfig = field(default_factory=InitializationConfig)
+    initialization_by_fold: dict[int, InitializationConfig] = field(default_factory=dict)
     learning_rate: float = 0.001
     split_seed: int = 42
     early_stopping_patience: int = 20  # Legacy fallback when a fixed-split caller supplies no callback list.
@@ -416,6 +417,10 @@ class ExperimentConfig:
         """Fail early on incompatible settings or inaccessible input locations."""
         self.labels.validate()
         self.initialization.validate()
+        for fold, initialization in self.initialization_by_fold.items():
+            if isinstance(fold, bool) or not isinstance(fold, int) or not 0 <= fold < self.training.k:
+                raise ValueError("Initialization fold indexes must belong to the configured folds")
+            initialization.validate()
         self.fixed_split.validate()
         self.preprocessing.validate()
         self.loss.validate_weights(with_classifier=self.model.classifier)
@@ -501,6 +506,12 @@ class ExperimentConfig:
         if self.initialization.source_experiment is not None:
             source_experiment = Path(self.initialization.source_experiment).resolve()
             settings["initialization"]["source_experiment"] = str(source_experiment)
+        for fold, initialization in self.initialization_by_fold.items():
+            record = settings["initialization_by_fold"][fold]
+            if initialization.checkpoint is not None:
+                record["checkpoint"] = str(Path(initialization.checkpoint).resolve())
+            if initialization.source_experiment is not None:
+                record["source_experiment"] = str(Path(initialization.source_experiment).resolve())
         return settings
 
     def fingerprint(self) -> str:
@@ -553,6 +564,14 @@ class ExperimentConfig:
         if initialization.get("source_experiment") is not None:
             initialization["source_experiment"] = Path(initialization["source_experiment"])
 
+        fold_initializations = {}
+        for fold, record in values.pop("initialization_by_fold", {}).items():
+            record = dict(record)
+            for name in ("checkpoint", "source_experiment"):
+                if record.get(name) is not None:
+                    record[name] = Path(record[name])
+            fold_initializations[int(fold)] = InitializationConfig(**record)
+
         inference = dict(values.pop("inference"))
         postprocessing = inference.pop("postprocessing", {})
         inference["postprocessing"] = PostprocessingConfig(**postprocessing)
@@ -573,6 +592,7 @@ class ExperimentConfig:
             model=ModelConfig(**model), loss=LossConfig(**loss),
             inference=InferenceConfig(**inference),
             initialization=InitializationConfig(**initialization), fixed_split=fixed_split,
+            initialization_by_fold=fold_initializations,
             evaluation_patches=evaluation_patches, **values,
         )
 

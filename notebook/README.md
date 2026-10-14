@@ -64,7 +64,9 @@ Notebooks 05/06 expose TBI feature transfer through `USE_TBI_PRETRAINING`,
 is sufficient; the committed best weights are selected automatically. Features
 transfer, output heads remain fresh, and each target model uses a fresh optimizer.
 Select a source excluding the target evaluation animals; a shared D1-trained
-checkpoint can overlap MouseFull folds. Scratch training remains an explicit option.
+checkpoint can overlap MouseFull folds. The runner enforces this for source
+fitting and checkpoint selection, including initialization ancestors. Per-fold
+sources are exposed through `TBI_FOLD_SOURCES`. Scratch training remains explicit.
 Unavailable classes follow normalized annotation metadata and use the corrected
 logits-based loss. Confirmed cross-cohort duplicates can be grouped explicitly;
 the notebook does not infer biological identity from similar original IDs.
@@ -139,3 +141,12 @@ members. Each training notebook also exposes the three task loss weights. D1/rat
 full-volume evaluation and checkpoint cells use centroid ventricle separation;
 MouseFull preserves its already separate labels. Missing or small lesions retain
 the documented voxel-wise fallback.
+
+MouseFull 05/06/07f default to loss v1, with available empty SHAM lesion targets.
+07f exposes reference, variant-specific and fold-specific TBI sources.
+Architectural variants need matching source backbones; no-classifier can reuse
+the reference. Final result sections display native patch measurements and
+full-volume brain/region scores. Runs/studies export `evaluation_metrics.xlsx`
+with separate sheets, alongside CSV tables. Checkpoint cells and 09 provide the
+same measurements without fitting. See
+[the configuration, leakage and evaluation guide](../docs/reviewer_workflow_steps_1_3.md).
