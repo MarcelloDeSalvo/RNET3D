@@ -41,7 +41,11 @@ def test_variants_change_only_the_requested_setting(prepared):
     ablation.AblationVariant("same", "residual", True),
     ablation.AblationVariant("bad_bool", "attention", 0),
     ablation.AblationVariant("bad_count", "data_multiplier", True),
-    ablation.AblationVariant("unknown", "deep_supervision", False),
+    ablation.AblationVariant("unknown", "unimplemented", False),
+    ablation.AblationVariant("bad_fusion", "deep_supervision", None),
+    ablation.AblationVariant("bad_loss", "regions", "unknown"),
+    ablation.AblationVariant("bad_version", "gradient_fix_version", True),
+    ablation.AblationVariant("bad_version", "gradient_fix_version", 4),
     ablation.AblationVariant("../escape"),
 ])
 def test_invalid_or_ineffective_variants_fail_before_running(prepared, variant):
@@ -119,18 +123,27 @@ def test_animal_summary_retains_model_identity_and_ignores_missing_values(tmp_pa
 
 
 def test_tiny_real_study_uses_core_training_and_reuses_completed_runs(prepared, tmp_path):
-    """Fit two tiny architecture variants and recover the complete study."""
+    """Fit new component/loss variants and recover their native evaluations."""
     preprocessing = replace(prepared.config.preprocessing, augment=False)
     inference = InferenceConfig(enabled=False, stride=16)
-    config = replace(prepared.config, preprocessing=preprocessing, inference=inference)
+    model = replace(prepared.config.model, classifier=True)
+    loss = replace(prepared.config.loss, gradient_fix_version=1)
+    config = replace(prepared.config, model=model, loss=loss, preprocessing=preprocessing, inference=inference)
     data = replace(prepared, config=config)
     split = make_split(data.subjects, seed=42)
-    variants = [ablation.AblationVariant("reference"), ablation.AblationVariant("no_attention", "attention", False)]
+    variants = [
+        ablation.AblationVariant("reference"),
+        ablation.AblationVariant("no_multiscale", "multiscale", False),
+        ablation.AblationVariant("no_deep_supervision", "deep_supervision", False),
+        ablation.AblationVariant("no_classifier", "classifier", False),
+        ablation.AblationVariant("v3", "gradient_fix_version", 3),
+    ]
     folder = tmp_path / "real_study"
     result = ablation.run_ablation(data, variants, study_dir=folder, split=split)
-    assert len(result.runs) == 2
-    assert result.timings.shape[0] == 2
+    assert len(result.runs) == 5
+    assert result.timings.shape[0] == 5
     assert result.metrics.empty
+    assert set(result.patch_metrics["Variant"]) == {variant.name for variant in variants}
     for run in result.runs.values():
         assert (run.run_dir / "fold_0" / "completed.json").is_file()
         assert np.isfinite(run.histories[0]["loss"]).all()
@@ -138,3 +151,50 @@ def test_tiny_real_study_uses_core_training_and_reuses_completed_runs(prepared, 
     resumed = ablation.run_ablation(data, variants, study_dir=folder, split=split, resume=True)
     for name, run in result.runs.items():
         assert resumed.runs[name].histories == run.histories
+    pd.testing.assert_frame_equal(resumed.patch_metrics, result.patch_metrics)
+
+
+@pytest.mark.parametrize("parameter,value", [
+    ("multiscale", False), ("deep_supervision", False), ("gradient_fix_version", 3),
+    ("regions", "dice_ce"),
+])
+def test_new_variants_replace_only_one_configuration_field(prepared, parameter, value):
+    base = prepared.config
+    variant = ablation.AblationVariant("changed", parameter, value)
+
+    changed = variant.configuration(base)
+    plan = ablation.ablation_plan(base, [ablation.AblationVariant("reference"), variant])
+
+    expected = base.to_dict()
+    section = "model"
+    if variant.category == "loss":
+        section = "loss"
+    expected[section][parameter] = value
+    assert changed.to_dict() == expected
+    assert plan.iloc[1]["ReferenceValue"] == base.to_dict()[section][parameter]
+    assert plan.iloc[1]["Value"] == value
+
+
+def test_version_change_requires_an_active_gradient_fix_objective(prepared):
+    base = replace(prepared.config, loss=replace(prepared.config.loss, regions="dice_ce"))
+    variant = ablation.AblationVariant("v3", "gradient_fix_version", 3)
+
+    with pytest.raises(ValueError, match="only changes a gradient-fix"):
+        variant.configuration(base)
+
+
+def test_legacy_loss_row_is_rejected_on_partial_data_before_any_run(prepared, tmp_path, monkeypatch):
+    variants = [
+        ablation.AblationVariant("reference"),
+        ablation.AblationVariant("legacy", "regions", "dice_ce"),
+    ]
+    split = prepared.make_split()
+    folder = tmp_path / "invalid_study"
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Every loss row must be checked before the first fit")
+
+    monkeypatch.setattr(ablation, "run_training", forbidden)
+    with pytest.raises(ValueError, match="legacy: partial annotations"):
+        ablation.run_ablation(prepared, variants, study_dir=folder, split=split)
+    assert not folder.exists()

@@ -150,10 +150,23 @@ def test_multiscale_residual_selection(residual):
     assert model.output_shape == [(None, 4, 4, 4, 4), (None, 4, 4, 4, 1)]
 
 
-def test_multitask_forward_outputs_remain_valid():
+@pytest.mark.parametrize("multiscale", [False, True])
+@pytest.mark.parametrize("deep_supervision", [False, True])
+def test_multitask_forward_outputs_remain_valid(multiscale, deep_supervision):
     """Smoke-check all three heads numerically without training a model."""
     tf.keras.backend.clear_session()
-    model = networks.mt_r_net_3d((16, 16, 16), 1, 3, [2, 4, 8, 16, 32], with_classifier=True)
+    model = networks.mt_r_net_3d(
+        (16, 16, 16), 1, 3, [2, 4, 8, 16, 32], with_classifier=True,
+        multiscale=multiscale, deep_supervision=deep_supervision,
+    )
+    assert model.output_names == ["regions", "brain_mask", "classifier"]
+    layers = {layer.name for layer in model.layers}
+    for prefix in ("b", "r"):
+        assert f"{prefix}_output_1" in layers
+        for level in (4, 3, 2):
+            assert (f"{prefix}_output_{level}" in layers) == deep_supervision
+    pooled_inputs = [layer for layer in model.layers if isinstance(layer, tf.keras.layers.AveragePooling3D)]
+    assert len(pooled_inputs) == 3 * int(multiscale)
     values = tf.ones((1, 16, 16, 16, 1))
     regions, brain, condition = model(values, training=False)
     for output in (regions, brain, condition):

@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from test_experiments import experiment
-from src.experiments.config import DatasetSpec, InitializationConfig, ExperimentConfig
+from src.experiments.config import DatasetSpec, InitializationConfig, ExperimentConfig, ModelConfig
 from src.experiments.data import SubjectSplit, prepare_data, validate_inventory
 from src.experiments.initialization import pretraining_audit
 from src.experiments import training
@@ -167,3 +167,24 @@ def test_inventory_crosschecks_exact_original_ids_and_longitudinal_scans(experim
     inventory.to_excel(path, sheet_name='Mapping', index=False)
     with pytest.raises(ValueError, match='identity differs'):
         prepare_data(experiment)
+
+
+@pytest.mark.parametrize("parameter", ["multiscale", "deep_supervision"])
+def test_ablation_source_audit_distinguishes_backbone_and_head_changes(experiment, tmp_path, parameter):
+    model = ModelConfig(filters=(2, 4, 8, 16, 32))
+    config = replace(experiment, model=model)
+    data = prepare_data(config)
+    folder = tmp_path / "source"
+    saved = source_run(data, folder, ["independent"], ["other-independent"])
+    initialization = replace(saved, mode="backbone", source_experiment=folder / "experiment.json")
+    target_model = replace(model, **{parameter: False})
+    target = replace(data, config=replace(config, model=target_model))
+    protected = ["D1/SUBJ_0002"]
+
+    if parameter == "multiscale":
+        with pytest.raises(ValueError, match="variant-matched TBI source"):
+            pretraining_audit(target, initialization, protected)
+    else:
+        report = pretraining_audit(target, initialization, protected)
+        assert report["mode"] == "backbone"
+        assert report["protected_animals"] == protected

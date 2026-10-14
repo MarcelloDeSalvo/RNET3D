@@ -73,7 +73,7 @@ fixed-split cohorts reserve a separate shared test set, and saved folds support
 matched comparisons and resumption. Other cohort features are not stratified.
 
 `notebook/07_ablation.ipynb` defines a complete D1 reference configuration and
-single-setting residual, attention and downsampling variants. Optional training
+single-setting residual, attention, multiscale, head-fusion and downsampling variants. Optional loss and training
 strategy rows are separate from architectural changes. The same fixed split or
 independent outer folds are reused across variants and training seeds. The study
 saves its complete contract, matrix, shared selection, run index and raw metrics.
@@ -86,8 +86,10 @@ test or interpolation sensitivity analysis is performed.
 MouseFull D1+D3, retaining notebook 05's eleven-class order, classifier,
 corrected partial-label loss, filter widths and preprocessing. It has its own
 study folder and supports matched fixed splits or grouped outer folds. The
-default component variants retain the classifier; an optional commented row
-removes that head alone. Training remains disabled until explicitly enabled.
+default component matrix includes removal of the classifier alone. Optional loss
+rows compare the reference corrected v1 objective with v3; v2 remains an optional
+diagnostic. Training remains disabled until explicitly enabled. See
+[the ablation workflow](ablation.md) for exact component and pretraining policies.
 
 The notebook directory now separates complete experiment configurations instead
 of selecting rat or mouse presets inside a generic notebook. Renaming the
@@ -555,9 +557,8 @@ increase biological sample size. Reuse saved splits for seed-matched comparisons
 
 ## Subsequent steps
 
-Multiscale-input and fused deep-supervision
-ablations require additional explicit builder switches; current component flags
-do not represent those removals. nnU-Net training remains separate; its saved
+Multiscale-input and fused deep-supervision ablations are independently available
+in notebooks 07/07f. nnU-Net training remains separate; its saved
 results can enter the revision CSV contract with explicit canonical animal IDs,
 region names, units and annotation statuses. This workflow performs no sensitivity
 analysis. Animal bootstrap uncertainty conditions on supplied trained models;

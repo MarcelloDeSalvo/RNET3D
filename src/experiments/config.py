@@ -186,7 +186,7 @@ class PreprocessingConfig:
 
 @dataclass(frozen=True)
 class ModelConfig:
-    """Explicit builder flags, defaulting to the original 3DR-Net settings."""
+    """Original builder settings; multiscale/fusion flags apply only to 3DR-Net."""
 
     architecture: Literal["3drnet", "unet"] = "3drnet"
     filters: tuple[int, int, int, int, int] = (16, 32, 64, 128, 256)
@@ -194,10 +194,15 @@ class ModelConfig:
     attention: bool = True
     max_pooling: bool = True
     classifier: bool = False
+    multiscale: bool = True
+    deep_supervision: bool = True
 
     def __post_init__(self) -> None:
         """Reject non-boolean component flags rather than inferring their meaning."""
-        flags = (self.residual, self.attention, self.max_pooling, self.classifier)
+        flags = (
+            self.residual, self.attention, self.max_pooling, self.classifier,
+            self.multiscale, self.deep_supervision,
+        )
         if any(not isinstance(flag, bool) for flag in flags):
             raise ValueError("Model component flags must be booleans")
 

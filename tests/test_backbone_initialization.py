@@ -84,16 +84,52 @@ def test_stopped_tbi_transfer_copies_all_features_and_keeps_every_new_head(
     assert report['source_experiment_sha256']
 
 
-def test_transfer_mismatch_fails_before_changing_target_weights(experiment, tmp_path):
+@pytest.mark.parametrize("parameter", ["attention", "multiscale"])
+def test_transfer_mismatch_fails_before_changing_target_weights(experiment, tmp_path, parameter):
     source_config, _, _ = write_tbi_run(experiment, tmp_path / 'tbi')
     settings = InitializationConfig.from_run(tmp_path / 'tbi')
-    target_config = replace(source_config, model=replace(source_config.model, attention=False))
+    target_model = replace(source_config.model, **{parameter: False})
+    target_config = replace(source_config, model=target_model)
     target = build_network(target_config)
     before = target.get_weights()
     with pytest.raises(ValueError, match='backbone graphs differ'):
         initialize_model(target, settings)
     for actual, expected in zip(target.get_weights(), before):
         np.testing.assert_array_equal(actual, expected)
+
+
+def test_deep_supervision_ablation_reuses_tbi_features_without_copying_heads(experiment, tmp_path):
+    source_config, source, _ = write_tbi_run(experiment, tmp_path / "tbi")
+    initialization = InitializationConfig.from_run(tmp_path / "tbi")
+    model = replace(source_config.model, deep_supervision=False, classifier=True)
+    target_config = replace(source_config, labels=mousefull_labels(), model=model)
+    target = build_network(target_config)
+    features = backbone(target, finest_only=True)
+    feature_names = {layer.name for layer in features.layers}
+    fresh_heads = {layer.name: layer.get_weights() for layer in target.layers
+                   if layer.weights and layer.name not in feature_names}
+
+    report = initialize_model(target, initialization)
+
+    source_weights = backbone(source, finest_only=True).get_weights()
+    for actual, expected in zip(features.get_weights(), source_weights):
+        np.testing.assert_array_equal(actual, expected)
+    assert set(report["reinitialized_heads"]) == set(fresh_heads)
+    for name, weights in fresh_heads.items():
+        for actual, expected in zip(target.get_layer(name).get_weights(), weights):
+            np.testing.assert_array_equal(actual, expected)
+
+
+def test_old_saved_model_settings_keep_original_ablation_flags(experiment):
+    payload = experiment.to_dict()
+    payload["model"].pop("multiscale")
+    payload["model"].pop("deep_supervision")
+
+    loaded = ExperimentConfig.from_dict(payload)
+
+    assert loaded == experiment
+    assert loaded.model.multiscale is True
+    assert loaded.model.deep_supervision is True
 
 
 def test_fresh_mousefull_models_share_pretrained_features_with_fresh_optimizers(experiment, tmp_path):

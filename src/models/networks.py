@@ -286,21 +286,30 @@ def _segmentation_head(x: Tensor, channels: int, name: str, activation: str) -> 
 
 def _deep_supervision_head(
     features: Sequence[Tensor], channels: int, prefix: str, name: str, activation: str,
+    *, deep_supervision: bool = True,
 ) -> Tensor:
     """Fuse four decoder levels in their original coarse-to-fine order.
 
-    This is the single location for future deep-supervision ablations. The
-    current head always sums all four projections before its output projection.
+    Disabling fusion retains the original finest-level projection and final
+    output projection. There are no separate auxiliary losses in either mode.
     """
     sizes: tuple[tuple[int, int, int], ...] = ((8, 8, 8), (4, 4, 4), (2, 2, 2), (1, 1, 1))
+    levels: tuple[int, ...] = (4, 3, 2, 1)
+    if not deep_supervision:
+        features = (features[-1],)
+        sizes = ((1, 1, 1),)
+        levels = (1,)
+
     projections: list[Tensor] = []
 
-    for level, feature, size in zip((4, 3, 2, 1), features, sizes):
+    for level, feature, size in zip(levels, features, sizes):
         projection_name: str = f'{prefix}_output_{level}'
         projection: Tensor = deep_supervision_block(feature, channels, size, projection_name)
         projections.append(projection)
 
-    fused: Tensor = Add()(projections)
+    fused: Tensor = projections[0]
+    if deep_supervision:
+        fused = Add()(projections)
 
     return _segmentation_head(fused, channels, name, activation)
 
@@ -309,7 +318,8 @@ def _deep_supervision_head(
 def mt_r_net_3d(
     in_shape: SpatialShape, in_channels: int, num_classes: int, filters: Sequence[int],
     residual: bool = True, attention: bool = True, max_pooling: bool = True,
-    with_classifier: bool = False,
+    with_classifier: bool = False, *, multiscale: bool = True,
+    deep_supervision: bool = True,
 ) -> tf.keras.Model:
     """
     Build the multiscale, deeply supervised multitask 3D R-Net.
@@ -318,6 +328,8 @@ def mt_r_net_3d(
     by 16. Output order is regions, brain_mask, then optional classifier.
     The residual flag controls encoder, bottleneck, decoder and multiscale
     branches. Bottleneck and decoder dropout rates remain zero in this builder.
+    Multiscale input branches and decoder-head fusion can be disabled separately;
+    both default to True, preserving the original graph and weight ordering.
     """
     input_shape: tuple[int | None, ...] = (in_shape[0], in_shape[1], in_shape[2], in_channels)
     _i: Tensor = Input(shape=input_shape)
@@ -327,9 +339,13 @@ def mt_r_net_3d(
     level_4: int = filters[3]
     level_5: int = filters[4]
 
-    m3, avg_img3 = multiscale_block(_i, level_2, (2, 2, 2), residual=residual)
-    m2, avg_img2 = multiscale_block(avg_img3, level_3, (2, 2, 2), residual=residual)
-    m1, _ = multiscale_block(avg_img2, level_4, (2, 2, 2), residual=residual)
+    m3: Tensor | None = None
+    m2: Tensor | None = None
+    m1: Tensor | None = None
+    if multiscale:
+        m3, avg_img3 = multiscale_block(_i, level_2, (2, 2, 2), residual=residual)
+        m2, avg_img2 = multiscale_block(avg_img3, level_3, (2, 2, 2), residual=residual)
+        m1, _ = multiscale_block(avg_img2, level_4, (2, 2, 2), residual=residual)
 
     # Encoder
     e4, skip_1 = encoder_block(_i, level_1, residual, max_pooling=max_pooling, dropout=0.0)
@@ -348,8 +364,14 @@ def mt_r_net_3d(
 
     # Brain head is created first to retain automatic layer/weight names.
     decoder_features: tuple[Tensor, ...] = (d4, d3, d2, d1)
-    brain_mask = _deep_supervision_head(decoder_features, 1, 'b', 'brain_mask', 'sigmoid')
-    regions = _deep_supervision_head(decoder_features, num_classes, 'r', 'regions', 'softmax')
+    brain_mask = _deep_supervision_head(
+        decoder_features, 1, 'b', 'brain_mask', 'sigmoid',
+        deep_supervision=deep_supervision,
+    )
+    regions = _deep_supervision_head(
+        decoder_features, num_classes, 'r', 'regions', 'softmax',
+        deep_supervision=deep_supervision,
+    )
 
     outputs: list[Tensor] = [regions, brain_mask]
 

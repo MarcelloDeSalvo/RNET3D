@@ -124,6 +124,8 @@ def test_previous_default_configuration_can_resume_without_rewriting_its_contrac
     path = tmp_path / "experiment.json"
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload.pop("fixed_split")
+    payload["model"].pop("multiscale")
+    payload["model"].pop("deep_supervision")
     for dataset in payload["data"]["datasets"]:
         dataset.pop("annotation_scope")
     path.write_text(json.dumps(payload), encoding="utf-8")
@@ -158,6 +160,8 @@ def test_older_study_contract_can_resume_with_new_declarations(experiment, tmp_p
     path = folder / "study.json"
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload["base"].pop("fixed_split")
+    payload["base"]["model"].pop("multiscale")
+    payload["base"]["model"].pop("deep_supervision")
     for dataset in payload["base"]["data"]["datasets"]:
         dataset.pop("annotation_scope")
     path.write_text(json.dumps(payload), encoding="utf-8")

@@ -63,6 +63,8 @@ def build_network(config: ExperimentConfig) -> Any:
     }
     if settings.architecture == "3drnet":
         parameters["with_classifier"] = settings.classifier
+        parameters["multiscale"] = settings.multiscale
+        parameters["deep_supervision"] = settings.deep_supervision
         model = mt_r_net_3d(**parameters)
     else:
         model = standard_unet_3d(**parameters)

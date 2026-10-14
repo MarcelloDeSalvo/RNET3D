@@ -17,24 +17,33 @@ from .training import callback_configuration, run_cross_validation, run_training
 from ..evaluation.k_fold import FoldSplit, TrainingResult, load_fold_splits
 
 
+ARCHITECTURE_PARAMETERS: tuple[str, ...] = (
+    "residual", "attention", "max_pooling", "classifier", "multiscale", "deep_supervision",
+)
+LOSS_PARAMETERS: tuple[str, ...] = ("regions", "gradient_fix_version")
+
+
 @dataclass(frozen=True)
 class AblationVariant:
     """One named change, or an unchanged reference when parameter is None."""
 
     name: str
     parameter: Literal["residual", "attention", "max_pooling", "classifier",
-                       "augment", "random_crop", "data_multiplier"] | None = None
-    value: bool | int | None = None
+                       "multiscale", "deep_supervision", "augment", "random_crop",
+                       "data_multiplier", "regions", "gradient_fix_version"] | None = None
+    value: bool | int | str | None = None
     initialization: InitializationConfig | None = None
     initialization_by_fold: dict[int, InitializationConfig] | None = None
 
     @property
     def category(self) -> str:
-        """Separate reference, architectural and training-strategy experiments."""
+        """Separate reference, architecture, loss and training-strategy experiments."""
         if self.parameter is None:
             return "reference"
-        if self.parameter in ("residual", "attention", "max_pooling", "classifier"):
+        if self.parameter in ARCHITECTURE_PARAMETERS:
             return "architecture"
+        if self.parameter in LOSS_PARAMETERS:
+            return "loss"
         return "training"
 
     def configuration(self, base: ExperimentConfig) -> ExperimentConfig:
@@ -50,9 +59,23 @@ class AblationVariant:
                 config = replace(config, initialization=self.initialization)
             if self.initialization_by_fold is not None:
                 config = replace(config, initialization_by_fold=self.initialization_by_fold)
+            config.validate()
             return config
 
-        if parameter == "data_multiplier":
+        if parameter in LOSS_PARAMETERS:
+            previous = getattr(base.loss, parameter)
+            if parameter == "regions":
+                if self.value not in ("dice_ce", "dice_ce_gradient_fix"):
+                    raise ValueError("ROI loss must be dice_ce or dice_ce_gradient_fix")
+            else:
+                if base.loss.regions != "dice_ce_gradient_fix":
+                    raise ValueError("gradient_fix_version only changes a gradient-fix objective")
+                if isinstance(self.value, bool) or not isinstance(self.value, int) or self.value not in (1, 2, 3):
+                    raise ValueError("Gradient-fix objective version must be one, two or three")
+            loss_changes = {parameter: self.value}
+            loss = replace(base.loss, **loss_changes)
+            config = replace(base, loss=loss)
+        elif parameter == "data_multiplier":
             if isinstance(self.value, bool) or not isinstance(self.value, int) or self.value < 1:
                 raise ValueError("data_multiplier must be a positive integer")
             previous = base.training.data_multiplier
@@ -61,11 +84,12 @@ class AblationVariant:
         else:
             if not isinstance(self.value, bool):
                 raise ValueError("Component and preprocessing switches must be booleans")
-            if parameter in ("residual", "attention", "max_pooling", "classifier"):
+            if parameter in ARCHITECTURE_PARAMETERS:
                 if base.model.architecture != "3drnet":
                     raise ValueError("Architectural ablations require a 3DR-Net reference")
                 previous = getattr(base.model, parameter)
-                model = replace(base.model, **{parameter: self.value})
+                model_changes = {parameter: self.value}
+                model = replace(base.model, **model_changes)
                 config = replace(base, model=model)
             elif parameter in ("augment", "random_crop"):
                 previous = getattr(base.preprocessing, parameter)
@@ -95,11 +119,13 @@ def ablation_plan(base: ExperimentConfig, variants: Sequence[AblationVariant]) -
     rows: list[dict[str, Any]] = []
     for variant in variants:
         variant.configuration(base)
-        previous: bool | int | None = None
+        previous: bool | int | str | None = None
         if variant.parameter == "data_multiplier":
             previous = base.training.data_multiplier
         elif variant.category == "architecture":
             previous = getattr(base.model, variant.parameter)
+        elif variant.category == "loss":
+            previous = getattr(base.loss, variant.parameter)
         elif variant.category == "training":
             previous = getattr(base.preprocessing, variant.parameter)
         rows.append({"Variant": variant.name, "Category": variant.category,
@@ -252,6 +278,12 @@ def run_study(
     for variant in variants:
         variant_config = variant.configuration(base)
         variant_data = replace(data, config=variant_config)
+        if variant_config.loss.regions != "dice_ce_gradient_fix":
+            keys = data.subjects.scan_keys(data.subjects.subject_ids)
+            for key in keys:
+                scan = data.loader.get_subject(key)
+                if scan.unavailable_labels:
+                    raise ValueError(f"{variant.name}: partial annotations require dice_ce_gradient_fix")
         if split is not None:
             protected_ids = [*split.validation, *split.test]
             pretraining_audit(variant_data, variant_data.config.initialization, protected_ids)

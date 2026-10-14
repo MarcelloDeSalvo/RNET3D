@@ -113,6 +113,8 @@ def pretraining_audit(
             raise ValueError("Legacy pretraining sources need explicit animal_ids links to the normalized inventory")
     if settings.mode == "backbone":
         fields = ("architecture", "filters", "residual", "attention", "max_pooling")
+        if source_config.model.architecture == "3drnet":
+            fields = (*fields, "multiscale")
         source_graph = tuple(getattr(source_config.model, name) for name in fields)
         target_graph = tuple(getattr(data.config.model, name) for name in fields)
         if source_graph != target_graph:
@@ -143,13 +145,21 @@ def pretraining_audit(
     }
 
 
-def backbone(model: Any) -> Any:
-    """Extract feature ancestors at the existing segmentation-head boundaries."""
+def backbone(model: Any, *, finest_only: bool = False) -> Any:
+    """Extract decoder features, optionally using the shared finest boundary.
+
+    Every decoder level is an ancestor of the finest level. Using that boundary
+    permits complete feature transfer when only head fusion differs.
+    """
     import tensorflow as tf
 
     names = {layer.name for layer in model.layers}
     if "r_output_1" in names:
-        features = [model.get_layer(f"r_output_{level}").input for level in (4, 3, 2, 1)]
+        levels = (4, 3, 2, 1)
+        if finest_only:
+            levels = (1,)
+        features = [model.get_layer(f"r_output_{level}").input for level in levels
+                    if f"r_output_{level}" in names]
     else:
         head_name: str = "regions_logits"
         if "regions" in names:
@@ -257,14 +267,14 @@ def initialize_model(model: Any, settings: InitializationConfig) -> dict[str, An
     path = Path(settings.checkpoint)
     report["checkpoint"] = str(path.resolve())
     report["checkpoint_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
-    features = backbone(model)
+    features = backbone(model, finest_only=True)
     if settings.mode == "weights":
         model.load_weights(str(path))
         report["copied"] = [layer.name for layer in model.layers if layer.weights]
     else:
         source, source_report = _source_model(settings)
         report.update(source_report)
-        source_features = backbone(source)
+        source_features = backbone(source, finest_only=True)
         source_signature = graph_signature(source_features, for_transfer=True)
         target_signature = graph_signature(features, for_transfer=True)
         if source_signature != target_signature:
