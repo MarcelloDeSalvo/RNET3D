@@ -234,19 +234,19 @@ are preserved.
 
 ### Verified SHAM lesion absence
 
-The user confirmed every SHAM scan is lesion-free. `DatasetSpec(sham_lesion_absent=True)`
-therefore makes the lesion channel available with an all-zero target, even when
-`has_lesion_annotation=False`. This explicit policy is separate from annotation
-metadata: missing annotations alone never establish absence. Preparation rejects
-SHAM scans containing source label 1 when verified absence is asserted. TBI and
-other unavailable anatomical labels retain their existing policy. The setting is
-saved in run/study contracts and must not be changed silently on resumption.
+The user confirmed every SHAM scan is lesion-free. SHAM therefore supplies an
+available all-zero lesion target for every loss version, even when
+`has_lesion_annotation=False`, matching the original pipeline without an extra
+configuration flag. Missing annotations alone never establish absence in other
+animals. Preparation rejects SHAM scans containing source label 1. TBI and other
+unavailable anatomical labels retain their existing policy. Saved data contracts
+reject resuming runs whose SHAM lesion targets were previously ignored.
 The normalized D3 audit found 86 SHAM scans and no lesion-positive source masks.
 
 ```python
 datasets = (
     DatasetSpec(name="D1", annotation_scope="full_volume"),
-    DatasetSpec(name="D3", annotation_scope="full_volume", sham_lesion_absent=True),
+    DatasetSpec(name="D3", annotation_scope="full_volume"),
 )
 loss_settings = LossConfig(
     regions="dice_ce_gradient_fix", gradient_fix_version=3,
@@ -268,6 +268,6 @@ float16/32/64 extreme logits, finite differences, balancing, annotation contract
 AutoGraph and a tiny three-head MouseFull fit/export. These establish computation
 and gradient behavior, not improved segmentation. Use a fresh experiment and the
 same split, initialization, preprocessing and evaluation patches. For a loss-only
-v1/v3 comparison, enable the same verified-absence policy in both runs. Track SHAM
+v1/v3 comparison, both runs use the same known-empty SHAM targets. Track SHAM
 false-positive lesion volumes and animal-level false-positive rates alongside TBI
 lesion sensitivity/Dice, so reduced false positives do not conceal reduced detection.

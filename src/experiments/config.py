@@ -25,8 +25,8 @@ class DatasetSpec:
     mask and are not supported by this full-volume annotation contract.
     None reads normalized annotation metadata; legacy data requires an override.
     Zero is reserved for the task remainder, not a verified background annotation.
-    sham_lesion_absent opts verified SHAM scans into available empty lesion masks;
-    it must never be inferred from a missing lesion annotation alone.
+    SHAM identifies verified lesion-free animals and supplies an available empty
+    lesion mask, independently of whether metadata declares a lesion annotation.
     """
 
     name: str = "D1"
@@ -36,7 +36,6 @@ class DatasetSpec:
     available_labels: tuple[int, ...] | None = None
     sham: bool = False
     annotation_scope: Literal["full_volume"] = "full_volume"
-    sham_lesion_absent: bool = False
 
     def validate(self) -> None:
         """Require an explicit layout and whole-volume foreground annotation policy."""
@@ -46,8 +45,6 @@ class DatasetSpec:
             raise ValueError("Legacy datasets need modality and explicit available_labels")
         if self.annotation_scope != "full_volume":
             raise ValueError("Only full_volume ROI annotations are supported; sparse annotations need a spatial validity mask")
-        if not isinstance(self.sham_lesion_absent, bool):
-            raise ValueError("sham_lesion_absent must be boolean and requires verified absence")
 
         if self.available_labels is not None:
             invalid_labels = any(
@@ -517,7 +514,8 @@ class ExperimentConfig:
         """Restore a saved configuration, including paths, tuples and integer labels.
 
         Validation remains explicit so inference can replace relocated input paths
-        before checking them. Unknown settings raise rather than being discarded.
+        before checking them. The retired SHAM availability flag is discarded;
+        other unknown settings raise rather than being discarded.
         """
         values = dict(settings)
         data = dict(values.pop("data"))
@@ -525,6 +523,9 @@ class ExperimentConfig:
         datasets = []
         for record in data["datasets"]:
             record = dict(record)
+            # SHAM now supplies known-empty lesion supervision without a toggle.
+            # Saved data contracts still reject changed availability on resume.
+            record.pop("sham_lesion_absent", None)
             if record.get("available_labels") is not None:
                 record["available_labels"] = tuple(record["available_labels"])
             datasets.append(DatasetSpec(**record))

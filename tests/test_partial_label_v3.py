@@ -11,7 +11,7 @@ import tensorflow as tf
 from test_experiments import experiment
 from src.evaluation.losses import diceCELoss_gradient_fix
 from src.experiments.config import DatasetSpec
-from src.experiments.data import prepare_data
+from src.experiments.data import annotation_values, prepare_data
 
 
 @pytest.mark.parametrize('batch_wise', [False, True])
@@ -86,7 +86,9 @@ def test_multiclass_bce_matches_one_vs_rest_and_finite_difference():
     np.testing.assert_array_equal(gradient[..., 3], 0)
 
 
-def test_verified_sham_absence_becomes_an_available_empty_lesion_target(experiment):
+@pytest.mark.parametrize('version', [1, 2, 3])
+@pytest.mark.parametrize('explicit_labels', [None, (0, 2)])
+def test_sham_supplies_an_available_empty_lesion_target(experiment, version, explicit_labels):
     folder = experiment.data.root / 'D1' / 'SUBJ_0000'
     path = folder / 'metadata.json'
     metadata = json.loads(path.read_text())
@@ -97,16 +99,17 @@ def test_verified_sham_absence_becomes_an_available_empty_lesion_target(experime
     labels = mask.get_fdata()
     labels[labels == 1] = 0
     nib.save(nib.Nifti1Image(labels, mask.affine), mask_path)
-    loss = replace(experiment.loss, gradient_fix_version=3)
-    unchanged = prepare_data(replace(experiment, loss=loss))
-    assert 1 in unchanged.loader.get_subject(('D1_T1w', 'SUBJ_0000')).unavailable_labels
-    dataset = DatasetSpec(sham_lesion_absent=True)
+    loss = replace(experiment.loss, gradient_fix_version=version)
+    dataset = DatasetSpec(available_labels=explicit_labels)
     config = replace(experiment, loss=loss, data=replace(experiment.data, datasets=(dataset,)))
     data = prepare_data(config)
-    assert 1 not in data.loader.get_subject(('D1_T1w', 'SUBJ_0000')).unavailable_labels
+    scan = data.loader.get_subject(('D1_T1w', 'SUBJ_0000'))
+    assert 1 not in scan.unavailable_labels
+    assert annotation_values(scan) == {0, 1, 2}
     _, targets = data.make_generator(['D1/SUBJ_0000'], training=False)[0]
     np.testing.assert_array_equal(targets[0][..., 1], 0)
-    assert 2 in data.loader.get_subject(('D1_T1w', 'SUBJ_0001')).unavailable_labels
+    if explicit_labels is None:
+        assert 2 in data.loader.get_subject(('D1_T1w', 'SUBJ_0001')).unavailable_labels
 
 
 def test_verified_absence_rejects_lesion_positive_sham_masks(experiment):
@@ -114,6 +117,37 @@ def test_verified_absence_rejects_lesion_positive_sham_masks(experiment):
     metadata = json.loads(path.read_text())
     metadata['condition'] = 'SHAM'
     path.write_text(json.dumps(metadata))
-    data = replace(experiment.data, datasets=(DatasetSpec(sham_lesion_absent=True),))
     with pytest.raises(ValueError, match='conflicts'):
-        prepare_data(replace(experiment, data=data))
+        prepare_data(experiment)
+
+
+def test_old_ignored_sham_lesion_contract_cannot_resume_as_known_empty(experiment, tmp_path):
+    """Loading a retired flag must not silently change training supervision."""
+    from src.experiments.training import save_provenance, validate_resume
+
+    folder = experiment.data.root / 'D1' / 'SUBJ_0000'
+    metadata_path = folder / 'metadata.json'
+    metadata = json.loads(metadata_path.read_text())
+    metadata.update(condition='SHAM', has_lesion_annotation=False)
+    metadata_path.write_text(json.dumps(metadata))
+    mask_path = folder / 'Labels.nii.gz'
+    mask = nib.load(mask_path)
+    labels = mask.get_fdata()
+    labels[labels == 1] = 0
+    nib.save(nib.Nifti1Image(labels, mask.affine), mask_path)
+    data = prepare_data(experiment)
+    save_provenance(experiment, data, tmp_path)
+    config_path = tmp_path / 'experiment.json'
+    payload = json.loads(config_path.read_text())
+    payload['data']['datasets'][0]['sham_lesion_absent'] = False
+    config_path.write_text(json.dumps(payload))
+    contract_path = tmp_path / 'data_contract.json'
+    contract = json.loads(contract_path.read_text())
+    for scan in contract:
+        if scan['animal'] == 'D1/SUBJ_0000':
+            scan['unavailable_labels'].append(1)
+            scan['unavailable_labels'].sort()
+    contract_path.write_text(json.dumps(contract))
+
+    with pytest.raises(ValueError, match='annotations'):
+        validate_resume(data, tmp_path)

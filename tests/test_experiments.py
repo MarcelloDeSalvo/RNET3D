@@ -612,23 +612,16 @@ def test_tiny_mouse_full_run_combines_partial_cohorts_and_classifier(experiment,
     mapping = {0: 0, 1: 1, 2: 2, 3: 3, 5: 4, 6: 5, 12: 6, 13: 7, 15: 8, 16: 9, 21: 10}
     names = ("Background", "Lesion", "cl-CC", "cl-V", "cl-Hipp", "cl-Ctx",
              "il-CC", "il-V", "il-Hipp", "il-Ctx", "tV")
-    verified_absence = version == 3
-    settings = replace(experiment.data, datasets=(DatasetSpec(name="D1"), DatasetSpec(name="D3", sham_lesion_absent=verified_absence)))
+    settings = replace(experiment.data, datasets=(DatasetSpec(name="D1"), DatasetSpec(name="D3")))
     model = ModelConfig(architecture="3drnet", filters=(2, 4, 8, 16, 32), classifier=True)
     loss = replace(experiment.loss, gradient_fix_version=version)
     config = replace(experiment, data=settings, labels=LabelConfig(mapping=mapping, names=names), model=model, loss=loss)
     data = prepare_data(config)
     coverage = data.annotation_summary()
     lesion = coverage.loc[(coverage["Dataset"] == "D3") & (coverage["Class"] == "Lesion")]
-    expected_unavailable = 1
-    if verified_absence:
-        expected_unavailable = 0
-    assert lesion["UnannotatedScans"].item() == expected_unavailable
+    assert lesion["UnannotatedScans"].item() == 0
     _, targets = data.make_generator(["D3/SUBJ_0004"], training=False)[0]
-    expected_lesion_target = -1
-    if verified_absence:
-        expected_lesion_target = 0
-    assert np.all(targets[0][..., 1] == expected_lesion_target)
+    assert np.all(targets[0][..., 1] == 0)
     assert targets[2].item() == 0
 
     split = SubjectSplit(

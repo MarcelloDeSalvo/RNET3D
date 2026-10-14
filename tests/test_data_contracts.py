@@ -104,6 +104,18 @@ def test_new_contracts_roundtrip_and_old_saved_configuration_gets_defaults(exper
     restored.validate()
 
 
+@pytest.mark.parametrize("previous_flag", [False, True])
+def test_saved_sham_flag_is_removed_when_loading_configuration(experiment, previous_flag):
+    """Previously saved settings load without exposing the retired toggle."""
+    payload = json.loads(json.dumps(experiment.to_dict()))
+    payload["data"]["datasets"][0]["sham_lesion_absent"] = previous_flag
+
+    restored = ExperimentConfig.from_dict(payload)
+
+    assert restored == experiment
+    assert "sham_lesion_absent" not in restored.to_dict()["data"]["datasets"][0]
+
+
 def test_previous_default_configuration_can_resume_without_rewriting_its_contract(experiment, tmp_path):
     from src.experiments.training import save_provenance, validate_resume
 

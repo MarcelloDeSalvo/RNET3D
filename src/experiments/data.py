@@ -109,8 +109,9 @@ def annotation_values(scan: Rodent) -> set[int]:
     """Resolve schema-v3 annotation names; never infer availability from voxels.
 
     label_mapping describes a vocabulary and is not an annotation declaration.
-    In particular SHAM metadata may include Lesion in that vocabulary while
-    has_lesion_annotation is false.
+    SHAM means verified lesion-free and supplies an available empty lesion mask,
+    even when has_lesion_annotation is false. For other scans, a false annotation
+    flag means unknown lesion supervision rather than verified absence.
     Declared foreground regions are complete masks, including known negatives
     and annotated empty regions. Zero is included for target encoding only;
     it does not establish verified background supervision.
@@ -133,7 +134,7 @@ def annotation_values(scan: Rodent) -> set[int]:
     lesion_annotation = scan.metadata.get("has_lesion_annotation")
     if lesion_annotation is not None and not isinstance(lesion_annotation, bool):
         raise ValueError(f"{scan.id}: has_lesion_annotation must be a boolean when declared")
-    if lesion_annotation is True:
+    if lesion_annotation is True or scan.get_sham():
         available.add(1)
     elif lesion_annotation is False:
         available.discard(1)
@@ -484,7 +485,7 @@ def prepare_data(config: ExperimentConfig, *, require_training_loss: bool = True
                 if 0 not in available:
                     raise ValueError("Explicit available_labels must include background zero")
 
-            if dataset.sham_lesion_absent and scan.get_sham():
+            if scan.get_sham():
                 lesion_voxels = np.any(scan.labels.get_fdata() == 1)
                 if lesion_voxels:
                     raise ValueError(f"{scan.id}: verified lesion absence conflicts with lesion-positive voxels")
