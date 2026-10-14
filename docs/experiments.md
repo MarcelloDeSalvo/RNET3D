@@ -44,16 +44,18 @@ scratch. Set `USE_TBI_PRETRAINING=False` to choose scratch training deliberately
 Pretraining transfers encoder/decoder feature weights, while the eleven-class
 ROI head, binary brain head and SHAM/TBI classifier receive fresh initialization.
 All transferred features are fine-tuned unless freezing is explicitly enabled.
-Each CV fold reloads the same selected source features and gets fresh heads and
+Each CV fold reloads its selected source features and gets fresh heads and
 a fresh optimizer. Training resumption restores the target run's fitting state.
 
 MouseFull contains the same D1 animals as TBI training. A source that trained or
 selected weights on later held-out animals compromises independent evaluation.
-For fixed splits, select target validation/test animals unseen in source training
-and source selection-validation. A shared CV source must exclude every evaluated
-animal across the target folds; otherwise fold-specific pretraining sources and
-matching exclusions are needed. Source selection is explicit; these notebooks
-do not infer that a checkpoint is independent of their new splits.
+Fresh fixed splits automatically preserve source training/validation/test roles
+and fill the overall requested fractions with additional animals. Shared
+selection-validation is allowed; final test animals must be unseen in source
+fitting and selection. CV uses matching source folds and splits additional
+animals; an overlapping common checkpoint cannot supply all independent outer
+holdouts. Explicit/resumed memberships are kept and audited. See
+[the shared split policy](pretraining_splits.md).
 
 `notebook/06_mouse_full_kfold.ipynb` uses the same complete MouseFull settings
 with five grouped outer folds. Each remaining pool is split into training and
@@ -641,8 +643,9 @@ for the configuration and limitations, and the v3 section in
 
 ## Audited pretraining and complete best-checkpoint evaluation
 
-Training now checks source fitting/selection animals and initialization ancestors
-against all target validation/test cohorts before any fold starts. Fold-specific
+Training checks source fitting against target validation/test, and source selection
+against final test/holdout/external cohorts, before any fold starts. Shared
+selection-validation is allowed, including initialization ancestors. Fold-specific
 sources are saved in `initialization_by_fold`; standalone weights need a saved
 source manifest/split to establish eligibility. Reused original names are qualified
 by subgroup, and normalized identities are cross-checked against `mapping.xlsx`.

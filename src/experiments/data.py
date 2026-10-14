@@ -11,7 +11,7 @@ import nibabel as nib
 import numpy as np
 import pandas as pd
 
-from .config import ExperimentConfig, FixedSplitConfig
+from .config import ExperimentConfig, FixedSplitConfig, InitializationConfig
 from ..evaluation.k_fold import FoldSplit, SubjectIndex
 from ..utils.loader import Rodent, RodentDatasets
 
@@ -105,6 +105,92 @@ def make_split(
     return split
 
 
+def resolve_training_split(
+    data: PreparedData, *, resume_run: Path | None = None, split_file: Path | None = None,
+    initializations: Sequence[InitializationConfig] | None = None,
+) -> SubjectSplit:
+    """Load exact saved roles or inherit source roles before splitting new animals.
+
+    Pretrained source fitting/validation/test animals retain their roles in new
+    splits. New animals fill the requested overall validation/test proportions.
+    Explicit/resumed memberships are never changed and must remain independent
+    of source fitting; selection-validation may be shared across both stages.
+    """
+    from .initialization import pretraining_roles
+
+    config = data.config
+    if initializations is None:
+        initializations = (config.initialization,)
+    inherited = pretraining_roles(data, initializations)
+    split: SubjectSplit | None = None
+    if resume_run is not None:
+        saved = Path(resume_run) / "splits.json"
+        split = SubjectSplit.load(saved, data.subjects)
+        if split_file is not None:
+            requested = SubjectSplit.load(split_file, data.subjects)
+            if requested != split:
+                raise ValueError("SPLIT_FILE differs from the resumed run's split")
+    elif split_file is not None:
+        split = SubjectSplit.load(split_file, data.subjects)
+
+    if split is not None:
+        for animal in split.validation:
+            if inherited.get(animal) == "train":
+                raise ValueError(f"Pretraining leakage: validation animal was fitted by the source: {animal}")
+        for animal in split.test:
+            if inherited.get(animal) in ("train", "validation"):
+                raise ValueError(f"Pretraining leakage: test animal was used by the source: {animal}")
+        return split
+
+    settings = config.fixed_split
+    seed = config.split_seed
+    if not inherited:
+        return make_split(
+            data.subjects, seed=seed,
+            validation_fraction=settings.validation_fraction, test_fraction=settings.test_fraction,
+        )
+
+    groups: dict[str, list[str]] = {"train": [], "validation": [], "test": []}
+    for animal, role in inherited.items():
+        groups[role].append(animal)
+    free = sorted(set(data.subjects.subject_ids) - set(inherited))
+    count = len(data.subjects.subject_ids)
+    desired_validation = int(np.ceil(count * settings.validation_fraction))
+    desired_test = int(np.ceil(count * settings.test_fraction))
+    minimum_validation = int(not groups["validation"])
+    minimum_test = int(not groups["test"])
+    budget = len(free) - int(not groups["train"])
+    if budget < minimum_validation + minimum_test:
+        raise ValueError("Pretraining leaves too few independent animals for validation/test; use another source or scratch")
+
+    validation_count = max(minimum_validation, desired_validation - len(groups["validation"]))
+    test_count = max(minimum_test, desired_test - len(groups["test"]))
+    if validation_count + test_count > budget:
+        extra_budget = budget - minimum_validation - minimum_test
+        extras = np.asarray([validation_count - minimum_validation, test_count - minimum_test])
+        proportions = extras / extras.sum()
+        quotas = proportions * extra_budget
+        allocated = np.floor(quotas).astype(int)
+        remainder = extra_budget - int(allocated.sum())
+        order = np.argsort(-(quotas - allocated), kind="stable")
+        allocated[order[:remainder]] += 1
+        validation_count = minimum_validation + int(allocated[0])
+        test_count = minimum_test + int(allocated[1])
+
+    rng = np.random.default_rng(seed)
+    shuffled = rng.permutation(free).tolist()
+    groups["test"].extend(shuffled[:test_count])
+    validation_end = test_count + validation_count
+    groups["validation"].extend(shuffled[test_count:validation_end])
+    groups["train"].extend(shuffled[validation_end:])
+    train_ids = tuple(sorted(groups["train"]))
+    validation_ids = tuple(sorted(groups["validation"]))
+    test_ids = tuple(sorted(groups["test"]))
+    split = SubjectSplit(train=train_ids, validation=validation_ids, test=test_ids)
+    split.validate(data.subjects)
+    return split
+
+
 def annotation_values(scan: Rodent) -> set[int]:
     """Resolve schema-v3 annotation names; never infer availability from voxels.
 
@@ -184,6 +270,99 @@ def make_cv_splits(
             val_ids=sorted(shuffled[:validation_count].tolist()), test_ids=sorted(ids[test_indexes].tolist()),
         )
         fold.validate(set(subjects))
+        folds.append(fold)
+    return folds
+
+
+def make_pretrained_cv_splits(
+    data: PreparedData, *, subject_ids: Sequence[str] | None = None,
+    strata: Mapping[str, str] | None = None,
+    initializations_by_fold: Mapping[int, Sequence[InitializationConfig]] | None = None,
+) -> list[FoldSplit]:
+    """Reuse source folds and distribute additional animals across outer holdouts.
+
+    Each pretrained fold must cover the same matching source animals and keep
+    its fitting/selection/holdout roles. Together their holdouts must cover each
+    animal exactly once. A shared checkpoint cannot satisfy that requirement for
+    overlapping cohorts. Sources on independent cohorts retain ordinary CV.
+    """
+    from .initialization import pretraining_roles
+
+    config = data.config
+    if subject_ids is None:
+        subject_ids = data.subjects.subject_ids
+    animals = sorted(subject_ids)
+    data.subjects.scan_keys(animals)
+    if not 2 <= config.training.k <= len(animals):
+        raise ValueError("k must be between 2 and the number of CV animals")
+    if strata is not None and set(strata) != set(animals):
+        raise ValueError("CV strata must cover exactly the selected animals")
+
+    inherited: list[dict[str, str]] = []
+    for index in range(config.training.k):
+        initialization = config.initialization_by_fold.get(index, config.initialization)
+        selected: Sequence[InitializationConfig] = (initialization,)
+        if initializations_by_fold is not None:
+            selected = initializations_by_fold.get(index, selected)
+        roles = pretraining_roles(data, selected, subject_ids=animals)
+        inherited.append(roles)
+    matched = set(inherited[0])
+    if any(set(roles) != matched for roles in inherited):
+        raise ValueError("Pretraining source folds must cover the same animals; provide matching sources for every fold")
+    if not matched:
+        return make_cv_splits(
+            animals, k=config.training.k, seed=config.split_seed,
+            validation_fraction=config.cv_validation_fraction, strata=strata,
+        )
+
+    held_out = [animal for roles in inherited for animal, role in roles.items() if role == "test"]
+    if sorted(held_out) != sorted(matched):
+        raise ValueError("Pretrained CV requires one matching source checkpoint per fold, with disjoint source holdouts covering each animal once")
+
+    additional = sorted(set(animals) - matched)
+    extra_folds: list[FoldSplit] | None = None
+    if additional:
+        additional_strata: dict[str, str] | None = None
+        if strata is not None:
+            additional_strata = {animal: strata[animal] for animal in additional}
+        largest_holdout = int(np.ceil(len(additional) / config.training.k))
+        if len(additional) >= config.training.k and len(additional) - largest_holdout >= 2:
+            extra_folds = make_cv_splits(
+                additional, k=config.training.k, seed=config.split_seed,
+                validation_fraction=config.cv_validation_fraction, strata=additional_strata,
+            )
+        else:
+            # Source roles already supply training and validation. Tiny additions
+            # can have empty roles in a fold while still being held out once.
+            rng = np.random.default_rng(config.split_seed)
+            shuffled = rng.permutation(additional)
+            holdouts = np.array_split(shuffled, config.training.k)
+            extra_folds = []
+            for index, holdout in enumerate(holdouts):
+                pool = [animal for animal in shuffled.tolist() if animal not in holdout]
+                desired = int(np.ceil(len(pool) * config.cv_validation_fraction))
+                validation_count = min(desired, max(0, len(pool) - 1))
+                validation = pool[:validation_count]
+                train = pool[validation_count:]
+                test = holdout.tolist()
+                extra = FoldSplit(index=index, train_ids=train, val_ids=validation, test_ids=test)
+                extra_folds.append(extra)
+
+    folds: list[FoldSplit] = []
+    for index, roles in enumerate(inherited):
+        train = [animal for animal, role in roles.items() if role == "train"]
+        validation = [animal for animal, role in roles.items() if role == "validation"]
+        test = [animal for animal, role in roles.items() if role == "test"]
+        if extra_folds is not None:
+            extra = extra_folds[index]
+            train.extend(extra.train_ids)
+            validation.extend(extra.val_ids)
+            test.extend(extra.test_ids)
+        train.sort()
+        validation.sort()
+        test.sort()
+        fold = FoldSplit(index=index, train_ids=train, val_ids=validation, test_ids=test)
+        fold.validate(set(animals))
         folds.append(fold)
     return folds
 
@@ -283,20 +462,8 @@ class PreparedData:
         collection.save(path)
 
     def make_split(self) -> SubjectSplit:
-        """Generate new animal memberships from the experiment's fixed-split policy.
-
-        Load SubjectSplit instead for saved or manuscript memberships. Fractions
-        apply to the complete cohort; integer rounding may change realized ratios.
-        """
-        settings = self.config.fixed_split
-        seed = self.config.split_seed
-        validation_fraction = settings.validation_fraction
-        test_fraction = settings.test_fraction
-
-        return make_split(
-            self.subjects, seed=seed,
-            validation_fraction=validation_fraction, test_fraction=test_fraction,
-        )
+        """Generate fixed roles, inheriting pretraining memberships when present."""
+        return resolve_training_split(self)
 
     def annotation_groups(
         self, subject_ids: Sequence[str] | None = None, *, include_lesion: bool = False,

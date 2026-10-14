@@ -63,10 +63,14 @@ Notebooks 05/06 expose TBI feature transfer through `USE_TBI_PRETRAINING`,
 `TBI_RUN`, `TBI_FOLD` and `FREEZE_BACKBONE`. A saved epoch in a stopped source run
 is sufficient; the committed best weights are selected automatically. Features
 transfer, output heads remain fresh, and each target model uses a fresh optimizer.
-Select a source excluding the target evaluation animals; a shared D1-trained
-checkpoint can overlap MouseFull folds. The runner enforces this for source
-fitting and checkpoint selection, including initialization ancestors. Per-fold
-sources are exposed through `TBI_FOLD_SOURCES`. Scratch training remains explicit.
+Fresh fixed splits inherit source animal roles and fill the overall requested
+fractions with new animals. Source selection-validation can be shared with
+target selection-validation; fitted animals cannot become validation/test, and
+source selection animals cannot become final test. Initialization ancestors are
+checked too. Matching CV checkpoints are exposed through `TBI_FOLD_SOURCES`;
+the planner reuses their source folds and splits additional animals. A shared
+overlapping D1 checkpoint cannot provide independent full MouseFull CV.
+Scratch training remains explicit. See [pretraining splits](../docs/pretraining_splits.md).
 Unavailable classes follow normalized annotation metadata and use the corrected
 logits-based loss. Confirmed cross-cohort duplicates can be grouped explicitly;
 the notebook does not infer biological identity from similar original IDs.

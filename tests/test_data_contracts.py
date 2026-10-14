@@ -320,4 +320,5 @@ def test_fixed_split_notebooks_expose_policy_and_use_shared_selection(filename):
     assert "fixed_split=split_settings" in source
     assert "split_settings = FixedSplitConfig(" in source
     assert 'annotation_scope="full_volume"' in source
-    assert "prepared.make_split()" in source or "study_selection(" in source
+    selectors = ("resolve_training_split(", "study_selection(")
+    assert any(selector in source for selector in selectors)

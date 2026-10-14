@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import ExperimentConfig
-from .data import PreparedData, SubjectSplit, make_cv_splits
+from .data import PreparedData, SubjectSplit, make_pretrained_cv_splits
 from .initialization import initialize_model
 from ..evaluation.k_fold import (
     EvaluationConfig, ExperimentMetadata, FoldContext, FoldSplit, TrainingResult,
@@ -443,7 +443,9 @@ def run_training(
     from .initialization import pretraining_audit
 
     protected_ids = [*split.validation, *split.test]
-    audit = pretraining_audit(data, config.initialization, protected_ids)
+    audit = pretraining_audit(
+        data, config.initialization, protected_ids, validation_ids=split.validation,
+    )
     settings = config.training
     count: int = len(split.train) + len(split.validation)
     settings.validate(count, cross_validation=False)
@@ -516,10 +518,7 @@ def run_cross_validation(
     if resume_run is not None:
         validate_resume(data, Path(resume_run))
     elif folds is None and precomputed_splits is None:
-        folds = make_cv_splits(
-            subject_ids, k=config.training.k, seed=config.split_seed,
-            validation_fraction=config.cv_validation_fraction,
-        )
+        folds = make_pretrained_cv_splits(data, subject_ids=subject_ids)
 
     factories = ExperimentFactories(data, callback_list=callbacks, fixed_split=False)
     from .initialization import pretraining_audit
@@ -530,7 +529,9 @@ def run_cross_validation(
         """Audit every source against selection and all independent cohorts."""
         initialization = config.initialization_by_fold.get(fold.index, config.initialization)
         protected_ids = [*fold.val_ids, *fold.test_ids, *evaluation.test_ids, *evaluation.external_ids]
-        audits[str(fold.index)] = pretraining_audit(data, initialization, protected_ids)
+        audits[str(fold.index)] = pretraining_audit(
+            data, initialization, protected_ids, validation_ids=fold.val_ids,
+        )
     dataset_name = "+".join(dataset.name for dataset in config.data.datasets)
     metadata = ExperimentMetadata(
         experiment_name=config.training.model_name, model_variant=config.model.architecture,

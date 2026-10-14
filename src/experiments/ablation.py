@@ -6,13 +6,13 @@ import json
 import re
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any, Literal, Protocol, Sequence
+from typing import Any, Literal, Mapping, Protocol, Sequence
 
 import numpy as np
 import pandas as pd
 
 from .config import ExperimentConfig, InitializationConfig
-from .data import PreparedData, SubjectSplit, fold_summary, make_cv_splits
+from .data import PreparedData, SubjectSplit, fold_summary, make_pretrained_cv_splits, resolve_training_split
 from .training import callback_configuration, run_cross_validation, run_training
 from ..evaluation.k_fold import FoldSplit, TrainingResult, load_fold_splits
 
@@ -167,23 +167,20 @@ class StudySelection:
 def study_selection(
     data: PreparedData, *, mode: Literal["fixed_split", "cross_validation"],
     study_dir: Path, split_file: Path | None = None, fold_file: Path | None = None,
-    resume: bool = False,
+    resume: bool = False, initializations: Sequence[InitializationConfig] | None = None,
+    initializations_by_fold: Mapping[int, Sequence[InitializationConfig]] | None = None,
 ) -> StudySelection:
     """Generate or load matched animals, checking explicit files during resumption."""
     saved = Path(study_dir) / "splits.json"
     if mode == "fixed_split":
         if fold_file is not None:
             raise ValueError("Use split_file for fixed-split studies")
+        resume_dir: Path | None = None
         if resume:
-            split = SubjectSplit.load(saved, data.subjects)
-            if split_file is not None:
-                requested = SubjectSplit.load(split_file, data.subjects)
-                if requested != split:
-                    raise ValueError("Requested split differs from the resumed study")
-        elif split_file is not None:
-            split = SubjectSplit.load(split_file, data.subjects)
-        else:
-            split = data.make_split()
+            resume_dir = Path(study_dir)
+        split = resolve_training_split(
+            data, resume_run=resume_dir, split_file=split_file, initializations=initializations,
+        )
         return StudySelection(split=split, folds=None, summary=data.split_summary(split))
 
     if mode != "cross_validation" or split_file is not None:
@@ -199,10 +196,7 @@ def study_selection(
     elif fold_file is not None:
         folds = load_fold_splits(fold_file, animals, config.training.k)
     else:
-        folds = make_cv_splits(
-            animals, k=config.training.k, seed=config.split_seed,
-            validation_fraction=config.cv_validation_fraction,
-        )
+        folds = make_pretrained_cv_splits(data, initializations_by_fold=initializations_by_fold)
     if any(not fold.test_ids for fold in folds):
         raise ValueError("Matched CV requires independent outer holdouts")
     return StudySelection(split=None, folds=folds, summary=fold_summary(folds, data.subjects))
@@ -286,13 +280,18 @@ def run_study(
                     raise ValueError(f"{variant.name}: partial annotations require dice_ce_gradient_fix")
         if split is not None:
             protected_ids = [*split.validation, *split.test]
-            pretraining_audit(variant_data, variant_data.config.initialization, protected_ids)
+            pretraining_audit(
+                variant_data, variant_data.config.initialization, protected_ids,
+                validation_ids=split.validation,
+            )
         else:
             for fold in folds:
                 initializations = variant_data.config.initialization_by_fold
                 initialization = initializations.get(fold.index, variant_data.config.initialization)
                 protected_ids = [*fold.val_ids, *fold.test_ids]
-                pretraining_audit(variant_data, initialization, protected_ids)
+                pretraining_audit(
+                    variant_data, initialization, protected_ids, validation_ids=fold.val_ids,
+                )
 
     folder = Path(study_dir).resolve()
     contract = {"base": base.to_dict(), "variants": [asdict(variant) for variant in variants],

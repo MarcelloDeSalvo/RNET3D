@@ -59,7 +59,8 @@ metrics remain available with their own definitions.
 ## Initialization and matching
 
 07f retains `USE_TBI_PRETRAINING=True`. Every selected variant/fold needs an
-auditable source excluding target validation, holdout and test animals.
+auditable source excluding target holdout/test animals and never fitting target
+validation animals. Source selection-validation may be shared across stages.
 Residual, attention, downsampling and multiscale changes require matching TBI
 backbones. Configure `TBI_VARIANT_RUNS` for a fixed split or
 `TBI_VARIANT_FOLD_SOURCES` for per-fold sources.
@@ -70,6 +71,10 @@ region, brain and classifier heads remain fresh. Source graphs and weight shapes
 are validated before any weights are copied. Sources with a different backbone
 are rejected rather than partially copied. Set `USE_TBI_PRETRAINING=False` only
 for an explicitly chosen scratch study.
+
+Fresh study splits inherit memberships from every selected source, rejecting
+conflicting assignments. Matching source CV folds are reused before splitting
+additional animals. See [pretraining split selection](pretraining_splits.md).
 
 The runner reuses identical animal splits, saved evaluation patches, seeds,
 callback settings and maximum epochs. Random training augmentations are not

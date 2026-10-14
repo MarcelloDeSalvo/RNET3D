@@ -21,9 +21,12 @@ Set `USE_TBI_PRETRAINING=False` for an explicit scratch study. Previews do not f
 
 ## Pretraining leakage and inventory
 
-Before any fold starts, `pretraining_audit` checks source training **and source
-checkpoint-selection validation** animals against target validation, holdout,
-independent test and external cohorts. Initialization ancestors are checked too.
+Before any fold starts, `pretraining_audit` checks source training against target
+validation, holdout, independent test and external cohorts. Source
+checkpoint-selection validation may be shared with target selection-validation;
+it must remain excluded from final holdout/test/external cohorts. Initialization
+ancestors are checked too. Fresh splits now inherit source roles through the
+[common split helpers](pretraining_splits.md).
 An unused source test cohort does not cause a pretraining overlap by itself.
 
 Training requires saved source `experiment.json`, the selected fold's
@@ -52,12 +55,14 @@ The current D1–D3 inventory has 218 scans from 203 normalized animals:
 
 The selected source `d1_3drnet/RUN_20261013_125509_781588/fold_0`, audited against
 the saved MouseFull split `mouse_full_3drnet/RUN_20261013_175412_728737`, used
-**28 D1 animals from target validation/test**. These pretrained results are not
-independent evaluation of those animals. Their files were not modified. A new
-source must fit/select without target validation/test animals. Those D1 animals
-can occupy the source's unused test role, with source selection-validation drawn
-from the remaining eligible training animals. CV normally needs a corresponding
-source for each target fold.
+**28 D1 animals from target validation/test**. Of these, 15 target validation
+animals were fitted by the source and 10 target test animals contributed to source
+fitting/selection; those assignments remain invalid. Three target validation
+animals only contributed to source selection-validation and may be shared.
+Existing files were not modified. A fresh automatic split preserves the source's
+77/23/12 D1 roles and allocates D3 to reach 138/40/20 overall, passing the audit
+without retraining the source or reserving extra animals. CV needs corresponding
+source folds whose held-out animals collectively cover D1 once.
 
 ## Best-checkpoint measurements
 
