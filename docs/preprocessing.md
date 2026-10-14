@@ -77,8 +77,8 @@ vocabulary is retained for the established experiments.
 - `Scale` changes sampling density, not anatomical size: it adjusts spacing
   alongside output shape. Use `RandomAffine` for anatomical scaling on a fixed
   output grid.
-- N4 receives the correct LPS spacing, origin, and direction. Sheared grids are
-  rejected by ITK/ANTs conversion rather than treated as orthogonal. Gaussian
+- N4 receives the correct LPS spacing, origin, and direction, retaining
+  nonorthogonal coefficients in the in-memory ANTs image. Gaussian
   blur defaults to voxel sigma and noise to raw input intensity units.
   Optional millimetre blur and image-relative noise scales are explicit.
 
@@ -86,7 +86,7 @@ vocabulary is retained for the established experiments.
 
 The shared training factory reorients/corrects units first, then applies blur and
 noise on the native grid before target resampling. Physical affine augmentation
-follows on the orthogonal target grid; normalization, cropping and optional LR
+follows on the target grid with its original directions; normalization, cropping and optional LR
 flipping come afterward. MRI interpolation remains linear and mask interpolation
 nearest-neighbour. Blur and noise leave both masks and all grid headers unchanged.
 This order lets interpolation mix an injected noise field, unlike adding fresh
@@ -197,7 +197,7 @@ recomputed. No model training or interpolation sensitivity analysis was run.
 
 `notebook/check_preprocessing.ipynb` selects one normalized animal/timepoint and
 shows each operation in a short before/after cell. Reorientation to the shared
-RARE reference runs first, then units correction and orthogonal resampling.
+RARE reference runs first, then units correction and target-spacing resampling.
 Separate examples cover normalization, label mapping, padding/cropping, grid
 scaling, physical rotation/scaling, blur, noise and anatomical LR flipping.
 Blur/noise examples start from the corrected native volume with explicit units,

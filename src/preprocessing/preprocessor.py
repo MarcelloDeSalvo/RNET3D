@@ -162,15 +162,17 @@ def _resize_grid(image: NiftiImage, shape: Coordinates, spacing: Sequence[float]
 
 
 def _lps_geometry(image: NiftiImage) -> tuple[tuple, tuple, NDArray[np.float64]]:
-    """Convert NIfTI RAS geometry to ITK/ANTs LPS; reject unsupported shear."""
+    """Convert the full NIfTI affine to LPS without changing its voxel grid.
+
+    In-memory SimpleITK/ANTs images retain nonorthogonal directions. Keep these
+    coefficients rather than forcing another interpolation or editing geometry.
+    This conversion does not use the ITK NIfTI reader's direction restrictions.
+    """
     _check_image(image)
 
     affine = np.diag([-1.0, -1.0, 1.0, 1.0]) @ image.affine
     spacing = nib.affines.voxel_sizes(affine)
     direction = affine[:3, :3] / spacing
-
-    if not np.allclose(direction.T @ direction, np.eye(3), atol=1e-5):
-        raise ValueError("ITK/ANTs transforms require an orthogonal grid; resample sheared images first")
 
     return tuple(affine[:3, 3]), tuple(spacing), direction
 

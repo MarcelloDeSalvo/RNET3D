@@ -218,7 +218,7 @@ def test_invalid_crop_mode_is_rejected(experiment):
 
 
 @pytest.mark.parametrize("stage", ["training", "validation", "inference"])
-def test_experiment_handles_shear_before_affine_augmentation(experiment, stage):
+def test_experiment_preserves_shear_and_aligned_masks(experiment, stage):
     from src.experiments.data import make_preprocessor
     from src.preprocessing import preprocessor as preprocessing
 
@@ -236,7 +236,8 @@ def test_experiment_handles_shear_before_affine_augmentation(experiment, stage):
     brain = nib.Nifti1Image(scan.brain_mask.get_fdata(), affine)
     pipeline = make_preprocessor(config, stage=stage)
     result, masks = pipeline.preprocess(image, [labels, brain])
-    preprocessing._lps_geometry(result)
+    _, _, direction = preprocessing._lps_geometry(result)
+    assert not np.allclose(direction.T @ direction, np.eye(3), atol=1e-5)
     for mask in masks:
         assert mask.shape == result.shape
         np.testing.assert_array_equal(mask.affine, result.affine)

@@ -233,13 +233,15 @@ performs the existing unit heuristic; omit it when geometry has been verified.
 Images use linear interpolation and masks nearest-neighbour interpolation.
 Existing N4 inputs are loaded without repeating bias correction.
 
-Before spatial affine augmentation, all stages resample to an orthogonal grid. Some D1 sforms
-contain small nonorthogonal coefficients consistent with rounded headers; this
-does not establish physical shear in the acquired images. The current physical
-transform and distance checks require orthogonal axes. Resampling uses the closest orthogonal axis basis,
-keeps the physical centre and covers the source field of view. It preserves
-reference axis orientation and obliquity rather than changing headers alone.
-The original grid remains available for prediction restoration.
+Before spatial affine augmentation, all stages resample to the requested spacing
+with `orthogonal=False`, retaining the source grid directions and physical centre.
+Some D1 sforms contain small nonorthogonal coefficients; this does not establish
+physical shear in the acquired images. In-memory SimpleITK/ANTs conversion retains
+the full affine, so augmentation and N4 do not require orthogonalization.
+Explicit `Resample(..., orthogonal=True)` remains available when requested.
+The original grid remains available for prediction restoration. Full-volume
+physical distance metrics still require an orthogonal measurement grid because
+their spacing-only calculation does not represent shear.
 
 New training configurations explicitly set `intensity_augmentation_grid="native"`:
 reorientation and unit correction precede MRI-only blur/noise on the native

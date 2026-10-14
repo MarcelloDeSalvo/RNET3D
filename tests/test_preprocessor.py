@@ -320,11 +320,13 @@ def test_n4_backend_receives_configured_options(monkeypatch, masking):
         assert arguments["x"] is None
 
 
-def test_random_affine_rotates_in_physical_coordinates_and_preserves_labels():
+@pytest.mark.parametrize("shear", [0.0, 0.00015, 0.3])
+def test_random_affine_rotates_in_physical_coordinates_and_preserves_labels(shear):
     angle = np.radians(30)
     rotation = np.array([[np.cos(angle), -np.sin(angle), 0], [np.sin(angle), np.cos(angle), 0], [0, 0, 1]])
     affine = np.eye(4)
     affine[:3, :3] = rotation @ np.diag([0.2, 0.5, 0.8])
+    affine[:3, 1] += shear * affine[:3, 0]
     affine[:3, 3] = [10, 20, 30]
     coordinates = np.indices((17, 17, 17)).transpose(1, 2, 3, 0)
     physical = nib.affines.apply_affine(affine, coordinates)
@@ -332,6 +334,7 @@ def test_random_affine_rotates_in_physical_coordinates_and_preserves_labels():
     transform = p.RandomAffine()
     assert transform.interpolation == sitk.sitkLinear
     output = transform.execute(source, angles=[0, 0, 20], scale_factor=1)
+    np.testing.assert_array_equal(output.affine, source.affine)
     point = (9, 10, 8)
     center = world(source, (8, 8, 8))
     angle = np.radians(20)
@@ -341,6 +344,42 @@ def test_random_affine_rotates_in_physical_coordinates_and_preserves_labels():
     mask = image(np.where(coordinates[..., 0] > 8, 13., 0.), affine=affine)
     discrete = transform.execute(mask, is_mask=True, angles=[0, 0, 20])
     assert set(np.unique(discrete.get_fdata())) <= {0, 13}
+
+
+@pytest.mark.parametrize("shear", [0.00015, 0.3])
+def test_sheared_identity_augmentation_keeps_image_and_mask_aligned(shear):
+    affine = np.diag([0.2, 0.3, 0.4, 1.0])
+    affine[0, 1] = shear * 0.3
+    labels = np.zeros((17, 17, 17))
+    labels[4:13, 4:13, 4:13] = 13
+    source = image(labels, affine=affine)
+    mask = image(labels, affine=affine)
+    step = p.RandomAffine(
+        rotation_range=(0.0, 0.0), scale_range=(1.0, 1.0), probability=1.0,
+    )
+
+    output, output_mask = step.apply(source, mask)
+
+    np.testing.assert_allclose(output.get_fdata(), labels, atol=1e-12)
+    np.testing.assert_array_equal(output_mask.get_fdata(), labels)
+    np.testing.assert_array_equal(output.affine, affine)
+    np.testing.assert_array_equal(output_mask.affine, affine)
+
+
+def test_n4_accepts_sheared_geometry_without_resampling():
+    affine = np.diag([0.2, 0.3, 0.4, 1.0])
+    affine[0, 1] = 0.1
+    coordinates = np.indices((32, 32, 32))
+    data = 10.0 + coordinates[0] * 0.1 + coordinates[1] * 0.03
+    source = image(data, affine=affine)
+    step = p.N4BiasFieldCorrection(iters=[1])
+
+    result = step.execute(source)
+
+    assert np.all(np.isfinite(result.get_fdata()))
+    assert result.shape == source.shape
+    np.testing.assert_array_equal(result.affine, affine)
+    np.testing.assert_array_equal(source.get_fdata(), data)
 
 
 def test_group_transform_alignment_and_input_list_immutability():
