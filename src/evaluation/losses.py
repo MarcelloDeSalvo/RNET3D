@@ -370,13 +370,20 @@ def diceCELoss_gradient_fix(
         tf.debugging.assert_greater_equal(clean_target, lower_target_bound, message="Available targets must be nonnegative")
         tf.debugging.assert_less_equal(clean_target, upper_target_bound, message="Available targets must not exceed one")
 
+        # AutoGraph moves branch assignments into functions using nonlocal.
+        # Keep shared-variable annotations outside those generated branches.
+        dice_entries: tf.Tensor
+        ce_entries: tf.Tensor
+        loss_target: tf.Tensor
+        loss_probabilities: tf.Tensor
+
         if version == 1:
             target_mass: tf.Tensor = tf.reduce_sum(clean_target, axis=-1, keepdims=True)
             supervised_voxels: tf.Tensor = target_mass > 0
-            dice_entries: tf.Tensor = tf.logical_and(available, supervised_voxels)
-            ce_entries: tf.Tensor = dice_entries
-            loss_target: tf.Tensor = clean_target
-            loss_probabilities: tf.Tensor = tf.where(supervised_voxels, probabilities, zeros)
+            dice_entries = tf.logical_and(available, supervised_voxels)
+            ce_entries = dice_entries
+            loss_target = clean_target
+            loss_probabilities = tf.where(supervised_voxels, probabilities, zeros)
         else:
             loss_target = clean_target[..., 1:]
             dice_entries = available[..., 1:]
@@ -400,8 +407,10 @@ def diceCELoss_gradient_fix(
         prediction_mass: tf.Tensor = tf.reduce_sum(loss_probabilities, axis=reduction_axes)
         truth_mass: tf.Tensor = tf.reduce_sum(loss_target, axis=reduction_axes)
         union: tf.Tensor = prediction_mass + truth_mass
+
+        numerator: tf.Tensor
         if version == 1:
-            numerator: tf.Tensor = 2 * (intersection + smooth)
+            numerator = 2 * (intersection + smooth)
         else:
             numerator = 2 * intersection + smooth
 

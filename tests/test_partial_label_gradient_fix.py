@@ -38,6 +38,31 @@ def test_invalid_objective_versions_are_rejected(version):
         diceCELoss_gradient_fix(version=version)
 
 
+@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("batch_wise", [False, True])
+@pytest.mark.parametrize("focal_gamma", [None, 2.0])
+def test_autograph_conversion_succeeds_and_preserves_values_and_gradients(version, batch_wise, focal_gamma):
+    """Require actual conversion: tf.function alone can silently fall back."""
+    objective = diceCELoss_gradient_fix(
+        gamma=0.8, version=version, batch_wise=batch_wise, focal_gamma=focal_gamma,
+    )
+    converted = tf.autograph.to_graph(objective)
+    compiled = tf.function(converted, autograph=False)
+    target = tf.constant([[[[[0., 1., -1.], [1., 0., -1.]]]]])
+    logits = tf.Variable([[[[[0.3, -0.2, 0.8], [-0.3, 0.6, 0.1]]]]])
+
+    with tf.GradientTape() as tape:
+        expected = objective(target, logits)
+    expected_gradient = tape.gradient(expected, logits)
+    with tf.GradientTape() as tape:
+        actual = compiled(target, logits)
+    actual_gradient = tape.gradient(actual, logits)
+
+    np.testing.assert_allclose(actual.numpy(), expected.numpy(), rtol=1e-6, atol=1e-7)
+    np.testing.assert_allclose(actual_gradient.numpy(), expected_gradient.numpy(), rtol=1e-6, atol=1e-7)
+    np.testing.assert_array_equal(actual_gradient.numpy()[..., 2], 0)
+
+
 @pytest.mark.parametrize("batch_wise", [False, True])
 @pytest.mark.parametrize("focal_gamma", [None, 2.0])
 @pytest.mark.parametrize("compiled", [False, True])
