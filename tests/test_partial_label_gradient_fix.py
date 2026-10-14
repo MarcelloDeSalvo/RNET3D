@@ -32,7 +32,7 @@ def test_version_one_matches_frozen_original_values_and_gradients(baseline):
     np.testing.assert_allclose(gradient.numpy(), baseline["gradient"], rtol=1e-6, atol=1e-7)
 
 
-@pytest.mark.parametrize("version", [0, 3, True, "1"])
+@pytest.mark.parametrize("version", [0, 4, True, "1"])
 def test_invalid_objective_versions_are_rejected(version):
     with pytest.raises(ValueError, match="version"):
         diceCELoss_gradient_fix(version=version)

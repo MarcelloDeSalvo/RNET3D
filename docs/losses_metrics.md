@@ -192,7 +192,7 @@ The experiment builder logs `regions_logits_mean_dice` and
 gradients, network weights and inference outputs remain unchanged. This is a
 patch-level training monitor, not a substitute for full-volume animal Dice.
 
-`LossConfig.gradient_fix_version` selects the implemented objective: both 1 and 2
+`LossConfig.gradient_fix_version` selects the implemented objective: versions 1, 2 and 3
 are supported for training, evaluation and initialization. The default remains 2.
 Older saved `dice_ce_gradient_fix` configurations without this field are identified
 as version 1 and can resume with that objective. Changing versions requires a new
@@ -204,3 +204,70 @@ The zero-gradient contract applies to the ROI loss derivative with respect to
 unavailable ROI logits. Auxiliary tasks and fully annotated samples can still
 update shared weights. These checks do not establish model performance; no
 retraining or sensitivity study has been performed.
+
+## Version 3: available foreground positives and known negatives
+
+Select `LossConfig(regions="dice_ce_gradient_fix", gradient_fix_version=3)`.
+Version 3 retains version-2 foreground Dice and the same available-class masked
+softmax, but replaces positive-only CE with binary CE on every available
+foreground ROI entry. An available complete ROI supplies positive and negative
+voxel targets. Unknown anatomical channels remain `-1` and have exactly zero
+direct ROI-logit gradient. Background remains a normalization competitor with
+no explicit background Dice/CE target. These are conditional probabilities;
+full-softmax inference remains unchanged, so empirical calibration and performance
+still require evaluation.
+
+For each available sample/class group (classes when batch_wise=True), positive
+and negative BCE terms are averaged separately. When both exist, their means
+are combined using `foreground_positive_weight=0.5`. A group containing only
+negatives receives its full negative mean, avoiding the nearly flat empty-mask
+Dice penalty seen in v2. Groups containing only positives receive their full
+positive mean. Entirely unavailable groups are omitted. Gamma retains the
+CE-versus-Dice mixing convention, but objective magnitudes differ across versions.
+V3 intentionally does not support focal_gamma.
+
+Binary terms are calculated from stable one-versus-rest log odds on the masked
+logits. The dominant class's complement is computed separately to avoid probability
+subtraction/cancellation and clipping-induced zero gradients at saturated false
+positives. Memory scales linearly in class count. V1/v2 computations and defaults
+are preserved.
+
+### Verified SHAM lesion absence
+
+The user confirmed every SHAM scan is lesion-free. `DatasetSpec(sham_lesion_absent=True)`
+therefore makes the lesion channel available with an all-zero target, even when
+`has_lesion_annotation=False`. This explicit policy is separate from annotation
+metadata: missing annotations alone never establish absence. Preparation rejects
+SHAM scans containing source label 1 when verified absence is asserted. TBI and
+other unavailable anatomical labels retain their existing policy. The setting is
+saved in run/study contracts and must not be changed silently on resumption.
+The normalized D3 audit found 86 SHAM scans and no lesion-positive source masks.
+
+```python
+datasets = (
+    DatasetSpec(name="D1", annotation_scope="full_volume"),
+    DatasetSpec(name="D3", annotation_scope="full_volume", sham_lesion_absent=True),
+)
+loss_settings = LossConfig(
+    regions="dice_ce_gradient_fix", gradient_fix_version=3,
+    gamma=0.8, batch_wise=True, foreground_positive_weight=0.5,
+    regions_weight=1.0, brain_weight=1.0, classifier_weight=1.0,
+)
+```
+
+The classifier remains an independent auxiliary condition objective. It does not
+force ROI lesion absence or suppress lesions during export. V3 supplies direct
+segmentation supervision; classifier gating is not introduced. TBI crops without
+lesion voxels also supply known negatives when lesion annotation is complete;
+TBI condition does not imply every crop should contain a lesion.
+
+The appended v3 section of `check_partial_label_loss_gradient.ipynb` shows the
+corrective gradient for a verified negative with a near-certain lesion false
+positive, plus exact zero unavailable-logit gradients. Tests cover finite
+float16/32/64 extreme logits, finite differences, balancing, annotation contracts,
+AutoGraph and a tiny three-head MouseFull fit/export. These establish computation
+and gradient behavior, not improved segmentation. Use a fresh experiment and the
+same split, initialization, preprocessing and evaluation patches. For a loss-only
+v1/v3 comparison, enable the same verified-absence policy in both runs. Track SHAM
+false-positive lesion volumes and animal-level false-positive rates alongside TBI
+lesion sensitivity/Dice, so reduced false positives do not conceal reduced detection.

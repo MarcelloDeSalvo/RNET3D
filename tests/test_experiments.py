@@ -586,7 +586,7 @@ def test_annotation_summary_counts_declarations_instead_of_voxels(experiment):
     assert coverage["TotalScans"].eq(5).all()
 
 
-@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("version", [1, 2, 3])
 def test_tiny_mouse_full_run_combines_partial_cohorts_and_classifier(experiment, version):
     """Fit/export the three-head partial-label workflow on tiny mixed mouse data."""
     import shutil
@@ -612,16 +612,23 @@ def test_tiny_mouse_full_run_combines_partial_cohorts_and_classifier(experiment,
     mapping = {0: 0, 1: 1, 2: 2, 3: 3, 5: 4, 6: 5, 12: 6, 13: 7, 15: 8, 16: 9, 21: 10}
     names = ("Background", "Lesion", "cl-CC", "cl-V", "cl-Hipp", "cl-Ctx",
              "il-CC", "il-V", "il-Hipp", "il-Ctx", "tV")
-    settings = replace(experiment.data, datasets=(DatasetSpec(name="D1"), DatasetSpec(name="D3")))
+    verified_absence = version == 3
+    settings = replace(experiment.data, datasets=(DatasetSpec(name="D1"), DatasetSpec(name="D3", sham_lesion_absent=verified_absence)))
     model = ModelConfig(architecture="3drnet", filters=(2, 4, 8, 16, 32), classifier=True)
     loss = replace(experiment.loss, gradient_fix_version=version)
     config = replace(experiment, data=settings, labels=LabelConfig(mapping=mapping, names=names), model=model, loss=loss)
     data = prepare_data(config)
     coverage = data.annotation_summary()
     lesion = coverage.loc[(coverage["Dataset"] == "D3") & (coverage["Class"] == "Lesion")]
-    assert lesion["UnannotatedScans"].item() == 1
+    expected_unavailable = 1
+    if verified_absence:
+        expected_unavailable = 0
+    assert lesion["UnannotatedScans"].item() == expected_unavailable
     _, targets = data.make_generator(["D3/SUBJ_0004"], training=False)[0]
-    assert np.all(targets[0][..., 1] == -1)
+    expected_lesion_target = -1
+    if verified_absence:
+        expected_lesion_target = 0
+    assert np.all(targets[0][..., 1] == expected_lesion_target)
     assert targets[2].item() == 0
 
     split = SubjectSplit(

@@ -618,3 +618,17 @@ The normalized dataset's descriptive `label_mapping.network_label` values do
 not define the experiment's channel order. Training reads original `mask_value`
 IDs and applies `LabelConfig.mapping`. See [the MouseFull mapping audit](mouse_full_mapping_audit.md)
 for the contralateral/ipsilateral ventricle trace and real-data checks.
+
+## V3 and verified lesion-free SHAM scans
+
+Version 3 is selected through `LossConfig.gradient_fix_version=3`. It combines
+foreground Dice with balanced positive/negative foreground BCE and keeps unknown
+anatomical logits outside normalization. Set `DatasetSpec.sham_lesion_absent=True`
+for verified SHAM negatives (confirmed for the current D3 cohort). This marks an
+empty lesion target as available instead of ignored. The setting defaults False,
+so existing experiments keep their annotation contracts. Conflicting positive
+lesion masks fail preparation. Both knobs are explicit and saved; old runs cannot
+silently switch loss or availability policy. The architecture, auxiliary classifier
+and inference outputs are unchanged. See [loss documentation](losses_metrics.md)
+for the configuration and limitations, and the v3 section in
+[the gradient notebook](../notebook/check_partial_label_loss_gradient.ipynb).

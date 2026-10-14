@@ -25,6 +25,8 @@ class DatasetSpec:
     mask and are not supported by this full-volume annotation contract.
     None reads normalized annotation metadata; legacy data requires an override.
     Zero is reserved for the task remainder, not a verified background annotation.
+    sham_lesion_absent opts verified SHAM scans into available empty lesion masks;
+    it must never be inferred from a missing lesion annotation alone.
     """
 
     name: str = "D1"
@@ -34,6 +36,7 @@ class DatasetSpec:
     available_labels: tuple[int, ...] | None = None
     sham: bool = False
     annotation_scope: Literal["full_volume"] = "full_volume"
+    sham_lesion_absent: bool = False
 
     def validate(self) -> None:
         """Require an explicit layout and whole-volume foreground annotation policy."""
@@ -43,6 +46,8 @@ class DatasetSpec:
             raise ValueError("Legacy datasets need modality and explicit available_labels")
         if self.annotation_scope != "full_volume":
             raise ValueError("Only full_volume ROI annotations are supported; sparse annotations need a spatial validity mask")
+        if not isinstance(self.sham_lesion_absent, bool):
+            raise ValueError("sham_lesion_absent must be boolean and requires verified absence")
 
         if self.available_labels is not None:
             invalid_labels = any(
@@ -239,6 +244,9 @@ class LossConfig:
 
     gradient_fix_version=2 selects foreground-only Dice/CE with full-volume ROI
     negatives. Version 1 restores the earlier background-inclusive objective.
+    Version 3 adds balanced foreground BCE with explicit known-negative gradients.
+    foreground_positive_weight balances positive/negative means in version 3;
+    groups containing only one polarity receive its full mean.
     A resumed run must retain its saved objective version.
     """
 
@@ -248,7 +256,8 @@ class LossConfig:
     batch_wise: bool = True
     brain_gamma: float = 0.5
     brain_alpha: float = 0.6
-    gradient_fix_version: Literal[1, 2] = 2
+    gradient_fix_version: Literal[1, 2, 3] = 2
+    foreground_positive_weight: float = 0.5
     regions_weight: float = 1.0
     brain_weight: float = 1.0
     classifier_weight: float = 1.0
@@ -270,8 +279,10 @@ class LossConfig:
     def validate_for_training(self) -> None:
         """Require an implemented version without silently changing saved objectives."""
         version = self.gradient_fix_version
-        if isinstance(version, bool) or not isinstance(version, int) or version not in (1, 2):
-            raise ValueError("Gradient-fix objective version must be one or two")
+        if isinstance(version, bool) or not isinstance(version, int) or version not in (1, 2, 3):
+            raise ValueError("Gradient-fix objective version must be one, two or three")
+        if not math.isfinite(self.foreground_positive_weight) or not 0 < self.foreground_positive_weight < 1:
+            raise ValueError("Foreground positive weight must be strictly between zero and one")
 
 
 @dataclass(frozen=True)
@@ -452,9 +463,7 @@ class ExperimentConfig:
             raise ValueError("The existing U-Net builder does not include a classifier")
         if self.loss.regions not in ("dice_ce", "dice_ce_gradient_fix"):
             raise ValueError("Unsupported ROI loss")
-        version = self.loss.gradient_fix_version
-        if isinstance(version, bool) or not isinstance(version, int) or version not in (1, 2):
-            raise ValueError("Gradient-fix objective version must be one or two")
+        self.loss.validate_for_training()
         if self.preprocessing.crop_mode not in ("center", "random"):
             raise ValueError("Training crop mode must be center or random")
         if not math.isfinite(self.learning_rate) or self.learning_rate <= 0:

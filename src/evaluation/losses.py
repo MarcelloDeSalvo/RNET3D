@@ -304,9 +304,44 @@ def masked_softmax_gradient_fix(
     return probabilities
 
 
+def _foreground_log_odds(target: tf.Tensor, logits: tf.Tensor, ignore_value: float) -> tf.Tensor:
+    """Stable one-versus-rest logits on the same masked softmax as the ROI loss.
+
+    Compute the dominant class's complement separately to avoid subtracting
+    nearly equal masses when a false positive has probability close to one.
+    Arrays remain linear in class count; no voxel-by-class-by-class tensor is used.
+    """
+    logits = tf.cast(logits, target.dtype)
+    available = tf.not_equal(target, ignore_value)
+    has_available = tf.reduce_any(available, axis=-1, keepdims=True)
+    negative_infinity = tf.constant(float('-inf'), dtype=logits.dtype)
+    masked = tf.where(available, logits, negative_infinity)
+    safe_logits = tf.where(has_available, masked, tf.zeros_like(logits))
+
+    maximum = tf.reduce_max(safe_logits, axis=-1, keepdims=True)
+    maximum_index = tf.argmax(safe_logits, axis=-1, output_type=tf.int32)
+    channel_count = tf.shape(safe_logits)[-1]
+    dominant = tf.one_hot(maximum_index, channel_count, on_value=True, off_value=False)
+    complement_logits = tf.where(dominant, negative_infinity, safe_logits)
+    # No foreground availability means no loss; keep the unused reduction finite.
+    has_foreground = tf.reduce_any(available[..., 1:], axis=-1, keepdims=True)
+    complement_logits = tf.where(has_foreground, complement_logits, tf.zeros_like(complement_logits))
+    dominant_complement = tf.reduce_logsumexp(complement_logits, axis=-1, keepdims=True)
+
+    scaled = tf.exp(safe_logits - maximum)
+    total = tf.reduce_sum(scaled, axis=-1, keepdims=True)
+    other_mass = total - scaled
+    other_mass = tf.where(dominant, tf.ones_like(other_mass), other_mass)
+    complement = maximum + tf.math.log(other_mass)
+    complement = tf.where(dominant, dominant_complement, complement)
+    odds = safe_logits[..., 1:] - complement[..., 1:]
+    return tf.where(available[..., 1:], odds, tf.zeros_like(odds))
+
+
 def diceCELoss_gradient_fix(
     gamma: float = 0.5, smooth: float = 1e-5, batch_wise: bool = False,
-    focal_gamma: float | None = None, *, ignore_value: float = -1, version: Literal[1, 2] = 2,
+    focal_gamma: float | None = None, *, ignore_value: float = -1,
+    version: Literal[1, 2, 3] = 2, positive_weight: float = 0.5,
 ) -> LossFunction:
     """Return the selected partial-label Dice/CE objective on RAW ROI LOGITS.
 
@@ -315,6 +350,13 @@ def diceCELoss_gradient_fix(
     foreground Dice over all available ROI entries and positive-foreground CE.
     Both versions mask unavailable logits before softmax. The default remains
     version 2 so existing explicit and direct callers keep their computation.
+
+    Version 3 combines version-2 foreground Dice with balanced binary CE for
+    positive and known-negative available ROI entries. Empty annotated groups
+    receive a full negative CE term. There is no explicit background Dice/CE.
+    A background competitor remains necessary. Unavailable logits have zero
+    direct ROI gradient. Verified lesion-free scans require available empty
+    lesion targets; a missing lesion annotation must remain unavailable.
 
     In version 2, channel zero remains a competitor without a background loss.
     Unavailable anatomical logits are masked before normalization. Each available
@@ -345,8 +387,12 @@ def diceCELoss_gradient_fix(
     if not float('-inf') < ignore_value < 0:
         raise ValueError("ignore_value must be finite and negative")
 
-    if isinstance(version, bool) or not isinstance(version, int) or version not in (1, 2):
-        raise ValueError("Gradient-fix objective version must be one or two")
+    if isinstance(version, bool) or not isinstance(version, int) or version not in (1, 2, 3):
+        raise ValueError("Gradient-fix objective version must be one, two or three")
+    if not 0 < positive_weight < 1:
+        raise ValueError("positive_weight must be strictly between zero and one")
+    if version == 3 and focal_gamma is not None:
+        raise ValueError("Version 3 uses balanced binary CE; focal_gamma is unsupported")
 
     reduction_axes: tuple[int, ...]
     if batch_wise:
@@ -357,7 +403,7 @@ def diceCELoss_gradient_fix(
     def loss_gradient_fix(target: tf.Tensor, logits: tf.Tensor) -> tf.Tensor:
         """Choose version-specific supervision and share the overlap/CE reductions."""
         tf.debugging.assert_rank(logits, 5, message="Expected channels-last 3D batches")
-        if version == 2:
+        if version != 1:
             channel_count: tf.Tensor = tf.shape(logits)[-1]
             tf.debugging.assert_greater_equal(channel_count, 2, message="Expected background and foreground channels")
         probabilities: tf.Tensor = masked_softmax_gradient_fix(target, logits, ignore_value)
@@ -423,6 +469,27 @@ def diceCELoss_gradient_fix(
         dice_sum: tf.Tensor = tf.reduce_sum(dice_terms)
         class_count: tf.Tensor = tf.reduce_sum(class_weights)
         dice_loss: tf.Tensor = tf.math.divide_no_nan(dice_sum, class_count)
+
+        if version == 3:
+            odds = _foreground_log_odds(target, logits, ignore_value)
+            positive_terms = tf.nn.softplus(-odds)
+            negative_terms = tf.nn.softplus(odds)
+            valid_weights = tf.cast(dice_entries, probabilities.dtype)
+            positive_weights = valid_weights * loss_target
+            negative_weights = valid_weights * (1 - loss_target)
+
+            positive_count = tf.reduce_sum(positive_weights, axis=reduction_axes)
+            negative_count = tf.reduce_sum(negative_weights, axis=reduction_axes)
+            positive_sum = tf.reduce_sum(positive_weights * positive_terms, axis=reduction_axes)
+            negative_sum = tf.reduce_sum(negative_weights * negative_terms, axis=reduction_axes)
+            positive_mean = tf.math.divide_no_nan(positive_sum, positive_count)
+            negative_mean = tf.math.divide_no_nan(negative_sum, negative_count)
+            both = tf.logical_and(positive_count > 0, negative_count > 0)
+            balanced = positive_weight * positive_mean + (1 - positive_weight) * negative_mean
+            ce_groups = tf.where(both, balanced, positive_mean + negative_mean)
+            ce_groups = tf.where(active_classes, ce_groups, tf.zeros_like(ce_groups))
+            ce_loss = tf.math.divide_no_nan(tf.reduce_sum(ce_groups), class_count)
+            return gamma * ce_loss + (1 - gamma) * dice_loss
 
         ce_zeros: tf.Tensor = tf.zeros_like(loss_probabilities)
 

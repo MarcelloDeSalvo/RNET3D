@@ -484,6 +484,12 @@ def prepare_data(config: ExperimentConfig, *, require_training_loss: bool = True
                 if 0 not in available:
                     raise ValueError("Explicit available_labels must include background zero")
 
+            if dataset.sham_lesion_absent and scan.get_sham():
+                lesion_voxels = np.any(scan.labels.get_fdata() == 1)
+                if lesion_voxels:
+                    raise ValueError(f"{scan.id}: verified lesion absence conflicts with lesion-positive voxels")
+                available.add(1)
+
             scan.unavailable_labels = sorted(set(labels) - available)
             if require_training_loss and scan.unavailable_labels and config.loss.regions != "dice_ce_gradient_fix":
                 raise ValueError(f"{scan.id}: partial annotations require dice_ce_gradient_fix")
