@@ -207,7 +207,7 @@ def test_final_checkpoint_cell_needs_no_training_result_or_live_config(
     def evaluate(settings):
         observed.append(settings)
         metrics = pd.DataFrame({"Metric": ["Dice"], "Value": [0.5]})
-        return SimpleNamespace(metrics=metrics, patch_metrics=pd.DataFrame(),
+        return SimpleNamespace(metrics=metrics, patch_metrics=pd.DataFrame(), classifier_predictions=pd.DataFrame(),
                                data=object(), output_dir=settings.output_dir)
 
     class Figure:

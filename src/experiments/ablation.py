@@ -116,6 +116,7 @@ class AblationResult:
     metrics: pd.DataFrame = field(default_factory=pd.DataFrame)
     timings: pd.DataFrame = field(default_factory=pd.DataFrame)
     patch_metrics: pd.DataFrame = field(default_factory=pd.DataFrame)
+    classifier_predictions: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 class StudyVariant(Protocol):
@@ -289,6 +290,7 @@ def run_study(
     result = AblationResult(study_dir=folder)
     metric_tables: list[pd.DataFrame] = []
     patch_tables: list[pd.DataFrame] = []
+    classifier_tables: list[pd.DataFrame] = []
     timing_rows: list[dict[str, Any]] = []
     run_rows: list[dict[str, Any]] = []
     with run_lock(folder):
@@ -326,6 +328,9 @@ def run_study(
                 if not run.patch_metrics.empty:
                     patch_table = run.patch_metrics.assign(Variant=variant.name, Seed=seed)
                     patch_tables.append(patch_table)
+                if not run.classifier_predictions.empty:
+                    classifier_table = run.classifier_predictions.assign(Variant=variant.name, Seed=seed)
+                    classifier_tables.append(classifier_table)
                 run_rows.append({"Variant": variant.name, "Seed": seed, "RunDir": str(run.run_dir),
                                  "ConfigurationSHA256": config.fingerprint()})
                 for evaluator, tables in run.evaluations.items():
@@ -340,9 +345,14 @@ def run_study(
             result.metrics = pd.concat(metric_tables, ignore_index=True)
         if patch_tables:
             result.patch_metrics = pd.concat(patch_tables, ignore_index=True)
+        if classifier_tables:
+            result.classifier_predictions = pd.concat(classifier_tables, ignore_index=True)
         from .evaluation import export_evaluation_tables
 
-        export_evaluation_tables(result.patch_metrics, result.metrics, folder)
+        export_evaluation_tables(
+            result.patch_metrics, result.metrics, folder,
+            classifier_predictions=result.classifier_predictions,
+        )
         result.timings = pd.DataFrame(timing_rows)
         result.timings.to_csv(folder / "timings.csv", index=False)
     return result

@@ -150,3 +150,10 @@ full-volume brain/region scores. Runs/studies export `evaluation_metrics.xlsx`
 with separate sheets, alongside CSV tables. Checkpoint cells and 09 provide the
 same measurements without fitting. See
 [the configuration, leakage and evaluation guide](../docs/reviewer_workflow_steps_1_3.md).
+
+Auxiliary classifier decisions are collected during the same full-volume pass.
+Run/study/checkpoint workbooks include animal-level rates, confidence intervals
+and confusion counts, plus independent SHAM lesion-volume diagnostics. Notebook
+10 reads explicit `CLASSIFIER_FILES` and displays a Plotly confusion matrix without
+retraining. Classifier decisions do not suppress lesions.
+See [classifier evaluation](../docs/classifier_evaluation.md).

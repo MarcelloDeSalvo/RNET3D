@@ -647,6 +647,14 @@ def test_tiny_mouse_full_run_combines_partial_cohorts_and_classifier(experiment,
     restored = tf.keras.models.load_model(result.run_dir / "fold_0" / "model.keras", compile=False)
     assert restored.output_names == ["regions", "brain_mask", "classifier"]
     assert restored.output_shape[0][-1] == 11
+    classifier = result.classifier_predictions
+    assert set(classifier["DatasetRole"]) == {"validation", "test"}
+    assert set(classifier["Reference"]) == {1}  # SHAM here is in fitting, not evaluation.
+    assert classifier["PatchCount"].gt(0).all()
+    assert classifier["PositivePatchFraction"].between(0, 1).all()
+    assert (result.run_dir / "summary" / "classifier_summary.csv").is_file()
+    cached = run_training(data, split, resume_run=result.run_dir)
+    pd.testing.assert_frame_equal(cached.classifier_predictions, classifier, check_dtype=False)
     volume = pd.concat(result.evaluations["regions"], ignore_index=True)
     table = volume.loc[volume["DatasetRole"] == "test"]
     assert set(table["Scan"]) == {"SUBJ_0001", "SUBJ_0003_7days", "SUBJ_0003_14days"}

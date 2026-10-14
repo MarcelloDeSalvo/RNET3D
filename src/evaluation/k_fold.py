@@ -438,6 +438,7 @@ class TrainingResult:
 
     run_dir: Path
     patch_metrics: pd.DataFrame = field(default_factory=pd.DataFrame)
+    classifier_predictions: pd.DataFrame = field(default_factory=pd.DataFrame)
     histories: list[History] = field(default_factory=list)
     evaluations: dict[str, list[pd.DataFrame]] = field(default_factory=dict)
     summaries: dict[str, float] = field(default_factory=dict)
@@ -693,7 +694,10 @@ def _save_evaluations(result: TrainingResult) -> None:
     full_volume = pd.DataFrame()
     if all_tables:
         full_volume = pd.concat(all_tables, ignore_index=True)
-    export_evaluation_tables(result.patch_metrics, full_volume, result.run_dir / "summary")
+    export_evaluation_tables(
+        result.patch_metrics, full_volume, result.run_dir / "summary",
+        classifier_predictions=result.classifier_predictions,
+    )
 
 
 
@@ -745,6 +749,12 @@ def train_fold(
         for entry in completed["evaluations"]:
             table = pd.read_json(folder / entry["path"], orient="table")
             _record_evaluation(result, entry["name"], entry["role"], split.index, table, entry["subjects"])
+            classifier_path = entry.get("classifier_predictions")
+            if classifier_path is not None:
+                classifier_table = pd.read_json(folder / classifier_path, orient="table")
+                result.classifier_predictions = pd.concat(
+                    [result.classifier_predictions, classifier_table], ignore_index=True,
+                )
         return
     if resume and context.checkpoint_path.exists() and not (folder / "training_state.json").exists():
         raise ValueError("Best weights alone cannot resume training; epoch recovery state is missing")
@@ -851,6 +861,19 @@ def train_fold(
                 "name": name, "role": role, "subjects": selected_ids,
                 "path": str(table_path.relative_to(folder)),
             })
+            classifier_table = getattr(evaluator, "classifier_predictions", None)
+            if classifier_table is not None and not classifier_table.empty:
+                classifier_table = classifier_table.assign(
+                    Fold=split.index, DatasetRole=role, Seed=config.seed, BestEpoch=selected_epoch,
+                    Variant=result.metadata.model_variant, RunID=result.run_dir.name,
+                )
+                result.classifier_predictions = pd.concat(
+                    [result.classifier_predictions, classifier_table], ignore_index=True,
+                )
+                classifier_path = evaluator_dir / "classifier_predictions.json"
+                classifier_table.to_json(classifier_path, orient="table", indent=2)
+                classifier_table.to_csv(evaluator_dir / "classifier_predictions.csv", index=False)
+                saved_evaluations[-1]["classifier_predictions"] = str(classifier_path.relative_to(folder))
 
     timing = FoldTiming(
         fold=split.index,

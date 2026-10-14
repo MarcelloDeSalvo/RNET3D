@@ -17,6 +17,7 @@ import pandas as pd
 from scipy.stats import wilcoxon
 
 from .statistics import AgreementConfig, agreement_table
+from .classification import healthy_lesion_report
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,8 @@ class RevisionResult:
     volumes: pd.DataFrame
     agreement: pd.DataFrame
     comparisons: pd.DataFrame = field(default_factory=pd.DataFrame)
+    sham_lesion_animals: pd.DataFrame = field(default_factory=pd.DataFrame)
+    sham_lesion_summary: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def load_metric_sources(sources: Sequence[MetricSource]) -> pd.DataFrame:
@@ -263,9 +266,11 @@ def revision_report(
     if comparison is not None:
         reference, candidate = comparison
         comparisons = paired_model_comparison(measures, reference, candidate, config)
+    healthy_animals, healthy_summary = healthy_lesion_report(selected, confidence=config.confidence)
     return RevisionResult(
         raw=raw, animals=animals, summary=summary, statuses=statuses,
         volumes=volumes, agreement=pd.DataFrame(agreements), comparisons=comparisons,
+        sham_lesion_animals=healthy_animals, sham_lesion_summary=healthy_summary,
     )
 
 
@@ -279,6 +284,8 @@ def export_revision(result: RevisionResult, output_dir: Path, config: RevisionCo
         "raw_metrics": result.raw, "animal_metrics": result.animals, "metric_summary": result.summary,
         "metric_statuses": result.statuses, "animal_volume_pairs": result.volumes,
         "volume_agreement": result.agreement, "paired_comparisons": result.comparisons,
+        "sham_lesion_animals": result.sham_lesion_animals,
+        "sham_lesion_summary": result.sham_lesion_summary,
     }
     for name, table in tables.items():
         table.to_csv(folder / f"{name}.csv", index=False)

@@ -58,6 +58,8 @@ class PredictionResult:
     roi: NDArray[Any]
     brain_mask: NDArray[Any] | None = None
     classifier: bool | None = None
+    classifier_positive_fraction: float | None = None
+    classifier_patch_count: int | None = None
 
 @dataclass(frozen=True)
 class EvaluationResult:
@@ -324,6 +326,8 @@ class RandomCroppingPrediction:
             classifier = np.asarray(heads[2])[0]
             if classifier.size != 1:
                 raise ValueError('Classifier must return one probability per patch')
+            if not np.isfinite(classifier).all() or np.any(classifier < 0) or np.any(classifier > 1):
+                raise ValueError('Classifier probabilities must be finite and lie in [0, 1]')
         return roi, brain, classifier
 
     def _final_mask(self, sums: Array, counts: Array, original_shape: Shape3D, binary: bool) -> Array:
@@ -392,12 +396,19 @@ class RandomCroppingPrediction:
 
         brain_mask: Array | None = None
         classifier_output: bool | None = None
+        positive_fraction: float | None = None
+        patch_count: int | None = None
         if with_brain_mask:
             brain_mask = self.calculate_final_brain_mask(brain_sums, brain_counts, original_shape)
         if with_classifier:
             classifier_output = self.calculate_final_classifier_output(positive_votes, total_votes)
+            positive_fraction = float((positive_votes / total_votes).item())
+            patch_count = int(total_votes.item())
         roi_mask: Array = self.calculate_final_prediction(sums, counts, original_shape)
-        return PredictionResult(roi=roi_mask, brain_mask=brain_mask, classifier=classifier_output)
+        return PredictionResult(
+            roi=roi_mask, brain_mask=brain_mask, classifier=classifier_output,
+            classifier_positive_fraction=positive_fraction, classifier_patch_count=patch_count,
+        )
 
 
 class ExperimentVolumeEvaluator:
@@ -417,6 +428,7 @@ class ExperimentVolumeEvaluator:
         self.data: PreparedData = data
         self.subject_ids: list[str] = list(subject_ids)
         self.options: dict[str, Any] = dict(options)
+        self.classifier_predictions: pd.DataFrame = pd.DataFrame()
 
     def evaluate(self) -> pd.DataFrame:
         """Predict each scan once, preserving missing-annotation statuses and timings."""
@@ -453,6 +465,7 @@ class ExperimentVolumeEvaluator:
         save_predictions: bool = bool(self.options.get("save_predictions", False))
         tables: list[pd.DataFrame] = []
         timings: list[dict[str, str | float]] = []
+        classifier_rows: list[dict[str, Any]] = []
 
         # Exclude tracing/device warm-up from per-volume prediction durations.
         warmup_shape = (1, *config.preprocessing.patch_size, 1)
@@ -480,8 +493,28 @@ class ExperimentVolumeEvaluator:
                     raise ValueError(f"{scan.id}: physical distance metrics require an orthogonal grid")
 
                 started = time.perf_counter()
-                prediction = predictor.predict(image, with_brain_mask=True)
+                if config.model.classifier:
+                    prediction = predictor.predict(image, with_brain_mask=True, with_classifier=True)
+                else:
+                    prediction = predictor.predict(image, with_brain_mask=True)
                 inference_seconds = time.perf_counter() - started
+                condition = "TBI"
+                if scan.get_sham():
+                    condition = "SHAM"
+                if config.model.classifier:
+                    if prediction.classifier is None:
+                        raise ValueError(f"{scan.id}: configured classifier returned no decision")
+                    classifier_reference = int(not scan.get_sham())
+                    classifier_prediction = int(prediction.classifier)
+                    classifier_row = {
+                        "Subject": subject_id, "Scan": scan.id, "Dataset": scan.subject_group[0],
+                        "Reference": classifier_reference, "Prediction": classifier_prediction,
+                        "PositivePatchFraction": prediction.classifier_positive_fraction,
+                        "PatchCount": prediction.classifier_patch_count,
+                        "Condition": condition, "PatchThreshold": 0.5,
+                        "ScanDecisionRule": "majority_patch_vote_ties_SHAM",
+                    }
+                    classifier_rows.append(classifier_row)
                 started = time.perf_counter()
                 try:
                     processed = postprocessor.process(prediction.roi, prediction.brain_mask)
@@ -499,7 +532,7 @@ class ExperimentVolumeEvaluator:
                     regions=regions, subject=subject_id, scan=scan.id,
                     dataset=scan.subject_group[0], available_labels=available_classes,
                 )
-                table = table.assign(Head="regions", EvaluationStage="full_volume", Aggregation="scan")
+                table = table.assign(Head="regions", EvaluationStage="full_volume", Aggregation="scan", Condition=condition)
                 tables.append(table)
 
                 brain_reference = np.zeros(image.shape, dtype=np.uint8)
@@ -515,7 +548,7 @@ class ExperimentVolumeEvaluator:
                     regions={1: "Brain"}, subject=subject_id, scan=scan.id,
                     dataset=scan.subject_group[0], available_labels=brain_available,
                 )
-                brain_table = brain_table.assign(Head="brain_mask", EvaluationStage="full_volume", Aggregation="scan")
+                brain_table = brain_table.assign(Head="brain_mask", EvaluationStage="full_volume", Aggregation="scan", Condition=condition)
                 tables.append(brain_table)
 
                 if save_predictions:
@@ -555,6 +588,9 @@ class ExperimentVolumeEvaluator:
             raise ValueError("No evaluation scans selected")
 
         pd.DataFrame(timings).to_csv(output_dir / "inference_timings.csv", index=False)
+        self.classifier_predictions = pd.DataFrame(classifier_rows)
+        if classifier_rows:
+            self.classifier_predictions.to_csv(output_dir / "classifier_predictions.csv", index=False)
         return pd.concat(tables, ignore_index=True)
 
 
@@ -597,6 +633,7 @@ class SavedModelEvaluationResult:
     manifest: pd.DataFrame
     data: PreparedData
     patch_metrics: pd.DataFrame = field(default_factory=pd.DataFrame)
+    classifier_predictions: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def best_checkpoint_settings(
@@ -798,12 +835,18 @@ def evaluate_saved_model(settings: SavedModelEvaluationConfig) -> SavedModelEval
     metrics = metrics.assign(
         DatasetRole=settings.role, Variant=settings.variant, Seed=settings.seed, Fold=settings.fold,
     )
+    classifier_predictions = evaluator.classifier_predictions
+    if not classifier_predictions.empty:
+        classifier_predictions = classifier_predictions.assign(
+            DatasetRole=settings.role, Variant=settings.variant, Seed=settings.seed, Fold=settings.fold,
+        )
     from ..experiments.evaluation import export_evaluation_tables
 
-    export_evaluation_tables(patch_metrics, metrics, folder)
+    export_evaluation_tables(patch_metrics, metrics, folder, classifier_predictions=classifier_predictions)
     timings = pd.read_csv(folder / "inference_timings.csv")
     return SavedModelEvaluationResult(output_dir=folder, metrics=metrics, timings=timings,
-                                      manifest=manifest, data=data, patch_metrics=patch_metrics)
+                                      manifest=manifest, data=data, patch_metrics=patch_metrics,
+                                      classifier_predictions=classifier_predictions)
 
 
 def load_saved_evaluation(
@@ -834,9 +877,14 @@ def load_saved_evaluation(
         for column in ("Subject", "Scan"):
             if column in patch_metrics:
                 patch_metrics[column] = patch_metrics[column].fillna("")
+    classifier_predictions = pd.DataFrame()
+    classifier_file = folder / "classifier_predictions.csv"
+    if classifier_file.is_file():
+        classifier_predictions = pd.read_csv(classifier_file)
     return SavedModelEvaluationResult(
         output_dir=folder, metrics=metrics, timings=timings, manifest=manifest, data=data,
         patch_metrics=patch_metrics,
+        classifier_predictions=classifier_predictions,
     )
 
 
