@@ -65,6 +65,46 @@ provided; training and study runners pass their exact selection-validation IDs.
 
 ## Cross-validation
 
+### One notebook switch
+
+Notebooks 01, 03 and 05 expose:
+
+```python
+K_FOLD_COMPATIBLE: bool = False
+K_FOLD_COUNT: int = 5
+CV_VALIDATION_FRACTION: float = 0.2
+```
+
+`False` retains their fixed-split behavior. `True` runs every outer fold through
+the existing CV runner, saving one selected checkpoint per fold. The common
+`resolve_training_selection` returns either the fixed split or the complete
+fold set; generator previews use the first fold. Source CV runs use a separate
+model-group name ending in `_kfold`. No extra permanent test cohort is reserved.
+
+The callback cell remains explicit: fixed mode retains LR reduction, TensorBoard,
+early stopping and CSV logging; CV defaults to LR reduction only. Managed best
+and recovery checkpoints remain active in both modes. Result viewers and
+checkpoint evaluation default to `test` in fixed mode and `holdout` in CV mode.
+Override the displayed role when inspecting a run from a different mode.
+
+Enable the switch in notebook 01 and run all folds to create a TBI source usable
+for full MouseFull CV. Then choose that source `TBI_RUN` in notebook 05 and enable
+its switch, or use notebook 06. MouseFull selects same-index committed source
+checkpoints automatically unless `TBI_FOLD_SOURCES` supplies explicit overrides.
+Notebook 06 exposes `AUTO_MATCH_TBI_FOLDS=True` for this automatic selection.
+Source runs without every required committed checkpoint fail before fitting.
+
+The same boolean controls `MODE` in studies 07, 07f and 08. With it enabled, every
+variant/seed trains all folds. Notebook 07f automatically maps variant-specific
+source CV runs to target folds when explicit variant fold overrides are absent.
+
+`SPLIT_FILE` applies to fixed mode; `FOLD_FILE` applies to CV. Resume retains exact
+saved memberships and rejects a mode mismatch. Use a fresh run when changing modes.
+Notebook 03's optional CV has independent inner validation and outer holdouts;
+historical rat notebook 04 keeps its original leave-one-rat-out selection protocol.
+
+### Matching source memberships
+
 `make_pretrained_cv_splits` reads the source selected for each target fold.
 Matching source animals keep their training, selection-validation and outer
 holdout roles. Additional target animals receive grouped outer folds; notebook
@@ -102,3 +142,7 @@ would evaluate a narrower target population and must be described accordingly.
 Automated checks use synthetic sources and tiny datasets. They cover membership
 inheritance, annotation balancing, longitudinal grouping, source renumbering,
 saved splits, conflicting sources and rejection of shared-checkpoint leakage.
+
+The mode switch does not alter preprocessing or metric calculations. Full-volume
+physical distance metrics retain their separate orthogonal-grid requirement;
+nonorthogonal inputs can still encounter that evaluation limitation.

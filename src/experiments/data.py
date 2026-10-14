@@ -72,6 +72,92 @@ class SubjectSplit:
         return split
 
 
+@dataclass(frozen=True)
+class TrainingSelection:
+    """A fixed split or complete CV plan, with first-fold preview identities."""
+
+    split: SubjectSplit | None
+    folds: list[FoldSplit] | None
+    summary: pd.DataFrame
+
+    def __post_init__(self) -> None:
+        """Require exactly one nonempty selection mode."""
+        if (self.split is None) == (self.folds is None) or self.folds == []:
+            raise ValueError("Provide either a fixed split or nonempty CV folds")
+
+    @property
+    def train_ids(self) -> tuple[str, ...]:
+        """Return fixed training IDs or the first fold for a generator preview."""
+        if self.split is not None:
+            return self.split.train
+        assert self.folds is not None
+        return tuple(self.folds[0].train_ids)
+
+    @property
+    def validation_ids(self) -> tuple[str, ...]:
+        """Return fixed validation IDs or the first fold for a generator preview."""
+        if self.split is not None:
+            return self.split.validation
+        assert self.folds is not None
+        return tuple(self.folds[0].val_ids)
+
+    @property
+    def evaluation_role(self) -> Literal["test", "holdout"]:
+        """Choose independent final-test or outer-holdout result displays."""
+        if self.split is not None:
+            return "test"
+        return "holdout"
+
+
+def resolve_training_selection(
+    data: PreparedData, *, k_fold: bool = False,
+    resume_run: Path | None = None, split_file: Path | None = None, fold_file: Path | None = None,
+    strata: Mapping[str, str] | None = None,
+    initializations: Sequence[InitializationConfig] | None = None,
+    initializations_by_fold: Mapping[int, Sequence[InitializationConfig]] | None = None,
+) -> TrainingSelection:
+    """Select fixed training or all compatible folds from one explicit switch.
+
+    Saved memberships are authoritative. CV has no additional permanent test
+    split: every selected animal contributes one independent outer holdout.
+    Source memberships and initialization ancestors retain their existing guards.
+    """
+    if not isinstance(k_fold, bool):
+        raise ValueError("k_fold must be boolean")
+    if not k_fold:
+        if fold_file is not None:
+            raise ValueError("FOLD_FILE requires K_FOLD_COMPATIBLE=True")
+        split = resolve_training_split(
+            data, resume_run=resume_run, split_file=split_file, initializations=initializations,
+        )
+        summary = data.split_summary(split)
+        return TrainingSelection(split=split, folds=None, summary=summary)
+
+    if split_file is not None:
+        raise ValueError("Use FOLD_FILE for CV; SPLIT_FILE belongs to fixed-split mode")
+    from ..evaluation.k_fold import load_fold_splits
+
+    animals = data.subjects.subject_ids
+    k = data.config.training.k
+    if resume_run is not None:
+        saved = Path(resume_run) / "splits.json"
+        folds = load_fold_splits(saved, animals, k)
+        if fold_file is not None:
+            requested = load_fold_splits(fold_file, animals, k)
+            if requested != folds:
+                raise ValueError("FOLD_FILE differs from the resumed run's folds")
+    elif fold_file is not None:
+        folds = load_fold_splits(fold_file, animals, k)
+    else:
+        folds = make_pretrained_cv_splits(
+            data, strata=strata, initializations_by_fold=initializations_by_fold,
+        )
+    if any(not fold.test_ids for fold in folds):
+        raise ValueError("K-Fold-compatible mode requires independent outer holdouts")
+    summary = fold_summary(folds, data.subjects)
+    return TrainingSelection(split=None, folds=folds, summary=summary)
+
+
 def make_split(
     index: SubjectIndex, *, seed: int, validation_fraction: float = 0.2,
     test_fraction: float = 0.1,

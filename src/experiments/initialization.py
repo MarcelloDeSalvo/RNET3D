@@ -293,6 +293,31 @@ def pretraining_roles(
     return result
 
 
+def cv_initializations_from_run(
+    run_dir: Path, *, k: int, freeze_backbone: bool = False,
+) -> dict[int, InitializationConfig]:
+    """Select one committed source snapshot per target fold, without training.
+
+    Matching animal memberships are checked by the common CV selection helper.
+    A fixed-split source does not contain the required complete checkpoint set.
+    """
+    if isinstance(k, bool) or not isinstance(k, int) or k < 2:
+        raise ValueError("CV initialization requires at least two folds")
+    settings: dict[int, InitializationConfig] = {}
+    for index in range(k):
+        try:
+            initialization = InitializationConfig.from_run(
+                run_dir, fold=index, freeze_backbone=freeze_backbone,
+            )
+        except FileNotFoundError as error:
+            raise ValueError(
+                f"Source run has no committed checkpoint for fold {index}; "
+                "use a completed source CV run from notebook 01 (K_FOLD_COMPATIBLE=True) or 02"
+            ) from error
+        settings[index] = initialization
+    return settings
+
+
 def backbone(model: Any, *, finest_only: bool = False) -> Any:
     """Extract decoder features, optionally using the shared finest boundary.
 

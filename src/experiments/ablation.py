@@ -12,9 +12,9 @@ import numpy as np
 import pandas as pd
 
 from .config import ExperimentConfig, InitializationConfig
-from .data import PreparedData, SubjectSplit, fold_summary, make_pretrained_cv_splits, resolve_training_split
+from .data import PreparedData, SubjectSplit, TrainingSelection, resolve_training_selection
 from .training import callback_configuration, run_cross_validation, run_training
-from ..evaluation.k_fold import FoldSplit, TrainingResult, load_fold_splits
+from ..evaluation.k_fold import FoldSplit, TrainingResult
 
 
 ARCHITECTURE_PARAMETERS: tuple[str, ...] = (
@@ -155,51 +155,24 @@ class StudyVariant(Protocol):
         ...
 
 
-@dataclass(frozen=True)
-class StudySelection:
-    """One fixed split or outer-fold selection and its animal/scan counts."""
-
-    split: SubjectSplit | None
-    folds: list[FoldSplit] | None
-    summary: pd.DataFrame
-
-
 def study_selection(
     data: PreparedData, *, mode: Literal["fixed_split", "cross_validation"],
     study_dir: Path, split_file: Path | None = None, fold_file: Path | None = None,
     resume: bool = False, initializations: Sequence[InitializationConfig] | None = None,
     initializations_by_fold: Mapping[int, Sequence[InitializationConfig]] | None = None,
-) -> StudySelection:
+) -> TrainingSelection:
     """Generate or load matched animals, checking explicit files during resumption."""
-    saved = Path(study_dir) / "splits.json"
-    if mode == "fixed_split":
-        if fold_file is not None:
-            raise ValueError("Use split_file for fixed-split studies")
-        resume_dir: Path | None = None
-        if resume:
-            resume_dir = Path(study_dir)
-        split = resolve_training_split(
-            data, resume_run=resume_dir, split_file=split_file, initializations=initializations,
-        )
-        return StudySelection(split=split, folds=None, summary=data.split_summary(split))
-
-    if mode != "cross_validation" or split_file is not None:
-        raise ValueError("Use cross_validation and fold_file for grouped CV studies")
-    config = data.config
-    animals = data.subjects.subject_ids
+    if mode not in ("fixed_split", "cross_validation"):
+        raise ValueError("Unknown study mode")
+    k_fold: bool = mode == "cross_validation"
+    resume_dir: Path | None = None
     if resume:
-        folds = load_fold_splits(saved, animals, config.training.k)
-        if fold_file is not None:
-            requested = load_fold_splits(fold_file, animals, config.training.k)
-            if requested != folds:
-                raise ValueError("Requested folds differ from the resumed study")
-    elif fold_file is not None:
-        folds = load_fold_splits(fold_file, animals, config.training.k)
-    else:
-        folds = make_pretrained_cv_splits(data, initializations_by_fold=initializations_by_fold)
-    if any(not fold.test_ids for fold in folds):
-        raise ValueError("Matched CV requires independent outer holdouts")
-    return StudySelection(split=None, folds=folds, summary=fold_summary(folds, data.subjects))
+        resume_dir = Path(study_dir)
+    return resolve_training_selection(
+        data, k_fold=k_fold, resume_run=resume_dir,
+        split_file=split_file, fold_file=fold_file, initializations=initializations,
+        initializations_by_fold=initializations_by_fold,
+    )
 
 
 def run_ablation(

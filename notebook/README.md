@@ -16,6 +16,10 @@ relative to the lesion/craniotomy and retain their IDs under a paired reflection
 Every training/study notebook exposes actual Keras callbacks in a separate
 configuration cell and passes the list explicitly to training. Fixed-split runs
 use LR reduction, TensorBoard histograms, early stopping and CSV logging.
+Notebooks 01/03/05 also expose `K_FOLD_COMPATIBLE=False`: enable it to run every
+outer fold with the same complete configuration. Studies 07/07f/08 expose the
+same boolean to select CV. The corresponding callback cell then defaults to
+LR reduction only; source CV checkpoints can be reused for matching MouseFull folds.
 K-Fold uses only LR reduction by default, with no early stopping; study notebooks
 follow their selected `MODE`. Edit the constructors/list directly to change this.
 Relative logging paths are scoped to each run/fold. Fresh callback copies prevent
@@ -26,11 +30,11 @@ and restores best weights before evaluation, so EarlyStopping itself uses
 
 | Notebook | Responsibility | Status |
 |---|---|---|
-| [01_tbi_mouse_training.ipynb](01_tbi_mouse_training.ipynb) | D1 fixed-split training and test-volume evaluation | Implemented; renamed from `01_training` without rewriting saved cells |
+| [01_tbi_mouse_training.ipynb](01_tbi_mouse_training.ipynb) | D1 training and volume evaluation; optional full CV for reusable pretraining sources | Implemented; `K_FOLD_COMPATIBLE` switch |
 | [02_tbi_mouse_kfold.ipynb](02_tbi_mouse_kfold.ipynb) | D1 grouped CV with separate checkpoint validation and outer holdouts | Implemented |
-| [03_rat_finetuning.ipynb](03_rat_finetuning.ipynb) | D2 fixed-split fine-tuning and independent test evaluation | Implemented |
+| [03_rat_finetuning.ipynb](03_rat_finetuning.ipynb) | D2 fine-tuning and independent evaluation; optional grouped outer CV | Implemented; `K_FOLD_COMPATIBLE` switch |
 | [04_rat_kfold.ipynb](04_rat_kfold.ipynb) | Historical leave-one-rat-out fine-tuning with all longitudinal scans | Implemented |
-| [05_mouse_full_training.ipynb](05_mouse_full_training.ipynb) | D1+D3 training and test-volume evaluation, eleven classes and partial labels | Implemented |
+| [05_mouse_full_training.ipynb](05_mouse_full_training.ipynb) | D1+D3 training and volume evaluation, eleven classes and partial labels; optional full CV | Implemented; `K_FOLD_COMPATIBLE` switch |
 | [06_mouse_full_kfold.ipynb](06_mouse_full_kfold.ipynb) | D1+D3 grouped CV with anatomy-balanced outer folds and separate checkpoint validation | Implemented |
 | [07_ablation.ipynb](07_ablation.ipynb) | Matched residual, attention, multiscale, head-fusion and downsampling ablations; optional loss/training rows | Implemented |
 | [07f_ablation.ipynb](07f_ablation.ipynb) | MouseFull component/classifier ablations with eleven classes; optional v1/v3 loss comparison | Implemented |

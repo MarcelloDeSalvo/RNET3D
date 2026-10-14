@@ -149,7 +149,7 @@ def test_visible_notebook_lists_match_original_single_and_cv_policies():
         config = configs[0]
         assert 'default_callbacks=False' in config
         source = next(source for source in sources if 'callbacks: list[tf.keras.callbacks.Callback]' in source)
-        namespace = {'MODE': 'fixed_split'}
+        namespace = {'MODE': 'fixed_split', 'K_FOLD_COMPATIBLE': False}
         exec(source, namespace)
         callbacks = namespace['callbacks']
         assert callbacks[0].factor == 0.5 and callbacks[0].patience == 10 and callbacks[0].min_lr == 1e-7
@@ -163,6 +163,10 @@ def test_visible_notebook_lists_match_original_single_and_cv_policies():
             assert callbacks[2].patience == 20
         if path.name.startswith(('07_', '07f_', '08_')):
             namespace['MODE'] = 'cross_validation'
+            exec(source, namespace)
+            assert len(namespace['callbacks']) == 1
+        if path.name.startswith(('01_', '03_', '05_')):
+            namespace['K_FOLD_COMPATIBLE'] = True
             exec(source, namespace)
             assert len(namespace['callbacks']) == 1
         calls = [source for source in sources if any(name in source for name in [
