@@ -218,12 +218,11 @@ it does not assert that zero source voxels are verified background. Dice smoothi
 uses `(2 * intersection + smooth) / (union + smooth)` so correctly empty masks
 have zero loss. Legacy loss computation remains unchanged.
 
-MouseFull notebooks 05/06/07f explicitly record `gradient_fix_version=2` in
-`LossConfig`. Older saved partial-label configurations without this marker are
-version 1 and can be evaluated or used for initialization, but cannot resume
-fitting or an ablation/comparison study under the changed objective. Start a new
-run for retraining. Configured version-1 objectives are refused by training
-preparation/compilation; offline preparation accepts them without compiling.
+MouseFull configurations explicitly record `gradient_fix_version`. Both versions
+are supported: 1 restores the original background-inclusive correction, while 2
+uses foreground-only supervision. Saved gradient-fix configurations without this
+field identify version 1 and can resume under that same objective. Resume/study
+guards require a new run whenever the objective version changes.
 
 ## Preprocessing and splits
 
@@ -603,3 +602,19 @@ The original fixed-split TBI notebook used zero brain-loss weight. Set
 model architecture or inference outputs. Weights are saved in the experiment and
 study contracts, so changing them requires a new run rather than resuming. Saved
 configurations without these fields retain equal weights.
+
+## Selecting the partial-label loss version
+
+Set `LossConfig(regions="dice_ce_gradient_fix", gradient_fix_version=1)` to train
+with the original background-inclusive gradient correction. Version 2 remains
+available and remains the configuration/direct-loss default. Both use raw logits
+and mask unavailable classes before softmax. Fixed-split, K-Fold and study
+runners share this selection. Legacy saved configurations without an objective
+version load as version 1. A resume must match its saved version; to compare v1
+against an existing v2 run, start a new run (`RESUME_RUN=None`) and retain the same
+cohort, initialization and evaluation/preprocessing settings.
+
+The normalized dataset's descriptive `label_mapping.network_label` values do
+not define the experiment's channel order. Training reads original `mask_value`
+IDs and applies `LabelConfig.mapping`. See [the MouseFull mapping audit](mouse_full_mapping_audit.md)
+for the contralateral/ipsilateral ventricle trace and real-data checks.

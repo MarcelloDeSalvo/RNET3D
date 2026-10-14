@@ -161,7 +161,8 @@ def test_older_study_contract_can_resume_with_new_declarations(experiment, tmp_p
         ablation.run_ablation(data, variants, study_dir=folder, split=split, resume=True)
 
 
-def test_old_partial_label_objective_loads_for_evaluation_but_cannot_train(experiment):
+def test_old_partial_label_objective_loads_and_trains_with_version_one(experiment):
+    import tensorflow as tf
     from src.experiments.training import build_model
 
     payload = experiment.to_dict()
@@ -172,10 +173,18 @@ def test_old_partial_label_objective_loads_for_evaluation_but_cannot_train(exper
     data = prepare_data(old_config, require_training_loss=False)
     assert len(data.subjects.subject_ids) == 4
 
-    with pytest.raises(ValueError, match="objective changed"):
-        prepare_data(old_config)
-    with pytest.raises(ValueError, match="objective changed"):
-        build_model(old_config)
+    training_data = prepare_data(old_config)
+    assert len(training_data.subjects.subject_ids) == 4
+    model = build_model(old_config)
+    assert model.output_names[0] == "regions_logits"
+
+    targets = tf.constant([[[[[1., 0., -1.]]]]])
+    logits = tf.constant([[[[[0., 0., 100.]]]]])
+    from src.evaluation.losses import diceCELoss_gradient_fix
+
+    expected = diceCELoss_gradient_fix(gamma=0.8, batch_wise=True, version=1)
+    actual = model.loss["regions_logits"](targets, logits)
+    np.testing.assert_allclose(actual.numpy(), expected(targets, logits).numpy())
 
 
 def test_resume_rejects_silent_partial_label_loss_version_changes(experiment, tmp_path):
@@ -188,6 +197,24 @@ def test_resume_rejects_silent_partial_label_loss_version_changes(experiment, tm
     payload["loss"].pop("gradient_fix_version")
     path.write_text(json.dumps(payload), encoding="utf-8")
 
+    with pytest.raises(ValueError, match="objective changed"):
+        validate_resume(data, tmp_path)
+
+
+def test_old_version_one_resume_is_accepted_and_reverse_switch_is_rejected(experiment, tmp_path):
+    from src.experiments.training import save_provenance, validate_resume
+
+    version_one = replace(experiment, loss=replace(experiment.loss, gradient_fix_version=1))
+    data = prepare_data(version_one)
+    save_provenance(version_one, data, tmp_path)
+    path = tmp_path / "experiment.json"
+    payload = json.loads(path.read_text())
+    payload["loss"].pop("gradient_fix_version")
+    path.write_text(json.dumps(payload))
+    validate_resume(data, tmp_path)
+
+    payload["loss"]["gradient_fix_version"] = 2
+    path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="objective changed"):
         validate_resume(data, tmp_path)
 

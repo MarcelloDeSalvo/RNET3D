@@ -273,11 +273,12 @@ def test_merged_class_is_unavailable_if_only_one_side_is_annotated(experiment):
     assert np.all(targets[0][..., 2] == -1)
 
 
-@pytest.mark.parametrize("roi_loss", ["dice_ce", "dice_ce_gradient_fix"])
-def test_tiny_training_exports_probabilities_and_held_out_metrics(experiment, roi_loss):
+@pytest.mark.parametrize("roi_loss,version", [("dice_ce", 2), ("dice_ce_gradient_fix", 1), ("dice_ce_gradient_fix", 2)])
+def test_tiny_training_exports_probabilities_and_held_out_metrics(experiment, roi_loss, version):
     import tensorflow as tf
     from src.experiments.training import run_training
 
+    experiment = replace(experiment, loss=replace(experiment.loss, gradient_fix_version=version))
     if roi_loss == "dice_ce":
         # Synthetic absent CC structures are declared annotated for this case.
         dataset = DatasetSpec(available_labels=(0, 1, 2))
@@ -585,7 +586,8 @@ def test_annotation_summary_counts_declarations_instead_of_voxels(experiment):
     assert coverage["TotalScans"].eq(5).all()
 
 
-def test_tiny_mouse_full_run_combines_partial_cohorts_and_classifier(experiment):
+@pytest.mark.parametrize("version", [1, 2])
+def test_tiny_mouse_full_run_combines_partial_cohorts_and_classifier(experiment, version):
     """Fit/export the three-head partial-label workflow on tiny mixed mouse data."""
     import shutil
     import tensorflow as tf
@@ -612,7 +614,8 @@ def test_tiny_mouse_full_run_combines_partial_cohorts_and_classifier(experiment)
              "il-CC", "il-V", "il-Hipp", "il-Ctx", "tV")
     settings = replace(experiment.data, datasets=(DatasetSpec(name="D1"), DatasetSpec(name="D3")))
     model = ModelConfig(architecture="3drnet", filters=(2, 4, 8, 16, 32), classifier=True)
-    config = replace(experiment, data=settings, labels=LabelConfig(mapping=mapping, names=names), model=model)
+    loss = replace(experiment.loss, gradient_fix_version=version)
+    config = replace(experiment, data=settings, labels=LabelConfig(mapping=mapping, names=names), model=model, loss=loss)
     data = prepare_data(config)
     coverage = data.annotation_summary()
     lesion = coverage.loc[(coverage["Dataset"] == "D3") & (coverage["Class"] == "Lesion")]

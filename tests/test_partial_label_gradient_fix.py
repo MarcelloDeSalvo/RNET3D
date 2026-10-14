@@ -1,5 +1,8 @@
 """Test the separate raw-logit partial-label objective and its gradient contract."""
 
+import json
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -8,15 +11,43 @@ tf = pytest.importorskip("tensorflow")
 from src.evaluation.losses import diceCELoss, diceCELoss_gradient_fix, masked_softmax_gradient_fix
 
 
+V1_BASELINES = json.loads(
+    (Path(__file__).parent / "fixtures" / "partial_label_v1_baselines.json").read_text()
+)["records"]
+
+
+@pytest.mark.parametrize("baseline", V1_BASELINES)
+def test_version_one_matches_frozen_original_values_and_gradients(baseline):
+    """Restore commit 7a94419's objective, including background/unknown cases."""
+    target = tf.constant(baseline["targets"], dtype=tf.float32)
+    logits = tf.Variable(baseline["logits"], dtype=tf.float32)
+    objective = diceCELoss_gradient_fix(
+        gamma=0.8, batch_wise=baseline["batch_wise"],
+        focal_gamma=baseline["focal_gamma"], version=1,
+    )
+    with tf.GradientTape() as tape:
+        value = objective(target, logits)
+    gradient = tape.gradient(value, logits)
+    np.testing.assert_allclose(value.numpy(), baseline["value"], rtol=1e-6, atol=1e-7)
+    np.testing.assert_allclose(gradient.numpy(), baseline["gradient"], rtol=1e-6, atol=1e-7)
+
+
+@pytest.mark.parametrize("version", [0, 3, True, "1"])
+def test_invalid_objective_versions_are_rejected(version):
+    with pytest.raises(ValueError, match="version"):
+        diceCELoss_gradient_fix(version=version)
+
+
 @pytest.mark.parametrize("batch_wise", [False, True])
 @pytest.mark.parametrize("focal_gamma", [None, 2.0])
 @pytest.mark.parametrize("compiled", [False, True])
-def test_unavailable_logits_have_zero_gradient_and_no_effect(batch_wise, focal_gamma, compiled):
+@pytest.mark.parametrize("version", [1, 2])
+def test_unavailable_logits_have_zero_gradient_and_no_effect(batch_wise, focal_gamma, compiled, version):
     """Check exact zero gradients and robustness to extreme ignored logits."""
     target = tf.constant([[[[[0., 1., -1.], [1., 0., -1.]]]]])
     values = np.array([[[[[0.3, -0.2, 0.8], [-0.3, 0.6, 0.1]]]]], dtype=np.float32)
     logits = tf.Variable(values)
-    objective = diceCELoss_gradient_fix(gamma=0.8, batch_wise=batch_wise, focal_gamma=focal_gamma)
+    objective = diceCELoss_gradient_fix(gamma=0.8, batch_wise=batch_wise, focal_gamma=focal_gamma, version=version)
     if compiled:
         objective = tf.function(objective)
 

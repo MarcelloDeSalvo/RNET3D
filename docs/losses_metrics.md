@@ -102,7 +102,28 @@ The original refactor did not add a new objective or launch training. The
 subsequent opt-in correction is described below; the original loss and metrics
 remain available with their existing computations.
 
-## Version-2 foreground partial-label gradient correction
+## Versioned partial-label gradient correction
+
+Select version 1 explicitly in an experiment:
+
+```python
+loss_settings = LossConfig(
+    regions="dice_ce_gradient_fix", gradient_fix_version=1,
+    gamma=0.8, brain_alpha=0.6, batch_wise=True,
+    regions_weight=1.0, brain_weight=1.0, classifier_weight=1.0,
+)
+```
+
+For a direct loss call, pass `version=1` to `diceCELoss_gradient_fix`.
+Version 1 restores the original correction's background-inclusive Dice and CE,
+class-mean CE scaling, doubled Dice smoothing and positive-target voxel validity.
+Unknown voxels with no positive available target contribute no loss. Background
+is supervised only if its target channel is available. Unavailable logits still
+have exactly zero ROI loss derivative. Frozen values and gradients from commit
+`7a94419` verify restoration of the original version-1 computation.
+
+The following describes version 2, whose direct-call default and computation
+remain unchanged:
 
 `diceCELoss_gradient_fix` in `src/evaluation/losses.py` consumes **raw logits**.
 It replaces unavailable logits with negative infinity before softmax, removing
@@ -171,10 +192,11 @@ The experiment builder logs `regions_logits_mean_dice` and
 gradients, network weights and inference outputs remain unchanged. This is a
 patch-level training monitor, not a substitute for full-volume animal Dice.
 
-New experiments record `LossConfig.gradient_fix_version=2`. Older saved
-`dice_ce_gradient_fix` configurations without this field are identified as
-version 1: offline evaluation and backbone initialization remain available,
-but fitting/resuming under the revised objective requires a new run/study.
+`LossConfig.gradient_fix_version` selects the implemented objective: both 1 and 2
+are supported for training, evaluation and initialization. The default remains 2.
+Older saved `dice_ce_gradient_fix` configurations without this field are identified
+as version 1 and can resume with that objective. Changing versions requires a new
+run/study; the resume checks reject mismatched versions in both directions.
 No old checkpoint is retroactively corrected by the new loss. Legacy
 `dice_ce` configurations still load and resume under their existing objective.
 

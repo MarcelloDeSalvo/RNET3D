@@ -238,8 +238,8 @@ class LossConfig:
     Task weights scale active head losses only; metrics retain their computation.
 
     gradient_fix_version=2 selects foreground-only Dice/CE with full-volume ROI
-    negatives. Version 1 identifies older saved objectives for evaluation and
-    initialization only; it cannot silently continue training under version 2.
+    negatives. Version 1 restores the earlier background-inclusive objective.
+    A resumed run must retain its saved objective version.
     """
 
     regions: Literal["dice_ce", "dice_ce_gradient_fix"] = "dice_ce"
@@ -268,9 +268,10 @@ class LossConfig:
             raise ValueError("At least one active task loss weight must be positive")
 
     def validate_for_training(self) -> None:
-        """Require a new run when the saved partial-label objective is obsolete."""
-        if self.regions == "dice_ce_gradient_fix" and self.gradient_fix_version != 2:
-            raise ValueError("Partial-label loss objective changed; start a new version-2 run. Older weights remain usable for evaluation or initialization")
+        """Require an implemented version without silently changing saved objectives."""
+        version = self.gradient_fix_version
+        if isinstance(version, bool) or not isinstance(version, int) or version not in (1, 2):
+            raise ValueError("Gradient-fix objective version must be one or two")
 
 
 @dataclass(frozen=True)

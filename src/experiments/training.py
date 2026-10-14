@@ -102,6 +102,7 @@ def build_model(config: ExperimentConfig) -> Any:
     roi_head: str = "regions"
     metrics: dict[str, list[Any]] = {}
     if loss_settings.regions == "dice_ce_gradient_fix":
+        loss_parameters["version"] = loss_settings.gradient_fix_version
         roi_loss = diceCELoss_gradient_fix(**loss_parameters)
         roi_head = "regions_logits"
         roi_dice = PartialLabelDice(num_classes=num_classes, from_logits=True)
