@@ -145,8 +145,12 @@ See [Network blocks and ablation preparation](docs/networks.md) for corrected
 activation/dropout behavior, residual controls, and network regression checks.
 
 Open [Check attention](notebook/check_attention.ipynb) to inspect trained spatial
-gates and optional classifier Grad-CAM over MRI slices from saved checkpoints
+gates and optional classifier or segmentation Grad-CAM over MRI slices from saved checkpoints
 or older models. See the [attention guide](docs/attention.md) for loading and interpretation.
+
+Open [Check feature space](notebook/check_feature_space.ipynb) to explore encoder
+features with interactive PCA or optional UMAP, colored by cohort, condition,
+modality or timepoint. See the [feature-space guide](docs/feature_space.md).
 
 See [Losses, metrics and partial-label gradients](docs/losses_metrics.md) for
 the numerical refactor checks and the confirmed coupling through softmax.

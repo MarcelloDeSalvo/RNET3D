@@ -1,4 +1,4 @@
-"""Inspect spatial gates and classifier Grad-CAM without changing trained models."""
+"""Inspect spatial gates and classifier/segmentation Grad-CAM in trained models."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ class AttentionResult:
 
 @dataclass(frozen=True)
 class GradCAMResult:
-    """Positive classifier attribution, normalized within one inspected patch."""
+    """Positive target attribution, normalized within one inspected patch."""
 
     image: nib.Nifti1Image
     heatmap: nib.Nifti1Image
@@ -261,14 +261,26 @@ def classifier_gradcam(
     gradients = tape.gradient(score, activations)
     if gradients is None:
         raise ValueError("The selected feature tensor has no gradient connection to the classifier")
+    metadata = {
+        "Target": resolved_target, "FeatureLayer": feature_layer,
+        "TBIPatchProbability": float(probability.numpy()), "TBILogit": float(logit.numpy()),
+    }
+    return _gradcam_result(image, activations, gradients, score, metadata)
+
+
+def _gradcam_result(image: nib.Nifti1Image, activations: Any, gradients: Any, score: Any,
+                    metadata: dict[str, Any]) -> GradCAMResult:
+    """Apply shared 3D Grad-CAM reduction and retain its unnormalized diagnostics."""
+    import tensorflow as tf
+
     gradients = tf.cast(gradients[0], tf.float32)
     activations = tf.cast(activations[0], tf.float32)
     weights = tf.reduce_mean(gradients, axis=(0, 1, 2))
     signed = tf.reduce_sum(activations * weights, axis=-1)
     raw: np.ndarray = signed.numpy()
     gradient_values: np.ndarray = gradients.numpy()
-    if not np.isfinite(raw).all() or not np.isfinite(gradient_values).all() or not np.isfinite(float(logit.numpy())):
-        raise ValueError("Grad-CAM requires finite logits, features and gradients")
+    if not np.isfinite(raw).all() or not np.isfinite(gradient_values).all() or not np.isfinite(float(score.numpy())):
+        raise ValueError("Grad-CAM requires finite scores, features and gradients")
     native: np.ndarray = np.maximum(raw, 0)
     peak: float = float(native.max())
     status: str = "no_positive_attribution"
@@ -277,19 +289,146 @@ def classifier_gradcam(
         status = "ok"
     if not np.any(gradient_values):
         status = "zero_gradient"
-    factors: tuple[float, ...] = tuple(size / coarse for size, coarse in zip(values.shape, native.shape))
+    factors: tuple[float, ...] = tuple(size / coarse for size, coarse in zip(image.shape, native.shape))
     lifted: np.ndarray = zoom(native, factors, order=1, mode="nearest", prefilter=False, grid_mode=True)
     header = image.header.copy()
     header.set_data_dtype(np.float32)
     heatmap = nib.Nifti1Image(lifted, image.affine, header)
     summary = pd.DataFrame([{
-        "Target": resolved_target, "FeatureLayer": feature_layer, "NativeShape": native.shape,
-        "TBIPatchProbability": float(probability.numpy()), "TBILogit": float(logit.numpy()),
+        **metadata, "NativeShape": native.shape,
         "TargetScore": float(score.numpy()), "GradientL1": float(np.abs(gradient_values).sum()),
         "RawMinimum": float(raw.min()), "RawMaximum": float(raw.max()), "PositivePeak": peak,
         "Status": status,
     }])
     return GradCAMResult(image=image, heatmap=heatmap, native_map=native, summary=summary)
+
+
+def _segmentation_logits(model: Any, head: str) -> tuple[Any, str]:
+    """Expose existing raw segmentation scores without changing activations."""
+    import tensorflow as tf
+
+    name: str = head
+    if head == "regions" and "regions_logits" in model.output_names:
+        name = "regions_logits"
+    if name not in model.output_names:
+        raise ValueError(f"The model has no {head} output")
+    layer = model.get_layer(name)
+    if not isinstance(layer, tf.keras.layers.Activation):
+        raise ValueError("Supported segmentation heads expose their final activation as a separate layer")
+    activation: str = layer.get_config()["activation"]
+    if activation in ("softmax", "sigmoid"):
+        return layer.input, name
+    if name == "regions_logits" and activation == "linear":
+        return layer.output, name
+    raise ValueError("Expected a softmax/sigmoid segmentation head or linear regions_logits")
+
+
+def segmentation_feature_table(model: Any, *, head: Literal["regions", "brain_mask"] = "regions") -> pd.DataFrame:
+    """List spatial ancestors of a segmentation head, preferring finest decoder features."""
+    import tensorflow as tf
+
+    logits, _ = _segmentation_logits(model, head)
+    branch = tf.keras.Model(inputs=model.inputs, outputs=logits)
+    preferred: str | None = None
+    projection: str = "r_output_1"
+    if head == "brain_mask":
+        projection = "b_output_1"
+    names = {layer.name for layer in branch.layers}
+    if projection in names:
+        preferred = branch.get_layer(projection).input._keras_history.layer.name
+    else:
+        producer = logits._keras_history.layer
+        if isinstance(producer, tf.keras.layers.Activation):
+            producer = producer.input._keras_history.layer
+        if isinstance(producer, tf.keras.layers.Conv3D):
+            preferred = producer.input._keras_history.layer.name
+    rows: list[dict[str, Any]] = []
+    for layer in branch.layers:
+        tensors = tf.nest.flatten(layer.output)
+        if len(tensors) == 1 and len(tensors[0].shape) == 5 and not isinstance(layer, tf.keras.layers.InputLayer):
+            rows.append({"Layer": layer.name, "Type": type(layer).__name__, "Shape": tuple(tensors[0].shape)})
+    if not rows:
+        raise ValueError("No spatial features found on this segmentation path")
+    table = pd.DataFrame(rows)
+    if preferred not in set(table["Layer"]):
+        preferred = rows[-1]["Layer"]
+    table["Default"] = table["Layer"].eq(preferred)
+    return table
+
+
+def segmentation_gradcam(
+    model: Any, image: nib.Nifti1Image, *, class_index: int = 1,
+    head: Literal["regions", "brain_mask"] = "regions",
+    mask_mode: Literal["all", "prediction", "provided"] = "all",
+    spatial_mask: nib.Nifti1Image | None = None, feature_layer: str | None = None,
+) -> GradCAMResult:
+    """Explain a selected class's mean raw logit over fixed target voxels.
+
+    all targets the whole patch. prediction fixes voxels to the class argmax
+    (positive sigmoid brain for brain_mask). provided requires an aligned binary
+    mask whose annotation validity is established by the caller. Empty targets
+    are rejected; missing GT is never interpreted as known absence. No softmax
+    probabilities are summed across classes. Models without a classifier work.
+    """
+    import tensorflow as tf
+
+    if head not in ("regions", "brain_mask") or mask_mode not in ("all", "prediction", "provided"):
+        raise ValueError("Choose a supported segmentation head and all/prediction/provided target voxels")
+    logits_tensor, output_name = _segmentation_logits(model, head)
+    classes: int = int(logits_tensor.shape[-1])
+    if isinstance(class_index, bool) or not isinstance(class_index, int) or not 0 <= class_index < classes:
+        raise ValueError(f"class_index must be a model channel in [0, {classes}); brain_mask uses channel 0")
+    candidates = segmentation_feature_table(model, head=head)
+    if feature_layer is None:
+        feature_layer = candidates.loc[candidates["Default"], "Layer"].iloc[0]
+    if feature_layer not in set(candidates["Layer"]):
+        raise ValueError("Select a spatial feature on the chosen segmentation path")
+    values = image.get_fdata(dtype=np.float32)
+    if len(model.inputs) != 1 or values.ndim != 3 or not np.isfinite(values).all():
+        raise ValueError("Provide a finite 3D MRI patch for a single-input model")
+    expected = model.input_shape[1:4]
+    if any(size is not None and size != actual for size, actual in zip(expected, image.shape)):
+        raise ValueError(f"Expected a preprocessed MRI patch of shape {expected}")
+    provided: np.ndarray | None = None
+    if mask_mode == "provided":
+        if spatial_mask is None or spatial_mask.shape != image.shape or not np.allclose(spatial_mask.affine, image.affine, rtol=0, atol=1e-6):
+            raise ValueError("Provide a binary target mask sharing the MRI patch grid")
+        provided = spatial_mask.get_fdata()
+        if not np.isin(provided, [0, 1]).all():
+            raise ValueError("The provided target mask must be finite and binary")
+    elif spatial_mask is not None:
+        raise ValueError("A supplied mask requires mask_mode=provided")
+    channels = int(model.input_shape[-1])
+    batch = np.repeat(values[None, ..., None], channels, axis=-1)
+    inputs = tf.convert_to_tensor(batch)
+    feature_tensor = model.get_layer(feature_layer).output
+    probe = tf.keras.Model(inputs=model.inputs, outputs=[feature_tensor, logits_tensor])
+    with tf.GradientTape() as tape:
+        tape.watch(inputs)
+        activations, logits = probe(inputs, training=False)
+        logits = tf.cast(logits[0], tf.float32)
+        target_mask = np.ones(image.shape, dtype=np.float32)
+        if mask_mode == "provided":
+            target_mask = provided.astype(np.float32)
+        elif mask_mode == "prediction":
+            if head == "brain_mask":
+                target_mask = (logits.numpy()[..., 0] > 0).astype(np.float32)
+            else:
+                target_mask = (np.argmax(logits.numpy(), axis=-1) == class_index).astype(np.float32)
+        voxel_count = int(target_mask.sum())
+        if voxel_count == 0:
+            raise ValueError("No target voxels: choose all, a nonempty prediction, or a genuinely annotated nonempty mask")
+        fixed_mask = tf.stop_gradient(tf.convert_to_tensor(target_mask))
+        score = tf.reduce_sum(logits[..., class_index] * fixed_mask) / voxel_count
+    gradients = tape.gradient(score, activations)
+    if gradients is None:
+        raise ValueError("Selected features are disconnected from this segmentation target")
+    metadata = {
+        "Target": f"{head} channel {class_index}", "Head": head, "Output": output_name,
+        "ClassIndex": class_index, "FeatureLayer": feature_layer,
+        "MaskMode": mask_mode, "TargetVoxels": voxel_count, "ScoreReduction": "mean_logit",
+    }
+    return _gradcam_result(image, activations, gradients, score, metadata)
 
 
 def _spatial_maps_figure(
@@ -400,7 +539,7 @@ def gradcam_figure(
     result: GradCAMResult, *, labels: nib.Nifti1Image | None = None, region: int | None = 1,
     axis: int = 2, max_slices: int = 24, opacity: float = 0.6,
 ) -> Any:
-    """Show normalized positive classifier attribution with an explicit target."""
+    """Show normalized positive classifier/segmentation attribution and its target."""
     metadata = result.summary.iloc[0]
     name: str = f"Grad-CAM for {metadata['Target']}"
     maps: dict[str, nib.Nifti1Image] = {name: result.heatmap}

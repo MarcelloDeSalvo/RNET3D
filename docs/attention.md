@@ -54,7 +54,7 @@ attention maps, evaluate segmentation accuracy or infer unavailable ground truth
 
 ## Optional classifier Grad-CAM
 
-The final notebook section exposes `RUN_CLASSIFIER_GRADCAM=False`. Enable it to
+The classifier section exposes `RUN_CLASSIFIER_GRADCAM=False`. Enable it to
 explain one patch's binary classifier output, reusing its preprocessed MRI and
 optional original-ID ROI contours. No compilation or training is performed.
 `GRADCAM_TARGET` selects `"TBI"`, `"SHAM"`, or `"predicted"`; predicted uses TBI
@@ -100,3 +100,46 @@ legacy exports were also loaded and inspected on synthetic patches read-only.
 Grad-CAM tests additionally check analytical opposite-class evidence, saturated
 sigmoids, frozen models, zero maps, disconnected features, unchanged state,
 classifier-free models and the optional notebook cells.
+
+## Optional segmentation Grad-CAM
+
+Enable `RUN_SEGMENTATION_GRADCAM` in the final section. It works with or without
+the auxiliary classifier and attention gates. Choose `SEGMENTATION_HEAD="regions"`
+and a **model channel** in `SEGMENTATION_CLASS_INDEX`, or choose `"brain_mask"`
+(channel zero). The displayed channel table maps the saved model's channels to
+original ROI IDs, including merged classes. For complete legacy models without
+configuration, set `SEGMENTATION_LEGACY_GT_IDS` explicitly for the chosen channel.
+
+The target is the selected channel's **mean raw logit** over fixed voxels:
+
+- `"all"`: the whole inspected patch, including when the region is not predicted.
+- `"prediction"`: that class's argmax voxels, or positive sigmoid voxels for brain.
+- `"provided"`: an aligned binary target mask. The notebook constructs it from
+  available ROI annotations, with original IDs mapped to the selected channel.
+
+Prediction masks are fixed before differentiation. Empty targets raise an error;
+unannotated regions are not treated as empty GT. Normalized metadata controls GT
+availability; explicit file inputs require the user to establish coverage. The
+notebook's provided mode uses ROI annotations; the module also accepts an aligned
+binary brain mask. No source labels or output activations are modified.
+
+`segmentation_feature_table` defaults to the finest decoder features preceding
+the ROI/brain projection. Other spatial ancestors of the selected head are listed
+for explicit selection. Both ordinary softmax models and linear `regions_logits`
+fitting graphs expose their existing pre-activation scores. The implementation
+adapts [SEG-GRAD-CAM](https://arxiv.org/abs/2002.11434) to 3D and uses a mean instead
+of a sum: for a fixed nonempty target this rescales the raw attribution by its
+voxel count and leaves the maximum-normalized display unchanged.
+
+Channel weights are mean spatial gradients, followed by the shared positive
+Grad-CAM reduction and MRI-grid display. Diagnostics record the target, voxel
+count, feature layer, raw score and map status. The independent Plotly slice
+controls use `SEGMENTATION_VIEW_AXIS`, `SEGMENTATION_MAX_SLICES` and opacity.
+These are patch attributions, not full-volume probabilities. Spatial gradient
+averaging can lose localization detail and does not restrict the heatmap to the
+target mask. A plausible map does not validate unannotated anatomy or establish
+causal reasoning. Use the existing evaluation reports for quantitative accuracy.
+
+Analytical tests check opposite-class maps, fixed prediction/annotation targets,
+empty targets, channel bounds and geometry. Repository 3DR-Net and U-Net fitting
+graphs are checked without training or changing weights/batch-normalization state.
