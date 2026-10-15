@@ -173,3 +173,18 @@ review tables preserve missing/empty statuses and never remove low-scoring
 animals. Input SHA256 hashes make the selected evidence auditable. The additional
 baseline experiments and independent D4 manual-volume analysis remain deferred.
 See [revision reporting](../docs/revision_reporting.md).
+
+New full-volume workbooks also separate anatomy-only versus lesion/brain-inclusive
+scores, condition-specific annotation coverage, acquisition/timepoint subgroups,
+participant/split counts and structure-size measurements. Notebook 10 displays
+these tables and a score-versus-GT-volume plot. Older result sources can attach
+an explicit metadata manifest; unknown metadata is not guessed.
+
+- [check_dataset_volumes.ipynb](check_dataset_volumes.ipynb): select any normalized
+  Dx folder for native annotated volumes, SHAM ventricle ratios, distributions,
+  and unclipped corrected/uncorrected lesion-volume exports.
+- [check_inter_rater.ipynb](check_inter_rater.ipynb): explicit paired-reader mask
+  manifests, spatial agreement and animal-level volume ICC, with the common RIA
+  reference for paired displays. Independent-reader masks are required.
+
+See [cohort and annotation reports](../docs/cohort_annotation_reports.md).

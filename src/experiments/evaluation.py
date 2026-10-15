@@ -88,6 +88,7 @@ def evaluate_patches(
 def export_evaluation_tables(
     patch_metrics: pd.DataFrame, full_volume_metrics: pd.DataFrame, folder: Path,
     *, classifier_predictions: pd.DataFrame | None = None,
+    manifest: pd.DataFrame | None = None, split_manifest: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Save separate native/full-volume tables and one workbook with both stages."""
     folder = Path(folder)
@@ -106,8 +107,14 @@ def export_evaluation_tables(
         if classifier_predictions is not None:
             classifiers = classifier_predictions
         extra_tables = export_classification_tables(classifiers, full_volume_metrics, folder)
+        from ..evaluation.reporting import evaluation_report
+
+        report = evaluation_report(full_volume_metrics, manifest=manifest, split_manifest=split_manifest)
+        report_tables = report.tables()
+        for name, table in report_tables.items():
+            table.to_csv(folder / f"{name}.csv", index=False)
         with pd.ExcelWriter(folder / "evaluation_metrics.xlsx") as writer:
-            workbook_tables = {**tables, **extra_tables}
+            workbook_tables = {**tables, **extra_tables, **report_tables}
             for name, table in workbook_tables.items():
                 table.to_excel(writer, sheet_name=name, index=False)
     return combined

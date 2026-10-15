@@ -19,6 +19,7 @@ from scipy.stats import wilcoxon
 
 from .statistics import AgreementConfig, agreement_table
 from .classification import healthy_lesion_report
+from .reporting import EvaluationReport, attach_scan_metadata, evaluation_report
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,7 @@ class MetricSource:
     role: str | None = None
     seed: int | None = None
     fold: int | None = None
+    manifest: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -106,6 +108,7 @@ class RevisionResult:
     costs: CostReport = field(default_factory=CostReport)
     sources: pd.DataFrame = field(default_factory=pd.DataFrame)
     analysis_config: RevisionConfig | None = None
+    reports: EvaluationReport = field(default_factory=lambda: evaluation_report(pd.DataFrame()))
 
 
 def _source_record(path: Path, kind: str) -> dict[str, str | int]:
@@ -362,6 +365,9 @@ def load_metric_sources(sources: Sequence[MetricSource]) -> pd.DataFrame:
         if table.loc[unavailable, "Value"].notna().any():
             raise ValueError("Unavailable annotations must have missing metric values")
         table["SourceFile"] = str(Path(source.path).resolve())
+        if source.manifest is not None:
+            manifest = pd.read_csv(source.manifest)
+            table = attach_scan_metadata(table, manifest)
         tables.append(table)
 
     if not tables:
@@ -542,12 +548,22 @@ def revision_report(
     source_records: list[dict[str, str | int]] = []
     for source in sources:
         source_records.append(_source_record(source.path, "full_volume_metrics"))
+        if source.manifest is not None:
+            source_records.append(_source_record(source.manifest, "scan_metadata"))
     for source in patch_sources:
         source_records.append(_source_record(source.path, "patch_metrics"))
     provenance: list[pd.DataFrame] = [pd.DataFrame(source_records)]
     if not costs.sources.empty:
         provenance.append(costs.sources)
     source_files: pd.DataFrame = pd.concat(provenance, ignore_index=True).drop_duplicates()
+    manifest_tables: list[pd.DataFrame] = []
+    for source in sources:
+        if source.manifest is not None:
+            manifest_tables.append(pd.read_csv(source.manifest))
+    inventory = pd.DataFrame()
+    if manifest_tables:
+        inventory = pd.concat(manifest_tables, ignore_index=True).drop_duplicates()
+    reports = evaluation_report(selected, manifest=inventory)
 
     return RevisionResult(
         raw=raw, animals=animals, summary=summary, statuses=statuses,
@@ -555,6 +571,7 @@ def revision_report(
         sham_lesion_animals=healthy_animals, sham_lesion_summary=healthy_summary,
         coverage=coverage, failure_cases=cases, patch_metrics=patches,
         costs=costs, sources=source_files, analysis_config=config,
+        reports=reports,
     )
 
 
@@ -583,6 +600,7 @@ def export_revision(result: RevisionResult, output_dir: Path, config: RevisionCo
         "metric_coverage": result.coverage, "failure_review": result.failure_cases,
         "native_patch_metrics": result.patch_metrics, "cost_measurements": result.costs.measurements,
         "cost_summary": result.costs.summary, "source_files": result.sources,
+        **result.reports.tables(),
     }
     for name, table in tables.items():
         table.to_csv(folder / f"{name}.csv", index=False)

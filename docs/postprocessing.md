@@ -56,7 +56,7 @@ with known sides, a brain hole and an island makes the default behavior visible.
 Select normalized annotations as a demonstration input or explicit MRI/ROI/brain
 files to inspect real outputs; specify whether the ROI file contains original
 or raw model IDs. All inputs first follow the shared RIA reference. Real inputs
-also use the configured units correction and 0.1 mm orthogonal grid.
+also use the configured units correction and 0.1 mm target spacing.
 
 Intermediate figures name their model/postprocessed class IDs explicitly. The
 last cell uses `FullVolumePostprocessor` with editable `PostprocessingConfig`

@@ -195,6 +195,10 @@ class SubjectIndex:
                 "Dataset": group[0], "SubjectID": scan.subject_id,
                 "OriginalID": scan.original_id, "Timepoint": scan.timepoint,
                 "Subgroup": scan.metadata.get("subgroup", ""),
+                "Condition": scan.metadata.get("condition", "unknown"),
+                "Species": scan.metadata.get("species", "unknown"),
+                "Strain": scan.metadata.get("strain", "unknown"),
+                "Protocol": scan.metadata.get("protocol", "unknown"),
                 "Modality": scan.modality, "ImagePath": str(scan.image_path),
             })
 
@@ -694,9 +698,20 @@ def _save_evaluations(result: TrainingResult) -> None:
     full_volume = pd.DataFrame()
     if all_tables:
         full_volume = pd.concat(all_tables, ignore_index=True)
+    from .reporting import split_scan_manifest
+
+    manifest = pd.DataFrame()
+    split_manifest = pd.DataFrame()
+    manifest_path = result.run_dir / "subjects.csv"
+    split_path = result.run_dir / "splits.json"
+    if manifest_path.exists():
+        manifest = pd.read_csv(manifest_path)
+        if split_path.exists():
+            saved_splits = json.loads(split_path.read_text(encoding="utf-8"))
+            split_manifest = split_scan_manifest(manifest, saved_splits)
     export_evaluation_tables(
         result.patch_metrics, full_volume, result.run_dir / "summary",
-        classifier_predictions=result.classifier_predictions,
+        classifier_predictions=result.classifier_predictions, manifest=manifest, split_manifest=split_manifest,
     )
 
 

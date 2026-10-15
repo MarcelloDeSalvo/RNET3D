@@ -352,10 +352,15 @@ def run_study(
         if classifier_tables:
             result.classifier_predictions = pd.concat(classifier_tables, ignore_index=True)
         from .evaluation import export_evaluation_tables
+        from ..evaluation.reporting import split_scan_manifest
+
+        manifest = data.subjects.manifest(data.subjects.subject_ids)
+        saved_splits = json.loads((folder / "splits.json").read_text(encoding="utf-8"))
+        split_manifest = split_scan_manifest(manifest, saved_splits)
 
         export_evaluation_tables(
             result.patch_metrics, result.metrics, folder,
-            classifier_predictions=result.classifier_predictions,
+            classifier_predictions=result.classifier_predictions, manifest=manifest, split_manifest=split_manifest,
         )
         result.timings = pd.DataFrame(timing_rows)
         result.timings.to_csv(folder / "timings.csv", index=False)

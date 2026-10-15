@@ -143,6 +143,6 @@ Automated checks use synthetic sources and tiny datasets. They cover membership
 inheritance, annotation balancing, longitudinal grouping, source renumbering,
 saved splits, conflicting sources and rejection of shared-checkpoint leakage.
 
-The mode switch does not alter preprocessing or metric calculations. Full-volume
-physical distance metrics retain their separate orthogonal-grid requirement;
-nonorthogonal inputs can still encounter that evaluation limitation.
+The mode switch does not alter preprocessing or metric calculations. The shared
+full-volume evaluator now measures nonorthogonal grids using their full physical
+affine, without an additional resampling step. See [cohort reports](cohort_annotation_reports.md).

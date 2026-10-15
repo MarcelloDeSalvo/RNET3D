@@ -97,7 +97,6 @@ removal, rejection of mismatched sources, partial-label objective validation,
 miniature component/loss fits, native patch evaluation and completed-study resume.
 No real dataset training or interpolation sensitivity analysis is launched.
 
-Full-volume physical distance metrics still require an orthogonal measurement
-grid; accepting nonorthogonal input affines for augmentation does not remove
-that separate metric requirement. A dataset hitting that check needs a geometry
-evaluation fix before its complete full-volume study can run.
+Full-volume physical metrics now use the complete shared affine for nonorthogonal
+grids, without resampling predictions or GT. Spacing-only metric calls retain
+their orthogonal-grid convention. See [cohort reports](cohort_annotation_reports.md).

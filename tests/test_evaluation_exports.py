@@ -65,7 +65,9 @@ def test_saved_weights_export_patch_and_brain_metrics_without_fitting(experiment
     assert set(result.metrics.Head) == {'regions', 'brain_mask'}
     assert set(result.metrics.EvaluationStage) == {'full_volume'}
     assert (result.output_dir / 'evaluation_metrics.xlsx').is_file()
-    assert pd.ExcelFile(result.output_dir / 'evaluation_metrics.xlsx').sheet_names == ['patch_metrics', 'full_volume_metrics']
+    sheets = pd.ExcelFile(result.output_dir / 'evaluation_metrics.xlsx').sheet_names
+    assert sheets[:2] == ['patch_metrics', 'full_volume_metrics']
+    assert {'region_set_summary', 'region_coverage', 'subgroup_summary', 'participant_flow'} <= set(sheets)
     assert (result.output_dir / 'evaluation_patches.json').is_file()
     reopened = load_saved_evaluation(result.output_dir)
     pd.testing.assert_frame_equal(reopened.patch_metrics, result.patch_metrics, check_dtype=False)

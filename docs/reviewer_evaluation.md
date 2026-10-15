@@ -19,9 +19,10 @@ and other scores in fractions. AVE is `abs(predicted volume - reference volume)`
 RVE is `100 * (predicted volume - reference volume) / reference volume`.
 
 - Supply voxel spacing in array-axis order, already converted to millimetres.
-  Equal array shapes alone do not establish equal physical geometry. Reorient
-  and resample to the same orthogonal grid before evaluation; spacing cannot
-  describe shear. No label remapping or probability threshold is guessed.
+  Equal array shapes alone do not establish equal physical geometry. Spacing-only
+  calls require a shared orthogonal grid; optional `affine_mm` handles a shared
+  nonorthogonal grid using physical surface points and determinant-based volume.
+  No label remapping or probability threshold is guessed.
 - Surfaces are 6-connected boundary voxel centres, including image borders.
   HD95 is the maximum of the two directed 95th percentiles. ASSD is the equally
   weighted mean of the two directed means. This is a discrete surface metric,

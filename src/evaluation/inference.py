@@ -487,10 +487,6 @@ class ExperimentVolumeEvaluator:
                     raise ValueError(f"{scan.id}: preprocessed image and reference must share a physical grid")
 
                 spacing = nib.affines.voxel_sizes(image.affine)
-                directions = image.affine[:3, :3] / spacing
-                orthogonal = np.allclose(directions.T @ directions, np.eye(3), atol=1e-5)
-                if not orthogonal:
-                    raise ValueError(f"{scan.id}: physical distance metrics require an orthogonal grid")
 
                 started = time.perf_counter()
                 if config.model.classifier:
@@ -531,6 +527,7 @@ class ExperimentVolumeEvaluator:
                     reference=reference_data, prediction=processed.regions, spacing_mm=spacing,
                     regions=regions, subject=subject_id, scan=scan.id,
                     dataset=scan.subject_group[0], available_labels=available_classes,
+                    affine_mm=image.affine,
                 )
                 table = table.assign(Head="regions", EvaluationStage="full_volume", Aggregation="scan", Condition=condition)
                 tables.append(table)
@@ -547,6 +544,7 @@ class ExperimentVolumeEvaluator:
                     reference=brain_reference, prediction=processed.brain_mask, spacing_mm=spacing,
                     regions={1: "Brain"}, subject=subject_id, scan=scan.id,
                     dataset=scan.subject_group[0], available_labels=brain_available,
+                    affine_mm=image.affine,
                 )
                 brain_table = brain_table.assign(Head="brain_mask", EvaluationStage="full_volume", Aggregation="scan", Condition=condition)
                 tables.append(brain_table)
@@ -591,7 +589,12 @@ class ExperimentVolumeEvaluator:
         self.classifier_predictions = pd.DataFrame(classifier_rows)
         if classifier_rows:
             self.classifier_predictions.to_csv(output_dir / "classifier_predictions.csv", index=False)
-        return pd.concat(tables, ignore_index=True)
+        from .reporting import attach_scan_metadata
+
+        metrics = pd.concat(tables, ignore_index=True)
+        manifest = self.data.subjects.manifest(self.subject_ids)
+        manifest.to_csv(output_dir / "subjects.csv", index=False)
+        return attach_scan_metadata(metrics, manifest)
 
 
 @dataclass(frozen=True)
@@ -842,7 +845,9 @@ def evaluate_saved_model(settings: SavedModelEvaluationConfig) -> SavedModelEval
         )
     from ..experiments.evaluation import export_evaluation_tables
 
-    export_evaluation_tables(patch_metrics, metrics, folder, classifier_predictions=classifier_predictions)
+    export_evaluation_tables(
+        patch_metrics, metrics, folder, classifier_predictions=classifier_predictions, manifest=manifest,
+    )
     timings = pd.read_csv(folder / "inference_timings.csv")
     return SavedModelEvaluationResult(output_dir=folder, metrics=metrics, timings=timings,
                                       manifest=manifest, data=data, patch_metrics=patch_metrics,

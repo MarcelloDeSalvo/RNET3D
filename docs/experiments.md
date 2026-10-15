@@ -244,8 +244,9 @@ physical shear in the acquired images. In-memory SimpleITK/ANTs conversion retai
 the full affine, so augmentation and N4 do not require orthogonalization.
 Explicit `Resample(..., orthogonal=True)` remains available when requested.
 The original grid remains available for prediction restoration. Full-volume
-physical distance metrics still require an orthogonal measurement grid because
-their spacing-only calculation does not represent shear.
+physical metrics receive the shared full affine: nonorthogonal surface points
+are compared in physical space and volumes use its determinant, without another
+input resampling. Spacing-only metric callers retain the orthogonal convention.
 
 New training configurations explicitly set `intensity_augmentation_grid="native"`:
 reorientation and unit correction precede MRI-only blur/noise on the native

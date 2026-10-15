@@ -362,7 +362,7 @@ def save_provenance(config: ExperimentConfig, data: PreparedData, run_dir: Path)
         "initialization_sha256": initialization_digest,
         "initialization_config_sha256": initialization_config_digest,
         "training_roi": config.loss.regions, "exported_roi": "softmax_probabilities",
-        "metrics_grid": "reoriented_resampled_orthogonal_mm",
+        "metrics_grid": "reoriented_resampled_full_affine_mm",
         "predictions_grid": "original_voxel_grid_with_output_class_ids",
     })
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
