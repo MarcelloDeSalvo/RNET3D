@@ -67,9 +67,28 @@ Nonempty tables are sheets in `evaluation_metrics.xlsx`. Individual fold folders
 save classifier CSV/JSON records for recovery. Training/study result sections,
 best-checkpoint cells and notebook 09 display classifier and SHAM summaries.
 
+MouseFull notebooks 05, 06 and 07f now also display Plotly confusion matrices in
+the result, saved-checkpoint and final paper-table sections. Notebook 09 does
+the same for configured classifier models. Rows are reference SHAM/TBI and
+columns are predicted SHAM/TBI; labels contain raw animal counts. Each variant,
+seed and evaluation role receives its own figure, with its identity and animal
+count in the title. No-classifier ablations produce no classifier matrix.
+
+`classifier_confusion_figures` plots the existing saved counts without repeating
+inference or changing decisions. By default it prefers disjoint pooled outer
+holdouts over their constituent folds. Repeated test/external estimates remain
+separate fold figures, never summed as independent animals. In the final cells,
+`PAPER_CONFUSION_PER_FOLD=True` also displays individual outer folds.
+`PAPER_CONFUSION_NORMALIZE=True` uses reference-row fractions while retaining
+raw counts; fractions for a reference class with no animals remain undefined.
+The result/checkpoint sections expose corresponding normalization switches.
+The figures use `renderer="vscode"` and can be downloaded with Plotly's toolbar.
+
 Notebook 10 exposes `CLASSIFIER_FILES`, roles through `analysis.roles`,
 `RUN_CLASSIFICATION` and `EXPORT_CLASSIFICATION`. It displays rate/animal tables
-and a Plotly confusion matrix selected by variant/seed/role/scope/fold. Classifier
+and Plotly confusion matrices, automatically showing all selected models with
+pooled outer holdouts preferred. Optional variant/seed/role/scope/fold filters
+default to `None`; normalization and individual-fold switches are explicit. Classifier
 analysis can run independently of segmentation analysis. Segmentation reports
 also export SHAM diagnostics when input metrics contain the condition; older CSVs
 lacking it are not guessed to represent healthy animals.

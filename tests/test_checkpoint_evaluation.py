@@ -190,6 +190,8 @@ def test_checkpoint_requires_a_saved_epoch_and_separate_output(experiment, tmp_p
     ("01_tbi_mouse_training.ipynb", "test"),
     ("02_tbi_mouse_kfold.ipynb", "holdout"),
     ("04_rat_kfold.ipynb", "validation"),
+    ("05_mouse_full_training.ipynb", "test"),
+    ("06_mouse_full_kfold.ipynb", "holdout"),
     ("07f_ablation.ipynb", "holdout"),
 ])
 def test_final_checkpoint_cell_needs_no_training_result_or_live_config(

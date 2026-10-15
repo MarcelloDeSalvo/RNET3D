@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Sequence
+from typing import TYPE_CHECKING, Any, Iterator, Sequence
 
 import numpy as np
 import pandas as pd
 
 from .statistics import calculate_classification
+
+if TYPE_CHECKING:
+    from plotly.graph_objects import Figure
 
 
 MODEL_KEYS: list[str] = ["Variant", "Seed", "DatasetRole", "Fold"]
@@ -113,6 +116,94 @@ def load_classifier_predictions(paths: Sequence[Path]) -> pd.DataFrame:
     if not tables:
         return pd.DataFrame()
     return pd.concat(tables, ignore_index=True)
+
+
+def classifier_confusion_figures(
+    confusion: pd.DataFrame, *, roles: Sequence[str] | None = ("test", "holdout", "external"),
+    include_folds: bool = False, normalize: bool = False,
+) -> list[Figure]:
+    """Plot saved animal counts, keeping variants, seeds and roles separate.
+
+    Prefer a disjoint pooled outer-holdout matrix when present; include_folds
+    also shows its constituent folds. Repeated test/external predictions remain
+    separate fold matrices. Set roles=None to include selection validation.
+    normalize displays reference-row fractions while retaining counts in labels;
+    an absent reference class has undefined fractions, never fabricated zeros.
+    No inference, vote aggregation or classifier/segmentation gating occurs here.
+    """
+    if confusion.empty:
+        return []
+    import plotly.graph_objects as go
+
+    keys: list[str] = [*MODEL_KEYS, "Scope"]
+    required: list[str] = [*keys, "Reference", "Prediction", "Count"]
+    if not set(required).issubset(confusion) or confusion[required].isna().any().any():
+        raise ValueError("Confusion plots require saved model/scope identifiers and complete binary counts")
+    selected: pd.DataFrame = confusion.copy()
+    if roles is not None:
+        selected = selected.loc[selected["DatasetRole"].isin(roles)]
+    if selected.empty:
+        return []
+    if not selected["Scope"].isin(["fold", "pooled_holdout"]).all():
+        raise ValueError("Select fold or disjoint pooled_holdout confusion counts")
+    if not np.isin(selected[["Reference", "Prediction"]], [0, 1]).all():
+        raise ValueError("Confusion axes must use SHAM=0 and TBI=1")
+    counts: np.ndarray = selected["Count"].to_numpy(dtype=float)
+    if not np.isfinite(counts).all() or (counts < 0).any() or (counts != np.rint(counts)).any():
+        raise ValueError("Confusion counts must be finite nonnegative integers")
+    if selected.duplicated([*keys, "Reference", "Prediction"]).any():
+        raise ValueError("Select each saved confusion matrix once")
+
+    figures: list[Figure] = []
+    for _, models in selected.groupby(MODEL_KEYS[:-1], dropna=False):
+        if not include_folds and models["Scope"].eq("pooled_holdout").any():
+            models = models.loc[models["Scope"].eq("pooled_holdout")]
+        for key, group in models.groupby(keys, dropna=False):
+            metadata: dict[str, Any] = dict(zip(keys, key))
+            matrix: pd.DataFrame = group.pivot(index="Reference", columns="Prediction", values="Count")
+            matrix = matrix.reindex(index=[0, 1], columns=[0, 1])
+            if matrix.isna().any().any():
+                raise ValueError("Each confusion matrix must provide all four cells, including zero counts")
+            values: np.ndarray = matrix.to_numpy(dtype=np.int64)
+            totals: np.ndarray = values.sum(axis=1, keepdims=True)
+            fractions: np.ndarray = np.full((2, 2), np.nan)
+            np.divide(values, totals, out=fractions, where=totals > 0)
+            colors: np.ndarray = values
+            labels: np.ndarray = values.astype(str).astype(object)
+            colorbar_title: str = "Animals"
+            if normalize:
+                colors = fractions
+                colorbar_title = "Reference-row fraction"
+                for row in range(2):
+                    for column in range(2):
+                        label: str = f"{values[row, column]} (undefined)"
+                        if np.isfinite(fractions[row, column]):
+                            label = f"{values[row, column]} ({fractions[row, column]:.1%})"
+                        labels[row, column] = label
+            heatmap = go.Heatmap(
+                z=colors, x=["SHAM", "TBI"], y=["SHAM", "TBI"],
+                text=labels, texttemplate="%{text}", customdata=values,
+                colorscale="Blues", colorbar={"title": colorbar_title},
+                hovertemplate="Reference %{y}<br>Predicted %{x}<br>Animals: %{customdata}<extra></extra>",
+            )
+            scope: str = f"fold {metadata['Fold']}"
+            if metadata["Scope"] == "pooled_holdout":
+                scope = "pooled outer holdouts"
+            title: str = (
+                f"{metadata['Variant']} · seed {metadata['Seed']} · {metadata['DatasetRole']} · {scope}"
+                f"<br>Animal-level SHAM/TBI confusion matrix (N={values.sum()})"
+            )
+            figure = go.Figure(heatmap)
+            figure.update_layout(
+                title=title, xaxis_title="Predicted condition", yaxis_title="Reference condition",
+                template="plotly_white", width=650, height=520,
+            )
+            figure.update_yaxes(autorange="reversed")
+            if normalize:
+                figure.update_traces(zmin=0, zmax=1)
+            figures.append(figure)
+
+    return figures
 
 
 def healthy_lesion_report(
