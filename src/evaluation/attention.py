@@ -1,4 +1,4 @@
-"""Inspect existing spatial attention gates without modifying model architectures."""
+"""Inspect spatial gates and classifier Grad-CAM without changing trained models."""
 
 from __future__ import annotations
 
@@ -21,6 +21,16 @@ class AttentionResult:
 
     image: nib.Nifti1Image
     maps: dict[str, nib.Nifti1Image]
+    summary: pd.DataFrame
+
+
+@dataclass(frozen=True)
+class GradCAMResult:
+    """Positive classifier attribution, normalized within one inspected patch."""
+
+    image: nib.Nifti1Image
+    heatmap: nib.Nifti1Image
+    native_map: np.ndarray
     summary: pd.DataFrame
 
 
@@ -158,26 +168,147 @@ def inspect_attention(model: Any, image: nib.Nifti1Image) -> AttentionResult:
     return AttentionResult(image=image, maps=maps, summary=pd.DataFrame(rows))
 
 
-def attention_figure(
-    result: AttentionResult, *, labels: nib.Nifti1Image | None = None, region: int | None = 1,
+def classifier_feature_table(model: Any) -> pd.DataFrame:
+    """List spatial features on the classifier path; prefer its pre-pooling tensor.
+
+    Decoder attention/features are excluded when the classifier branches from
+    the encoder bottleneck. Their gradients for this decision are disconnected.
+    """
+    import tensorflow as tf
+
+    if "classifier" not in model.output_names:
+        raise ValueError("This model has no auxiliary classifier")
+    classifier = model.get_layer("classifier")
+    branch = tf.keras.Model(inputs=model.inputs, outputs=classifier.input)
+    preferred: str | None = None
+    rows: list[dict[str, Any]] = []
+    for layer in branch.layers:
+        outputs = tf.nest.flatten(layer.output)
+        if len(outputs) == 1 and len(outputs[0].shape) == 5 and not isinstance(layer, tf.keras.layers.InputLayer):
+            rows.append({"Layer": layer.name, "Type": type(layer).__name__, "Shape": tuple(outputs[0].shape)})
+        if isinstance(layer, tf.keras.layers.GlobalAveragePooling3D):
+            preferred = layer.input._keras_history.layer.name
+    if not rows:
+        raise ValueError("The classifier has no supported spatial feature tensor")
+    if preferred is None:
+        preferred = rows[-1]["Layer"]
+    table = pd.DataFrame(rows)
+    table["Default"] = table["Layer"].eq(preferred)
+    return table
+
+
+def classifier_gradcam(
+    model: Any, image: nib.Nifti1Image, *, target: Literal["predicted", "TBI", "SHAM"] = "predicted",
+    feature_layer: str | None = None,
+) -> GradCAMResult:
+    """Compute 3D Grad-CAM for one patch's SHAM/TBI classifier log-odds.
+
+    TBI targets the pre-sigmoid logit; SHAM targets its negative. Reconstructing
+    this scalar from the final Dense inputs/weights avoids saturated sigmoid
+    gradients without changing the classifier activation. Spatially averaged
+    gradients weight feature channels; ReLU retains positive evidence, normalized
+    by its native maximum. Zero gradients/positive maps stay zero and are flagged.
+    This is neither a class probability nor a whole-volume majority-vote explanation.
+    """
+    import tensorflow as tf
+
+    if target not in ("predicted", "TBI", "SHAM"):
+        raise ValueError("Grad-CAM target must be predicted, TBI or SHAM")
+    candidates: pd.DataFrame = classifier_feature_table(model)
+    if feature_layer is None:
+        feature_layer = candidates.loc[candidates["Default"], "Layer"].iloc[0]
+    if feature_layer not in set(candidates["Layer"]):
+        raise ValueError("Choose a spatial feature layer on the classifier path, not a disconnected decoder layer")
+    if len(model.inputs) != 1 or len(model.input_shape) != 5:
+        raise ValueError("Grad-CAM requires one channels-last 3D model input")
+    values: np.ndarray = image.get_fdata(dtype=np.float32)
+    expected: tuple[int | None, ...] = tuple(model.input_shape[1:4])
+    if values.ndim != 3 or not np.isfinite(values).all():
+        raise ValueError("Provide a finite 3D preprocessed MRI patch")
+    if any(size is not None and size != actual for size, actual in zip(expected, values.shape)):
+        raise ValueError(f"Provide a preprocessed MRI patch of shape {expected}")
+    classifier = model.get_layer("classifier")
+    dense_sigmoid: bool = isinstance(classifier, tf.keras.layers.Dense) and classifier.units == 1
+    activation_sigmoid: bool = isinstance(classifier, tf.keras.layers.Activation) and classifier.input.shape[-1] == 1
+    scalar_output: bool = len(classifier.output.shape) == 2 and classifier.output.shape[-1] == 1
+    if not scalar_output or not (dense_sigmoid or activation_sigmoid) or classifier.get_config()["activation"] != "sigmoid":
+        raise ValueError("Grad-CAM supports a single sigmoid classifier output")
+    features = model.get_layer(feature_layer).output
+    probe = tf.keras.Model(inputs=model.inputs, outputs=[features, classifier.input])
+    channels: int = int(model.input_shape[-1])
+    batch: np.ndarray = np.repeat(values[None, ..., None], channels, axis=-1)
+    inputs = tf.convert_to_tensor(batch)
+    resolved_target: str = target
+    with tf.GradientTape() as tape:
+        # Watch input explicitly so frozen backbones also retain this derivative.
+        tape.watch(inputs)
+        activations, head_inputs = probe(inputs, training=False)
+        logits = tf.cast(head_inputs, tf.float32)
+        if dense_sigmoid:
+            kernel = tf.cast(classifier.kernel, tf.float32)
+            logits = tf.linalg.matmul(logits, kernel)
+            if classifier.use_bias:
+                logits = logits + tf.cast(classifier.bias, tf.float32)
+        logit = logits[0, 0]
+        probability = tf.math.sigmoid(logit)
+        if target == "predicted":
+            resolved_target = "SHAM"
+            if float(probability.numpy()) > 0.5:
+                resolved_target = "TBI"
+        score = logit
+        if resolved_target == "SHAM":
+            score = -logit
+    gradients = tape.gradient(score, activations)
+    if gradients is None:
+        raise ValueError("The selected feature tensor has no gradient connection to the classifier")
+    gradients = tf.cast(gradients[0], tf.float32)
+    activations = tf.cast(activations[0], tf.float32)
+    weights = tf.reduce_mean(gradients, axis=(0, 1, 2))
+    signed = tf.reduce_sum(activations * weights, axis=-1)
+    raw: np.ndarray = signed.numpy()
+    gradient_values: np.ndarray = gradients.numpy()
+    if not np.isfinite(raw).all() or not np.isfinite(gradient_values).all() or not np.isfinite(float(logit.numpy())):
+        raise ValueError("Grad-CAM requires finite logits, features and gradients")
+    native: np.ndarray = np.maximum(raw, 0)
+    peak: float = float(native.max())
+    status: str = "no_positive_attribution"
+    if peak > 0:
+        native = native / peak
+        status = "ok"
+    if not np.any(gradient_values):
+        status = "zero_gradient"
+    factors: tuple[float, ...] = tuple(size / coarse for size, coarse in zip(values.shape, native.shape))
+    lifted: np.ndarray = zoom(native, factors, order=1, mode="nearest", prefilter=False, grid_mode=True)
+    header = image.header.copy()
+    header.set_data_dtype(np.float32)
+    heatmap = nib.Nifti1Image(lifted, image.affine, header)
+    summary = pd.DataFrame([{
+        "Target": resolved_target, "FeatureLayer": feature_layer, "NativeShape": native.shape,
+        "TBIPatchProbability": float(probability.numpy()), "TBILogit": float(logit.numpy()),
+        "TargetScore": float(score.numpy()), "GradientL1": float(np.abs(gradient_values).sum()),
+        "RawMinimum": float(raw.min()), "RawMaximum": float(raw.max()), "PositivePeak": peak,
+        "Status": status,
+    }])
+    return GradCAMResult(image=image, heatmap=heatmap, native_map=native, summary=summary)
+
+
+def _spatial_maps_figure(
+    source_image: nib.Nifti1Image, maps: dict[str, nib.Nifti1Image], *,
+    title: str, colorbar_title: str, hover_template: str,
+    labels: nib.Nifti1Image | None = None, region: int | None = 1,
     axis: int = 2, max_slices: int = 24, opacity: float = 0.6,
 ) -> Any:
-    """Build a native Plotly slice slider with MRI and fixed-scale gate overlays.
-
-    Optional GT contours use original source IDs; region=None outlines all GT
-    foreground. Attention is spatial and shared across classes, not a class
-    probability or proof of a structure's influence on the final prediction.
-    """
+    """Build aligned native Plotly slices with explicit map meaning and scale."""
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
 
     if axis not in (0, 1, 2) or not 0 <= opacity <= 1 or max_slices < 1:
         raise ValueError("Choose axis 0/1/2, opacity between zero and one, and a positive slice limit")
-    image: np.ndarray = result.image.get_fdata(dtype=np.float32)
-    arrays: dict[str, np.ndarray] = {name: value.get_fdata(dtype=np.float32) for name, value in result.maps.items()}
+    image: np.ndarray = source_image.get_fdata(dtype=np.float32)
+    arrays: dict[str, np.ndarray] = {name: value.get_fdata(dtype=np.float32) for name, value in maps.items()}
     gt: np.ndarray | None = None
     if labels is not None:
-        if labels.shape != image.shape or not np.allclose(labels.affine, result.image.affine):
+        if labels.shape != image.shape or not np.allclose(labels.affine, source_image.affine):
             raise ValueError("GT contours must share the MRI patch grid")
         gt = labels.get_fdata()
         if region is None:
@@ -189,7 +320,7 @@ def attention_figure(
     rows: int = int(np.ceil(len(names) / columns))
     figure = make_subplots(rows=rows, cols=columns, subplot_titles=names)
     horizontal, vertical = [dimension for dimension in range(3) if dimension != axis]
-    spacing: np.ndarray = nib.affines.voxel_sizes(result.image.affine)
+    spacing: np.ndarray = nib.affines.voxel_sizes(source_image.affine)
     x: np.ndarray = np.arange(image.shape[horizontal]) * spacing[horizontal]
     y: np.ndarray = np.arange(image.shape[vertical]) * spacing[vertical]
     low, high = np.percentile(image, [1, 99])
@@ -207,7 +338,7 @@ def attention_figure(
                 weights: np.ndarray = np.take(arrays[name], index, axis=axis).T
                 items.append(go.Heatmap(
                     z=weights, x=x, y=y, coloraxis="coloraxis", opacity=opacity,
-                    hovertemplate="Attention weight: %{z:.3f}<extra></extra>",
+                    hovertemplate=hover_template,
                 ))
             if gt is not None:
                 contour: np.ndarray = np.take(gt, index, axis=axis).T.astype(int)
@@ -220,7 +351,7 @@ def attention_figure(
 
     initial: int = int(indices[len(indices) // 2])
     initial_traces = iter(traces(initial))
-    orientation = nib.aff2axcodes(result.image.affine)
+    orientation = nib.aff2axcodes(source_image.affine)
     for panel, name in enumerate(names):
         row, column = divmod(panel, columns)
         trace_count: int = 1
@@ -243,9 +374,40 @@ def attention_figure(
         "mode": "immediate", "frame": {"duration": 0, "redraw": True}, "transition": {"duration": 0},
     }]} for index in indices]
     figure.update_layout(
-        title=f"Spatial attention gates, coarse to fine · slice axis {axis} · axes {orientation}",
-        coloraxis={"cmin": 0, "cmax": 1, "colorscale": "Inferno", "colorbar": {"title": "Gate weight"}},
+        title=f"{title} · slice axis {axis} · axes {orientation}",
+        coloraxis={"cmin": 0, "cmax": 1, "colorscale": "Inferno", "colorbar": {"title": colorbar_title}},
         sliders=[{"steps": steps, "active": len(indices) // 2, "currentvalue": {"prefix": "Patch slice: "}}],
         height=400 * rows, template="plotly_white",
     )
     return figure
+
+
+def attention_figure(
+    result: AttentionResult, *, labels: nib.Nifti1Image | None = None, region: int | None = 1,
+    axis: int = 2, max_slices: int = 24, opacity: float = 0.6,
+) -> Any:
+    """Show class-shared gate weights on their actual zero-to-one sigmoid scale."""
+    title: str = "Spatial attention gates, coarse to fine"
+    hover: str = "Attention weight: %{z:.3f}<extra></extra>"
+    return _spatial_maps_figure(
+        source_image=result.image, maps=result.maps, title=title,
+        colorbar_title="Gate weight", hover_template=hover, labels=labels, region=region,
+        axis=axis, max_slices=max_slices, opacity=opacity,
+    )
+
+
+def gradcam_figure(
+    result: GradCAMResult, *, labels: nib.Nifti1Image | None = None, region: int | None = 1,
+    axis: int = 2, max_slices: int = 24, opacity: float = 0.6,
+) -> Any:
+    """Show normalized positive classifier attribution with an explicit target."""
+    metadata = result.summary.iloc[0]
+    name: str = f"Grad-CAM for {metadata['Target']}"
+    maps: dict[str, nib.Nifti1Image] = {name: result.heatmap}
+    title: str = f"{name} · {metadata['FeatureLayer']} · {metadata['Status']}"
+    hover: str = "Relative positive attribution: %{z:.3f}<extra></extra>"
+    return _spatial_maps_figure(
+        source_image=result.image, maps=maps, title=title,
+        colorbar_title="Normalized attribution", hover_template=hover, labels=labels, region=region,
+        axis=axis, max_slices=max_slices, opacity=opacity,
+    )

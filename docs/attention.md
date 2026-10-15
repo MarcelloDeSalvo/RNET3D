@@ -52,7 +52,51 @@ not transformer attention matrices, class probabilities, calibrated importance,
 or causal explanations. This notebook does not create whole-volume aggregated
 attention maps, evaluate segmentation accuracy or infer unavailable ground truth.
 
+## Optional classifier Grad-CAM
+
+The final notebook section exposes `RUN_CLASSIFIER_GRADCAM=False`. Enable it to
+explain one patch's binary classifier output, reusing its preprocessed MRI and
+optional original-ID ROI contours. No compilation or training is performed.
+`GRADCAM_TARGET` selects `"TBI"`, `"SHAM"`, or `"predicted"`; predicted uses TBI
+only above 0.5, matching the existing patch decision rule.
+
+`classifier_feature_table` lists spatial features on the classifier branch.
+`GRADCAM_LAYER=None` selects the tensor immediately before global average pooling,
+normally the bottleneck. The decoder/gate tensors are not ancestors of this
+classifier, so they cannot explain its output. Other listed encoder tensors can
+be selected explicitly. A model without the classifier is skipped, while a
+classifier model without attention gates can still use this section.
+
+`classifier_gradcam` reconstructs the final pre-sigmoid scalar from the Dense
+input, kernel and bias without editing its activation. TBI uses that logit; SHAM
+uses its negative. This avoids sigmoid saturation in the differentiated score.
+The implementation averages score gradients over the three spatial dimensions,
+uses them to weight feature channels, sums channels and retains positive evidence
+with ReLU. It adapts the [original Grad-CAM method](https://arxiv.org/abs/1610.02391)
+and [Keras example](https://keras.io/examples/vision/grad_cam/) to 3D binary scores.
+
+The positive native map is divided by its own maximum for display, then linearly
+lifted onto the MRI patch grid. Its colors represent **relative attribution**,
+unlike the gate maps' actual sigmoid weights. Color magnitudes cannot establish
+stronger attribution between subjects. A summary retains raw CAM extrema, its
+positive peak, gradient magnitude, feature resolution, selected target, logit and
+patch TBI probability. Zero gradients and absent positive evidence receive explicit
+statuses and zero maps, without division by zero or invented contrast.
+
+The separate `gradcam_figure` uses the same Plotly viewer and geometry, with titles
+and hover labels identifying attribution. Its axis, slice limit, opacity and GT
+settings are independent of the gate display. Both functions use `training=False`;
+model weights, batch-normalization state and classifier activation remain unchanged.
+
+This explains a patch score, not the whole-volume classifier's majority vote or
+any segmentation class. A coarse or empty map is not evidence of feature
+irrelevance. These exploratory figures can help inspect the reviewer's classifier
+concern, but cannot prove causality or rule out cohort/acquisition confounding.
+
 Tests exercise exact sigmoid scale, unchanged model state, attention-disabled
 graphs, flexible inputs, weights and full-model loading, paired MRI/GT geometry,
 slice frames, and the notebook's center/custom-crop paths. The three bundled
 legacy exports were also loaded and inspected on synthetic patches read-only.
+Grad-CAM tests additionally check analytical opposite-class evidence, saturated
+sigmoids, frozen models, zero maps, disconnected features, unchanged state,
+classifier-free models and the optional notebook cells.
