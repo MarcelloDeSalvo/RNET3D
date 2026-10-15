@@ -219,7 +219,8 @@ def test_final_checkpoint_cell_needs_no_training_result_or_live_config(
     monkeypatch.setattr(inference, "prediction_comparison_figure", lambda **kwargs: Figure())
     path = Path(__file__).resolve().parents[1] / "notebook" / filename
     notebook = json.loads(path.read_text(encoding="utf-8"))
-    tree = ast.parse("".join(notebook["cells"][-1]["source"]))
+    checkpoint_cell = next(cell for cell in notebook["cells"] if cell.get("id") == "best-checkpoint-evaluation")
+    tree = ast.parse("".join(checkpoint_cell["source"]))
     overrides = {"RUN_CHECKPOINT_EVALUATION": True, "CHECKPOINT_ROLE": role}
     for node in tree.body:
         if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):

@@ -160,6 +160,10 @@ See [Reviewer evaluation additions](docs/reviewer_evaluation.md) for full-volume
 surface/volume metrics, paired agreement diagnostics, and subject-level
 classification confidence intervals.
 
+See [Manuscript tables from saved evaluations](docs/paper_tables.md) for the final
+notebook dataframes, fold-averaged test metrics, anatomy summaries, animal
+confidence intervals and CSV/Excel exports without rerunning training.
+
 See [Inference and full-volume evaluation](docs/inference.md) for patch
 aggregation, output-head contracts and optional evaluation reports.
 
