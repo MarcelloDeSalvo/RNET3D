@@ -20,8 +20,9 @@ Notebooks 01/03/05 also expose `K_FOLD_COMPATIBLE=False`: enable it to run every
 outer fold with the same complete configuration. Studies 07/07f/08 expose the
 same boolean to select CV. The corresponding callback cell then defaults to
 LR reduction only; source CV checkpoints can be reused for matching MouseFull folds.
-K-Fold uses only LR reduction by default, with no early stopping; study notebooks
-follow their selected `MODE`. Edit the constructors/list directly to change this.
+Standard K-Fold uses only LR reduction by default, with no early stopping; study
+notebooks follow their selected `MODE`. Rat notebook 04 has no LR callback and
+selects weights using training loss. Edit the constructors/list directly to change this.
 Relative logging paths are scoped to each run/fold. Fresh callback copies prevent
 state sharing across folds/seeds/variants, and saved `callbacks.json` settings
 are checked on resume. The runner handles best/recovery checkpoints separately
@@ -57,10 +58,13 @@ matched widths, preprocessing, loss, splits and seeds. It supports fixed splits
 and grouped outer CV. Classifiers are disabled for both models because the
 existing U-Net does not support that head; neither model's dropout is changed.
 
-Rat CV matches the old split: train on four rats and select/evaluate on the fifth.
-That fifth rat contributes validation results, not an independent outer test.
-Validation uses five saved center-biased patches for every available scan. Every fold
-starts from the same explicitly chosen mouse checkpoint and a fresh optimizer.
+Rat CV retains the old animal split: train on four rats and evaluate the fifth.
+For new runs its learning rate is fixed and the checkpoint uses training loss,
+so the held-out rat does not control automatic scheduling or weight selection.
+Its curves remain diagnostic; saved memberships/viewers retain the `validation`
+role. Older runs retain their original validation-driven selection. Evaluation
+uses five saved center-biased patches per scan. Every fold starts from the same
+explicitly chosen mouse checkpoint and a fresh optimizer.
 
 MouseFull preserves the old source-label/channel order and SHAM/TBI classifier.
 Notebooks 05/06 expose TBI feature transfer through `USE_TBI_PRETRAINING`,

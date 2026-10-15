@@ -11,9 +11,12 @@ For the historical rat CV protocol, use `notebook/04_rat_kfold.ipynb` and set
 `MOUSE_CHECKPOINT`. Its complete D2 configuration uses 112-cube patches, five folds,
 100 epochs, batch size four and training multiplier five. Each fold initializes
 from the same mouse weights, trains on four rats, and evaluates every available
-timepoint of the remaining rat. That rat also selects the checkpoint, matching
-the old `3DRNET_Kfold_rats.ipynb` split; results have the `validation` role, not
-an independent `holdout` role. Validation reuses five saved center-biased patches per scan and retains
+timepoint of the remaining rat. New notebook 04 runs use a fixed learning rate,
+an empty explicit callback list and `monitor="loss"` for training-only checkpoint
+selection. The remaining rat supplies diagnostic curves but controls no automatic
+scheduling, stopping or selection. Saved split/viewer roles remain `validation`;
+older runs retain their validation-driven selection and must not be relabelled.
+Validation reuses five saved center-biased patches per scan and retains
 incomplete batches. The original notebook's random validation
 augmentation and nearest image interpolation are not reproduced. Full-volume
 postprocessing retains the historical ventricle separation and brain cleanup.

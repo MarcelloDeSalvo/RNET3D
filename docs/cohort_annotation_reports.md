@@ -152,15 +152,22 @@ No new masking experiment is enabled. V1 versus V3 compares objective versions
 that both use masking; it does not answer whether partial data/masking helps
 against ignoring partial scans or naively treating unknown anatomy as background.
 Those would be explicit experimental controls, not production annotation policy.
+With the current ten-foreground-region vocabulary and verified empty SHAM lesion
+targets, metadata identifies 9 complete TBI animals and 79 complete SHAM animals;
+103 TBI and 7 SHAM animals remain partial. A complete-only experiment therefore
+changes sample size and condition balance as well as data use. It is not a pure
+comparison of loss formulas. A naive-background control measures the consequence
+of wrong supervision; it is not an expectation that wrong targets should win.
 
 No patch-balance audit, parameter-capacity matching or additional hardware
 benchmark is introduced. Symmetry addresses the correction assumption, not voxel
 class balance. Existing loss weights and timing records can be reported directly.
 
-Notebook 04 keeps every held-out rat scan out of fitting. Its held-out `val_loss`
-still selects the best checkpoint and drives ReduceLROnPlateau, so it is not an
-untouched final test. This is a distinction between animal separation and model
-selection; no animal identity overlap is alleged. The historical protocol is
-unchanged. Notebook 03 supports separate grouped outer holdouts; a separately
-authorized fixed-epoch, prespecified-LR rat protocol could retain four fitting
-rats without using the fifth for selection.
+Notebook 04 keeps every held-out rat scan out of fitting. New runs have no
+ReduceLROnPlateau/early stopping and select the lowest training-loss checkpoint
+with `monitor="loss"`. Its held-out curves are diagnostic, with the legacy
+`validation` role retained for saved splits/viewers. They must not be used to
+choose settings after viewing results. Older runs used held-out `val_loss` for
+scheduling/selection; changing the notebook cannot repair those measurements
+retroactively. The other standard CV workflows use separate inner validation
+and outer holdouts; their validation-driven callbacks remain appropriate.
