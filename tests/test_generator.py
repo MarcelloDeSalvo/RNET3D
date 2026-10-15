@@ -83,6 +83,29 @@ def test_domain_targets_keep_raw_label_order_and_subject_specific_flags(dataset)
     np.testing.assert_array_equal(targets[2], [[0], [1]])
 
 
+def test_missing_as_background_projects_undeclared_positives_and_keeps_one_hot_targets(dataset):
+    loader, config = dataset
+    config["label_mapping"] = {0: 0, 1: 1}
+    ids = loader.get_subjects_list()
+    subject = loader.get_subject(ids[1])
+    subject.unavailable_labels = [1]
+    generator = MultiTaskGenerator(
+        ids, loader, config, shuffle=False, missing_labels_as_background=True,
+    )
+
+    _, targets = generator[0]
+    assert len(targets) == 2
+    assert np.all(targets[0][1, ..., 0] == 1)
+    assert np.all(targets[0][1, ..., 1] == 0)
+    assert np.all(targets[0].sum(axis=-1) == 1)
+    assert np.all(targets[0] >= 0)
+    assert np.all(targets[1] == 1)
+    assert subject.unavailable_labels == [1]
+
+    with pytest.raises(ValueError, match="not both"):
+        MultiTaskGenerator(ids, loader, config, partial_labels=True, missing_labels_as_background=True)
+
+
 @pytest.mark.parametrize("index", [-1, 1, 50])
 def test_invalid_batch_indexes_raise(dataset, index):
     loader, config = dataset

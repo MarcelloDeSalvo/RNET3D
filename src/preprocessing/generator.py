@@ -40,6 +40,7 @@ class MultiTaskGenerator(tf.keras.utils.Sequence):
         *,
         drop_last: bool = True,
         partial_labels: bool = False,
+        missing_labels_as_background: bool = False,
         with_classifier: bool = False,
         sample_preprocessors: Sequence[Preprocessor] | None = None,
     ) -> None:
@@ -50,6 +51,9 @@ class MultiTaskGenerator(tf.keras.utils.Sequence):
         self.preprocessor: Preprocessor | None = preprocessor
         self.drop_last: bool = drop_last
         self.partial_labels: bool = partial_labels
+        self.missing_labels_as_background: bool = missing_labels_as_background
+        if partial_labels and missing_labels_as_background:
+            raise ValueError("Choose masking or missing labels as background, not both")
         self.with_classifier: bool = with_classifier
         self.sample_preprocessors: Sequence[Preprocessor] | None = sample_preprocessors
         if sample_preprocessors is not None and len(sample_preprocessors) != len(self.ids):
@@ -214,9 +218,11 @@ class MultiTaskGenerator(tf.keras.utils.Sequence):
 
         A merged class is unavailable when any contributing source label lacks
         annotation. This is conservative: partial coverage is not a complete
-        ground truth for the merged structure. Legacy defaults remain unchanged.
+        ground truth for the merged structure. The explicit unmasked control
+        projects unavailable ROI positives to background and keeps zero targets
+        for those classes everywhere. Annotation metadata itself is never edited.
         """
-        if self.partial_labels:
+        if self.partial_labels or self.missing_labels_as_background:
             mapping: dict[int, int] = self.config["label_mapping"]
             for position, subject in enumerate(subjects):
                 unavailable: set[int] = set(subject.get_unavailable_labels() or ())
@@ -226,7 +232,15 @@ class MultiTaskGenerator(tf.keras.utils.Sequence):
                         channels.add(channel)
 
                 for channel in channels:
-                    regions[position, ..., channel] = -1
+                    if self.partial_labels:
+                        regions[position, ..., channel] = -1
+                    else:
+                        if channel == 0:
+                            continue
+                        # Preserve one-hot targets even if an undeclared ROI
+                        # happens to be present in a source annotation file.
+                        regions[position, ..., 0] += regions[position, ..., channel]
+                        regions[position, ..., channel] = 0
 
         targets: list[BatchArray] = [regions, brain_masks]
         if self.with_classifier:

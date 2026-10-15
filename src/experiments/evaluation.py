@@ -20,6 +20,8 @@ def evaluate_patches(
     Native Keras losses and metrics retain their training definitions and cohort
     aggregation. They are not animal-level full-volume scores. Available-class
     soft Dice is additionally exposed from the existing partial-label accumulators.
+    Missing-as-background controls retain their naive targets in these native
+    measurements; full-volume scoring independently uses true annotation coverage.
     No optimizer updates, augmentation, truncation or postprocessing occur.
     """
     from ..evaluation.metrics import PartialLabelDice
@@ -27,7 +29,7 @@ def evaluate_patches(
     options = dict(options or {})
     ids = list(subject_ids)
     keys = data.subjects.scan_keys(ids)
-    if data.config.loss.regions != "dice_ce_gradient_fix":
+    if data.config.loss.annotation_policy == "masked" and data.config.loss.regions != "dice_ce_gradient_fix":
         partial = any(data.loader.get_subject(key).unavailable_labels for key in keys)
         if partial:
             raise ValueError("Native patch evaluation of partial annotations requires the saved gradient-fixed objective")

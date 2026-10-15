@@ -20,26 +20,29 @@ from ..evaluation.k_fold import FoldSplit, TrainingResult
 ARCHITECTURE_PARAMETERS: tuple[str, ...] = (
     "residual", "attention", "max_pooling", "classifier", "multiscale", "deep_supervision",
 )
-LOSS_PARAMETERS: tuple[str, ...] = ("regions", "gradient_fix_version")
+LOSS_PARAMETERS: tuple[str, ...] = ("regions", "gradient_fix_version", "annotation_policy")
 
 
 @dataclass(frozen=True)
 class AblationVariant:
-    """One named change, or an unchanged reference when parameter is None."""
+    """One named change, with an explicit combined no-masking/classifier control."""
 
     name: str
     parameter: Literal["residual", "attention", "max_pooling", "classifier",
                        "multiscale", "deep_supervision", "augment", "random_crop",
-                       "data_multiplier", "regions", "gradient_fix_version"] | None = None
+                       "data_multiplier", "regions", "gradient_fix_version", "annotation_policy"] | None = None
     value: bool | int | str | None = None
     initialization: InitializationConfig | None = None
     initialization_by_fold: dict[int, InitializationConfig] | None = None
+    disable_classifier: bool = False
 
     @property
     def category(self) -> str:
-        """Separate reference, architecture, loss and training-strategy experiments."""
+        """Identify reference, component, loss, training and combined controls."""
         if self.parameter is None:
             return "reference"
+        if self.disable_classifier:
+            return "combined_control"
         if self.parameter in ARCHITECTURE_PARAMETERS:
             return "architecture"
         if self.parameter in LOSS_PARAMETERS:
@@ -47,7 +50,14 @@ class AblationVariant:
         return "training"
 
     def configuration(self, base: ExperimentConfig) -> ExperimentConfig:
-        """Replace exactly one supported setting without changing the base."""
+        """Replace one setting or the declared combined control, preserving base."""
+        if not isinstance(self.disable_classifier, bool):
+            raise ValueError("disable_classifier must be boolean")
+        if self.disable_classifier:
+            if self.parameter != "annotation_policy" or self.value != "missing_as_background":
+                raise ValueError("disable_classifier is only for the explicit missing-as-background control")
+            if not base.model.classifier:
+                raise ValueError("The combined control requires a reference with a classifier")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", self.name):
             raise ValueError("Variant names must be safe folder identifiers")
         parameter = self.parameter
@@ -67,6 +77,9 @@ class AblationVariant:
             if parameter == "regions":
                 if self.value not in ("dice_ce", "dice_ce_gradient_fix"):
                     raise ValueError("ROI loss must be dice_ce or dice_ce_gradient_fix")
+            elif parameter == "annotation_policy":
+                if self.value not in ("masked", "missing_as_background"):
+                    raise ValueError("Annotation policy must be masked or missing_as_background")
             else:
                 if base.loss.regions != "dice_ce_gradient_fix":
                     raise ValueError("gradient_fix_version only changes a gradient-fix objective")
@@ -75,6 +88,9 @@ class AblationVariant:
             loss_changes = {parameter: self.value}
             loss = replace(base.loss, **loss_changes)
             config = replace(base, loss=loss)
+            if self.disable_classifier:
+                model = replace(base.model, classifier=False)
+                config = replace(config, model=model)
         elif parameter == "data_multiplier":
             if isinstance(self.value, bool) or not isinstance(self.value, int) or self.value < 1:
                 raise ValueError("data_multiplier must be a positive integer")
@@ -109,7 +125,7 @@ class AblationVariant:
 
 
 def ablation_plan(base: ExperimentConfig, variants: Sequence[AblationVariant]) -> pd.DataFrame:
-    """Validate the experiment matrix and show each single-setting change."""
+    """Validate the matrix and show changes, annotation policies and classifiers."""
     base.validate()
     if not variants or len({variant.name for variant in variants}) != len(variants):
         raise ValueError("Provide a nonempty matrix with unique variant names")
@@ -118,18 +134,19 @@ def ablation_plan(base: ExperimentConfig, variants: Sequence[AblationVariant]) -
 
     rows: list[dict[str, Any]] = []
     for variant in variants:
-        variant.configuration(base)
+        configured = variant.configuration(base)
         previous: bool | int | str | None = None
         if variant.parameter == "data_multiplier":
             previous = base.training.data_multiplier
         elif variant.category == "architecture":
             previous = getattr(base.model, variant.parameter)
-        elif variant.category == "loss":
+        elif variant.parameter in LOSS_PARAMETERS:
             previous = getattr(base.loss, variant.parameter)
         elif variant.category == "training":
             previous = getattr(base.preprocessing, variant.parameter)
         rows.append({"Variant": variant.name, "Category": variant.category,
-                     "Parameter": variant.parameter, "ReferenceValue": previous, "Value": variant.value})
+                     "Parameter": variant.parameter, "ReferenceValue": previous, "Value": variant.value,
+                     "AnnotationPolicy": configured.loss.annotation_policy, "Classifier": configured.model.classifier})
     return pd.DataFrame(rows)
 
 
@@ -245,7 +262,8 @@ def run_study(
     for variant in variants:
         variant_config = variant.configuration(base)
         variant_data = replace(data, config=variant_config)
-        if variant_config.loss.regions != "dice_ce_gradient_fix":
+        masked_policy: bool = variant_config.loss.annotation_policy == "masked"
+        if masked_policy and variant_config.loss.regions != "dice_ce_gradient_fix":
             keys = data.subjects.scan_keys(data.subjects.subject_ids)
             for key in keys:
                 scan = data.loader.get_subject(key)
@@ -279,6 +297,9 @@ def run_study(
             # in an older study; the split comparison below remains mandatory.
             saved["base"]["fixed_split"] = contract["base"]["fixed_split"]
         saved["base"] = ExperimentConfig.from_dict(saved["base"]).to_dict()
+        for variant in saved["variants"]:
+            if "parameter" in variant:
+                variant.setdefault("disable_classifier", False)
         saved = json.loads(json.dumps(saved, default=str))
         saved_loss = saved["base"]["loss"]
         if saved_loss["regions"] == "dice_ce_gradient_fix":

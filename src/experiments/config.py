@@ -250,6 +250,11 @@ class LossConfig:
     foreground_positive_weight balances positive/negative means in version 3;
     groups containing only one polarity receive its full mean.
     A resumed run must retain its saved objective version.
+
+    annotation_policy="missing_as_background" is an explicit negative control:
+    unavailable ROI targets become background instead of ignored channels.
+    It requires a background-inclusive objective; evaluation availability is
+    unchanged. Normal experiments retain the masked policy.
     """
 
     regions: Literal["dice_ce", "dice_ce_gradient_fix"] = "dice_ce"
@@ -263,6 +268,7 @@ class LossConfig:
     regions_weight: float = 1.0
     brain_weight: float = 1.0
     classifier_weight: float = 1.0
+    annotation_policy: Literal["masked", "missing_as_background"] = "masked"
 
     def validate_weights(self, *, with_classifier: bool) -> None:
         """Allow disabled tasks while requiring a finite, nonzero active objective."""
@@ -280,6 +286,14 @@ class LossConfig:
 
     def validate_for_training(self) -> None:
         """Require an implemented version without silently changing saved objectives."""
+        if self.annotation_policy not in ("masked", "missing_as_background"):
+            raise ValueError("Annotation policy must be masked or missing_as_background")
+        background_inclusive: bool = self.regions == "dice_ce"
+        if self.regions == "dice_ce_gradient_fix" and self.gradient_fix_version == 1:
+            background_inclusive = True
+        if self.annotation_policy == "missing_as_background" and not background_inclusive:
+            raise ValueError("Missing-as-background controls require dice_ce or gradient-fix v1")
+
         version = self.gradient_fix_version
         if isinstance(version, bool) or not isinstance(version, int) or version not in (1, 2, 3):
             raise ValueError("Gradient-fix objective version must be one, two or three")

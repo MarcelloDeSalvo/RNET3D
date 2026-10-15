@@ -7,8 +7,9 @@ configurations, the experiment matrix and actual Keras callbacks.
 
 ## Default matrix
 
-Every row starts from the full reference and changes one setting. Disabling
-several components sequentially would answer a different question.
+Every component row starts from the full reference and changes one setting.
+The explicitly named combined supervision control in 07f changes both masking
+and classifier presence, as shown in the plan.
 
 | Row | Change | Retained behavior |
 |---|---|---|
@@ -19,6 +20,7 @@ several components sequentially would answer a different question.
 | `no_deep_supervision` | `deep_supervision=False` | Finest-level projection and final output layer in both heads |
 | `strided_downsampling` | `max_pooling=False` | Resolution levels; pooling is replaced by strided convolution |
 | `no_classifier` (07f) | `classifier=False` | Region and brain heads, partial-label supervision |
+| `missing_as_background_no_classifier` (07f) | No masking and `classifier=False` | Same cohort, region/brain heads, v1 loss formula, preprocessing and evaluation |
 
 The three multiscale pooled-input branches and their encoder concatenations are
 absent in `no_multiscale`. The head-fusion ablation removes the three coarse
@@ -31,8 +33,8 @@ ordering, filter widths and dropout settings remain unchanged. Older saved
 configurations without these fields load with both enabled. Conventional U-Net
 uses its existing builder and does not use these flags.
 
-Notebook 07 has six default variants; 07f has seven. With five outer folds and
-one seed this requires 30 or 35 fitted models, respectively. Optional rows add to
+Notebook 07 has six default variants; 07f has eight. With five outer folds and
+one seed this requires 30 or 40 fitted models, respectively. Optional rows add to
 that count. The displayed plan and model count should be reviewed before execution.
 
 ## Optional loss rows
@@ -49,7 +51,40 @@ These rows retain the complete reference architecture, preprocessing, task
 weights and SHAM known-empty lesion supervision. Changing an inactive version
 while using the legacy probability loss is rejected. Legacy `dice_ce` on a
 partial-label prepared dataset is rejected before any variant starts fitting;
-switching objectives must not erase missing-label semantics.
+switching objectives alone must not erase missing-label semantics. The explicit
+missing-as-background control below is the deliberate exception.
+
+## Missing labels as background: reviewer control
+
+07f enables `INCLUDE_MISSING_AS_BACKGROUND_CONTROL=True` by default. Its
+`missing_as_background_no_classifier` row sets
+`loss.annotation_policy="missing_as_background"` and removes the auxiliary
+classifier. This is an intentionally naive comparator, separate from all normal
+training defaults. Setting the notebook switch to `False` omits it.
+
+No ROI channel contains the `-1` ignore sentinel in this control. Existing
+zero-valued voxels become ordinary background targets, and unavailable classes
+are supervised as absent throughout the scan. If an unavailable ROI nevertheless
+appears in the source file, its voxels are also projected to background. Verified
+empty SHAM lesions still receive normal negative supervision. Brain targets are
+unchanged. The v1 formula on fully available one-hot targets normalizes over all
+classes, so unavailable-class logits receive gradients rather than being masked.
+The control requires a background-inclusive loss (v1 or ordinary `dice_ce`);
+foreground-only versions cannot silently stand in for this experiment.
+
+Compare this row against `no_classifier` to isolate masking with the auxiliary
+head absent in both models. Against the full `reference`, the comparison changes
+two factors. An optional commented `missing_as_background` row retains the
+classifier and isolates masking against `reference`. The plan displays the actual
+annotation policy and classifier setting for every row.
+
+True annotation availability remains in the loader, manifests and saved data
+contract. Full-volume evaluation still ignores missing GT anatomy for every
+variant, giving a fair comparison on the same annotated structures. Native patch
+losses/metrics instead describe each training objective: control patch scores
+include its assumed background/negative targets and must not be interpreted as
+validation of unannotated anatomy. New controls require a fresh study folder;
+this change does not run training or overwrite previous results.
 
 Validation loss selects checkpoints separately within each objective. Loss
 magnitudes across objectives are not comparable performance measurements. Use

@@ -1,6 +1,8 @@
 """Check matched settings, routing, recovery contracts and animal aggregation."""
 
 import json
+import ast
+from pathlib import Path
 from dataclasses import replace
 
 import numpy as np
@@ -85,6 +87,12 @@ def test_matched_runs_share_data_splits_seeds_and_resume_paths(prepared, tmp_pat
     assert (folder / "full_volume_metrics.csv").is_file()
     assert len(json.loads((folder / "runs.json").read_text())) == 4
 
+    # Earlier studies omit the two fields whose defaults preserve masking.
+    saved = json.loads((folder / "study.json").read_text())
+    saved["base"]["loss"].pop("annotation_policy")
+    for variant in saved["variants"]:
+        variant.pop("disable_classifier")
+    (folder / "study.json").write_text(json.dumps(saved))
     ablation.run_ablation(prepared, variants, study_dir=folder, split=split, seeds=(11, 22), resume=True)
     assert all(path is not None for _, _, path in calls[4:])
     with pytest.raises(ValueError, match="Resume study"):
@@ -137,11 +145,12 @@ def test_tiny_real_study_uses_core_training_and_reuses_completed_runs(prepared, 
         ablation.AblationVariant("no_deep_supervision", "deep_supervision", False),
         ablation.AblationVariant("no_classifier", "classifier", False),
         ablation.AblationVariant("v3", "gradient_fix_version", 3),
+        ablation.AblationVariant("unmasked_no_classifier", "annotation_policy", "missing_as_background", disable_classifier=True),
     ]
     folder = tmp_path / "real_study"
     result = ablation.run_ablation(data, variants, study_dir=folder, split=split)
-    assert len(result.runs) == 5
-    assert result.timings.shape[0] == 5
+    assert len(result.runs) == 6
+    assert result.timings.shape[0] == 6
     assert result.metrics.empty
     assert set(result.patch_metrics["Variant"]) == {variant.name for variant in variants}
     for run in result.runs.values():
@@ -198,3 +207,101 @@ def test_legacy_loss_row_is_rejected_on_partial_data_before_any_run(prepared, tm
     with pytest.raises(ValueError, match="legacy: partial annotations"):
         ablation.run_ablation(prepared, variants, study_dir=folder, split=split)
     assert not folder.exists()
+
+
+@pytest.mark.parametrize("training", [True, False])
+def test_unmasked_control_changes_targets_but_preserves_annotation_metadata(prepared, training):
+    base = replace(
+        prepared.config, model=replace(prepared.config.model, classifier=True),
+        loss=replace(prepared.config.loss, gradient_fix_version=1),
+    )
+    variant = ablation.AblationVariant(
+        "missing_as_background_no_classifier", "annotation_policy", "missing_as_background",
+        disable_classifier=True,
+    )
+    changed = variant.configuration(base)
+    expected = base.to_dict()
+    expected["loss"]["annotation_policy"] = "missing_as_background"
+    expected["model"]["classifier"] = False
+    assert changed.to_dict() == expected
+
+    data = replace(prepared, config=changed)
+    ids = ["D1/SUBJ_0001"]
+    keys = data.subjects.scan_keys(ids)
+    before = [list(data.loader.get_subject(key).unavailable_labels) for key in keys]
+    _, targets = data.make_generator(ids, training=training)[0]
+    assert len(targets) == 2
+    assert np.all(targets[0] >= 0) and np.all(targets[0].sum(axis=-1) == 1)
+    assert np.all(targets[0][..., 2] == 0)
+    assert [data.loader.get_subject(key).unavailable_labels for key in keys] == before
+    assert before == [[2]]
+    masked = replace(prepared, config=base)
+    _, original_targets = masked.make_generator(ids, training=training)[0]
+    assert len(original_targets) == 3
+    assert np.all(original_targets[0][..., 2] == -1)
+    assert base.loss.annotation_policy == "masked"
+
+
+def test_unmasked_v1_supervises_previously_unavailable_logits():
+    import tensorflow as tf
+    from src.evaluation.losses import diceCELoss_gradient_fix
+
+    objective = diceCELoss_gradient_fix(version=1)
+    logits = tf.Variable([[[[[0.2, 0.4, 0.6]]]]], dtype=tf.float32)
+    with tf.GradientTape() as tape:
+        loss = objective(tf.constant([[[[[1., 0., 0.]]]]]), logits)
+    unmasked_gradient = tape.gradient(loss, logits).numpy()
+    with tf.GradientTape() as tape:
+        loss = objective(tf.constant([[[[[1., 0., -1.]]]]]), logits)
+    masked_gradient = tape.gradient(loss, logits).numpy()
+    assert np.isfinite(unmasked_gradient).all()
+    assert unmasked_gradient[..., 2].item() > 0
+    assert masked_gradient[..., 2].item() == 0
+
+
+@pytest.mark.parametrize("version", [2, 3])
+def test_unmasked_background_control_rejects_foreground_only_objectives(prepared, version):
+    loss = replace(prepared.config.loss, gradient_fix_version=version, annotation_policy="missing_as_background")
+    with pytest.raises(ValueError, match="require dice_ce or gradient-fix v1"):
+        loss.validate_for_training()
+
+
+def test_unmasked_policy_is_explicit_and_old_configs_still_default_to_masking(prepared):
+    from src.experiments.config import ExperimentConfig
+
+    saved = prepared.config.to_dict()
+    saved["loss"].pop("annotation_policy")
+    assert ExperimentConfig.from_dict(saved).loss.annotation_policy == "masked"
+    invalid = ablation.AblationVariant("ambiguous", "classifier", False, disable_classifier=True)
+    with pytest.raises(ValueError, match="only for the explicit"):
+        invalid.configuration(prepared.config)
+
+
+def test_ordinary_loss_on_partial_annotations_requires_explicit_background_control(experiment):
+    loss = replace(experiment.loss, regions="dice_ce", annotation_policy="missing_as_background")
+    data = prepare_data(replace(experiment, loss=loss))
+    _, targets = data.make_generator(["D1/SUBJ_0001"], training=False)[0]
+    assert np.all(targets[0] >= 0)
+    assert data.loader.get_subject(("D1_T1w", "SUBJ_0001")).unavailable_labels == [2]
+    with pytest.raises(ValueError, match="partial annotations require"):
+        prepare_data(replace(experiment, loss=replace(loss, annotation_policy="masked")))
+
+
+def test_mouse_full_notebook_enables_the_explicit_control_by_default(prepared):
+    notebook = json.loads((Path(__file__).resolve().parents[1] / "notebook/07f_ablation.ipynb").read_text(encoding="utf-8"))
+    matrix = next(cell for cell in notebook["cells"] if cell.get("id") == "00629d66")
+    base = replace(
+        prepared.config, model=replace(prepared.config.model, classifier=True),
+        loss=replace(prepared.config.loss, gradient_fix_version=1),
+    )
+    namespace = {"config": base, "USE_TBI_PRETRAINING": False, "MODE": "fixed_split", "TRAINING_SEEDS": (42,)}
+    exec(compile(ast.parse("".join(matrix["source"])), "07f-matrix", "exec"), namespace)
+    assert namespace["INCLUDE_MISSING_AS_BACKGROUND_CONTROL"] is True
+    variants = namespace["variants"]
+    assert len(variants) == 8
+    control = next(variant for variant in variants if variant.name == "missing_as_background_no_classifier")
+    config = control.configuration(base)
+    assert not config.model.classifier and config.loss.annotation_policy == "missing_as_background"
+    row = namespace["plan"].loc[namespace["plan"].Variant.eq(control.name)].iloc[0]
+    assert row.Category == "combined_control" and not row.Classifier
+    assert row.AnnotationPolicy == "missing_as_background"

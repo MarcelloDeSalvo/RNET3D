@@ -684,19 +684,22 @@ class PreparedData:
             "num_classes": len(config.labels.names),
             "batch_size": config.training.batch_size,
         }
-        partial_labels: bool = config.loss.regions == "dice_ce_gradient_fix"
+        missing_as_background: bool = config.loss.annotation_policy == "missing_as_background"
+        partial_labels: bool = config.loss.regions == "dice_ce_gradient_fix" and not missing_as_background
         return MultiTaskGenerator(
             ids=keys, loader=self.loader, config=settings, shuffle=training,
             preprocessor=pipeline, drop_last=False, partial_labels=partial_labels,
             with_classifier=config.model.classifier, batch_size=batch_size,
             sample_preprocessors=sample_preprocessors,
+            missing_labels_as_background=missing_as_background,
         )
 
 
 def prepare_data(config: ExperimentConfig, *, require_training_loss: bool = True) -> PreparedData:
     """Register datasets and resolve missing source labels per scan.
 
-    Training requires a partial-label-aware loss for incomplete annotations.
+    Normal training requires a partial-label-aware loss for incomplete annotations.
+    An explicit missing-as-background control changes targets, not GT metadata.
     Offline evaluation can disable that loss check because it does not fit; all
     vocabulary and annotation checks still apply, including missing-label masks.
     """
@@ -745,7 +748,8 @@ def prepare_data(config: ExperimentConfig, *, require_training_loss: bool = True
                 available.add(1)
 
             scan.unavailable_labels = sorted(set(labels) - available)
-            if require_training_loss and scan.unavailable_labels and config.loss.regions != "dice_ce_gradient_fix":
+            masked_policy: bool = config.loss.annotation_policy == "masked"
+            if require_training_loss and masked_policy and scan.unavailable_labels and config.loss.regions != "dice_ce_gradient_fix":
                 raise ValueError(f"{scan.id}: partial annotations require dice_ce_gradient_fix")
 
     subjects = SubjectIndex(loader)
