@@ -655,3 +655,13 @@ metrics are exported together in `summary/evaluation_metrics.xlsx`, with distinc
 aggregation stages. Study folders provide the same tables. The final notebook cells
 and 09 measure saved checkpoints without fitting. See
 [the detailed workflow and current-source audit](reviewer_workflow_steps_1_3.md).
+
+## Revision reporting
+
+Notebook 10 consolidates explicit saved full-volume, native patch and timing
+sources into CSVs and `revision_tables.xlsx`. Patch/cohort measurements and
+fold/scan timings remain separate from animal uncertainty. Coverage and
+failure-review tables retain original statuses and source identities, while
+the export records input hashes and rejects changed files. Missing hardware
+metadata stays unknown. Additional baseline training and the independent D4
+manual-volume analysis are deferred. See [revision reporting](revision_reporting.md).

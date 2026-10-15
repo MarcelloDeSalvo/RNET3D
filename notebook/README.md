@@ -40,7 +40,7 @@ and restores best weights before evaluation, so EarlyStopping itself uses
 | [07f_ablation.ipynb](07f_ablation.ipynb) | MouseFull component/classifier ablations with eleven classes; optional v1/v3 loss comparison | Implemented |
 | [08_unet_comparison.ipynb](08_unet_comparison.ipynb) | Matched 3DR-Net and standard 3D U-Net runs | Implemented |
 | [09_inference_evaluation.ipynb](09_inference_evaluation.ipynb) | Stopped-checkpoint/export inference, physical metrics and interactive GT comparison | Implemented |
-| [10_revision_results.ipynb](10_revision_results.ipynb) | Animal-aware uncertainty, volume agreement, comparisons and manuscript exports | Implemented |
+| [10_revision_results.ipynb](10_revision_results.ipynb) | Animal uncertainty, native patch tables, costs, coverage/failure review and manuscript exports | Implemented; independent D4 manual-volume analysis deferred |
 
 The inference notebook accepts a stopped/completed `RUN_DIR` and selects its
 saved best weights and cohort. Set `EVALUATION_ROLE="holdout"` for ordinary CV,
@@ -165,3 +165,11 @@ and confusion counts, plus independent SHAM lesion-volume diagnostics. Notebook
 10 reads explicit `CLASSIFIER_FILES` and displays a Plotly confusion matrix without
 retraining. Classifier decisions do not suppress lesions.
 See [classifier evaluation](../docs/classifier_evaluation.md).
+
+Revision notebook 10 also accepts explicit `PATCH_SOURCES` and `COST_SOURCES`.
+Its export combines CSVs and `revision_tables.xlsx`, retaining patch, full-volume
+and timing measurements as separate statistical units. Coverage and failure
+review tables preserve missing/empty statuses and never remove low-scoring
+animals. Input SHA256 hashes make the selected evidence auditable. The additional
+baseline experiments and independent D4 manual-volume analysis remain deferred.
+See [revision reporting](../docs/revision_reporting.md).
