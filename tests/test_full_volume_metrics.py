@@ -98,3 +98,21 @@ def test_segmentation_evaluator_rejects_missing_subject_predictions():
     evaluator = SegmentationEvaluator(None, ['animal'], {}, predict_subject=lambda model, subject: [], regions={1: 'lesion'})
     with pytest.raises(ValueError, match='No full-volume'):
         evaluator.evaluate()
+
+
+def test_physical_metrics_use_full_sheared_affine_without_changing_orthogonal_results():
+    a = np.zeros((5, 5, 5), dtype=np.uint8)
+    b = a.copy()
+    a[1, 1, 1] = 1
+    b[2, 2, 1] = 1
+    affine = np.array([[1, 0.5, 0, 0], [0, 1, 0, 0], [0, 0, 2, 0], [0, 0, 0, 1]], dtype=float)
+    spacing = np.linalg.norm(affine[:3, :3], axis=0)
+    result = binary_segmentation_metrics(a, b, spacing, affine_mm=affine)
+    assert result["HD95"] == pytest.approx(np.sqrt(1.5 ** 2 + 1))
+    assert result["ASSD"] == pytest.approx(result["HD95"])
+    assert result["ReferenceVolume"] == pytest.approx(2)
+    orthogonal = np.diag([1, 2, 3, 1])
+    old = binary_segmentation_metrics(a, b, (1, 2, 3))
+    new = binary_segmentation_metrics(a, b, (1, 2, 3), affine_mm=orthogonal)
+    for key in old:
+        assert new[key] == pytest.approx(old[key], nan_ok=True)

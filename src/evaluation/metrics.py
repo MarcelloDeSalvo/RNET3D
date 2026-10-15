@@ -10,6 +10,7 @@ import tensorflow.keras.backend as K
 import numpy as np
 import pandas as pd
 from scipy import ndimage
+from scipy.spatial import cKDTree
 
 from .losses import ignore_unavailable_ground_truth
 
@@ -359,6 +360,7 @@ def compute_metric(
 
 def binary_segmentation_metrics(
     reference: np.ndarray, prediction: np.ndarray, spacing_mm: Sequence[float],
+    *, affine_mm: np.ndarray | None = None,
 ) -> dict[str, float]:
     """Score aligned binary 3D masks using physical voxel sizes in array-axis order.
 
@@ -368,8 +370,9 @@ def binary_segmentation_metrics(
     NaN if either mask is empty. Both-empty Dice/IoU equal one; sensitivity and
     precision are NaN when their respective denominators are zero. RVE is the
     signed percentage (prediction-reference)/reference, NaN for zero reference.
-    Inputs must already share an orthogonal physical grid; spacing alone cannot
-    represent shear or detect differing origins/orientations.
+    Spacing-only calls retain the orthogonal-grid calculation. Supply affine_mm
+    for a shared nonorthogonal grid: volume uses its determinant and boundary
+    distances use nearest surface centres in physical space, without resampling.
     """
     reference = np.asarray(reference)
     prediction = np.asarray(prediction)
@@ -382,6 +385,20 @@ def binary_segmentation_metrics(
         if not np.isin(mask, [0, 1]).all():
             raise ValueError("Binary masks must contain only zero and one")
 
+    orthogonal: bool = True
+    affine: np.ndarray | None = None
+    if affine_mm is not None:
+        affine = np.asarray(affine_mm, dtype=float)
+        if affine.shape != (4, 4) or not np.isfinite(affine).all():
+            raise ValueError("affine_mm must be a finite 4x4 affine")
+        if not np.allclose(affine[3], [0, 0, 0, 1]) or abs(np.linalg.det(affine[:3, :3])) < 1e-12:
+            raise ValueError("affine_mm must be an invertible spatial affine")
+        axis_lengths: np.ndarray = np.linalg.norm(affine[:3, :3], axis=0)
+        if not np.allclose(axis_lengths, spacing, rtol=1e-6, atol=1e-8):
+            raise ValueError("affine_mm and spacing_mm must describe the same grid")
+        directions: np.ndarray = affine[:3, :3] / spacing
+        orthogonal = bool(np.allclose(directions.T @ directions, np.eye(3), atol=1e-10))
+
     reference = reference.astype(bool)
     prediction = prediction.astype(bool)
     reference_count: int = int(np.count_nonzero(reference))
@@ -390,6 +407,8 @@ def binary_segmentation_metrics(
     total: int = reference_count + prediction_count
     union: int = total - intersection
     voxel_volume: float = float(np.prod(spacing))
+    if affine is not None:
+        voxel_volume = float(abs(np.linalg.det(affine[:3, :3])))
     reference_volume: float = reference_count * voxel_volume
     prediction_volume: float = prediction_count * voxel_volume
 
@@ -415,12 +434,21 @@ def binary_segmentation_metrics(
         eroded_prediction = ndimage.binary_erosion(prediction, structure=connectivity, border_value=0)
         reference_surface: np.ndarray = reference & ~eroded_reference
         prediction_surface: np.ndarray = prediction & ~eroded_prediction
-        outside_reference: np.ndarray = ~reference_surface
-        outside_prediction: np.ndarray = ~prediction_surface
-        to_reference = ndimage.distance_transform_edt(outside_reference, sampling=spacing)
-        to_prediction = ndimage.distance_transform_edt(outside_prediction, sampling=spacing)
-        forward: np.ndarray = to_prediction[reference_surface]
-        backward: np.ndarray = to_reference[prediction_surface]
+        if orthogonal:
+            outside_reference: np.ndarray = ~reference_surface
+            outside_prediction: np.ndarray = ~prediction_surface
+            to_reference = ndimage.distance_transform_edt(outside_reference, sampling=spacing)
+            to_prediction = ndimage.distance_transform_edt(outside_prediction, sampling=spacing)
+            forward: np.ndarray = to_prediction[reference_surface]
+            backward: np.ndarray = to_reference[prediction_surface]
+        else:
+            # The shared physical origin cancels in all paired point distances.
+            reference_points: np.ndarray = np.argwhere(reference_surface) @ affine[:3, :3].T
+            prediction_points: np.ndarray = np.argwhere(prediction_surface) @ affine[:3, :3].T
+            reference_tree = cKDTree(reference_points)
+            prediction_tree = cKDTree(prediction_points)
+            forward, _ = prediction_tree.query(reference_points)
+            backward, _ = reference_tree.query(prediction_points)
         forward_hd95: float = float(np.percentile(forward, 95))
         backward_hd95: float = float(np.percentile(backward, 95))
         hd95 = max(forward_hd95, backward_hd95)
@@ -438,6 +466,7 @@ def segmentation_metrics_table(
     reference: np.ndarray, prediction: np.ndarray, spacing_mm: Sequence[float],
     regions: Mapping[int, str], *, subject: str, scan: str = '', dataset: str = '',
     available_labels: Sequence[int] | None = None,
+    affine_mm: np.ndarray | None = None,
 ) -> pd.DataFrame:
     """Return long-form full-volume metrics for explicit anatomical label values.
 
@@ -467,7 +496,9 @@ def segmentation_metrics_table(
     for label, region in regions.items():
         reference_mask: np.ndarray = reference == label
         prediction_mask: np.ndarray = prediction == label
-        values: dict[str, float] = binary_segmentation_metrics(reference_mask, prediction_mask, spacing_mm)
+        values: dict[str, float] = binary_segmentation_metrics(
+            reference_mask, prediction_mask, spacing_mm, affine_mm=affine_mm,
+        )
         status: str = 'ok'
         if label not in available:
             status = 'unavailable'
