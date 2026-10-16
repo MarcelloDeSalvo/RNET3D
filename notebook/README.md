@@ -88,6 +88,12 @@ unstratified generation; saved/resumed folds remain unchanged.
 
 The diagnostic notebooks are:
 
+- [check_interpolation_sensitiity.ipynb](check_interpolation_sensitiity.ipynb):
+  a short D1 training comparison of MRI spline orders 0/1/2/3 with shared animals,
+  seeds, evaluation patches and original model widths. Includes a grid audit,
+  validation/test reports, T1w/T2w summaries and optional exports. Defaults to
+  ten epochs/four training batches per epoch, with training disabled. See the
+  [interpolation guide](../docs/interpolation_sensitivity.md).
 - [check_preprocessing.ipynb](check_preprocessing.ipynb): one random scan, one
   preprocessing/augmentation per short cell, and an editable combined pipeline
   at the end. MRI/ROI/brain overlays share the RIA reference; changes in shape,

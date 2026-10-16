@@ -811,8 +811,9 @@ def make_preprocessor(
     supply a separate mapping so merged training classes do not erase GT sides.
     New training runs blur/add noise on the native grid before resampling,
     followed by physical affine augmentation. Saved resampled-grid protocols
-    retain affine/blur/noise after resampling. MRI uses linear interpolation,
-    masks nearest neighbour; validation and inference have no augmentation.
+    retain affine/blur/noise after resampling. MRI grid resampling uses the saved
+    spline order (linear by default), affine MRI augmentation stays linear and
+    masks use nearest neighbour. Validation and inference have no augmentation.
     """
     from ..preprocessing.preprocessor import (
         CorrectX10, Flip, GaussianBlur, MapLabels, Noise, Normalize, PadderCutter,
@@ -853,8 +854,9 @@ def make_preprocessor(
         if settings.intensity_augmentation_grid == "native":
             steps.extend(intensity_steps)
 
+    resampling_order: int = settings.resampling_order
     resampling = Resample(
-        target_resolution=settings.spacing_mm, interpolation=1, orthogonal=False,
+        target_resolution=settings.spacing_mm, interpolation=resampling_order, orthogonal=False,
     )
     steps.append(resampling)
 

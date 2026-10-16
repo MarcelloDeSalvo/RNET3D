@@ -152,6 +152,10 @@ Open [Check feature space](notebook/check_feature_space.ipynb) to explore encode
 features with interactive PCA or optional UMAP, colored by cohort, condition,
 modality or timepoint. See the [feature-space guide](docs/feature_space.md).
 
+Open [Check interpolation sensitivity](notebook/check_interpolation_sensitiity.ipynb)
+for a short matched D1 training study with MRI resampling orders 0, 1, 2 and 3.
+See the [interpolation guide](docs/interpolation_sensitivity.md) for scope and outputs.
+
 See [Losses, metrics and partial-label gradients](docs/losses_metrics.md) for
 the numerical refactor checks and the confirmed coupling through softmax.
 

@@ -143,6 +143,8 @@ class PreprocessingConfig:
     Intensity augmentation normally precedes resampling on the native grid.
     The resampled setting retains the earlier affine/blur/noise order for saved
     runs. Blur bounds describe sigma; noise bounds describe standard deviation.
+    resampling_order is the SciPy spline order for MRI grid resampling only;
+    affine MRI augmentation stays linear and label masks always use order zero.
     """
 
     reference: Path
@@ -162,9 +164,13 @@ class PreprocessingConfig:
     blur_sigma_units: Literal["voxels", "mm"] = "voxels"
     noise_std_range: tuple[float, float] = (0.0, 0.05)
     noise_std_units: Literal["intensity", "image_std"] = "intensity"
+    resampling_order: int = 1
 
     def validate(self) -> None:
         """Validate acquisition-style augmentation ranges and their declared units."""
+        if isinstance(self.resampling_order, bool) or not isinstance(self.resampling_order, int) or not 0 <= self.resampling_order <= 5:
+            raise ValueError("MRI resampling_order must be an integer between zero and five")
+
         if self.intensity_augmentation_grid not in ("native", "resampled"):
             raise ValueError("Intensity augmentation grid must be native or resampled")
         if self.blur_sigma_units not in ("voxels", "mm"):

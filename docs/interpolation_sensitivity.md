@@ -1,0 +1,79 @@
+# Short D1 interpolation sensitivity study
+
+Open [check_interpolation_sensitiity.ipynb](../notebook/check_interpolation_sensitiity.ipynb)
+with the `rnet` kernel. The filename follows the requested spelling. It compares
+MRI resampling orders 0, 1, 2 and 3 on normalized D1, using the shared training
+and evaluation core. Training is disabled until `RUN_STUDY=True`.
+
+`PreprocessingConfig.resampling_order` stores the SciPy spline order: nearest,
+linear, quadratic or cubic in this study. See the
+[SciPy interpolation definition](https://docs.scipy.org/doc/scipy/reference/generated/scipy.ndimage.affine_transform.html).
+It applies to MRI target-grid resampling during training, validation and
+inference. Its default is 1, including older saved configurations without the
+field. The low-level resampler supports orders zero through five. Masks always
+use nearest neighbour, and physical affine MRI augmentation stays linear for
+all variants. Do not pass these integers to SimpleITK as interpolation enums.
+
+All runs start from scratch with the original D1 four-class task, 80-cube patches
+and filter widths `(16, 32, 64, 128, 256)`. The original multiscale/residual/
+attention/fused-head model is retained. Shared preprocessing uses the RIA
+reference, native-grid intensity degradation, center-biased random cropping
+and LR reflection. Postprocessing separates the merged ventricles by centroid,
+cleans the brain head and exports original ROI IDs. Predictions need not be
+written: `SAVE_PREDICTIONS=False` retains metrics and checkpoints.
+
+The default pilot uses all D1 animals, ten epochs, four training batches per
+epoch, batch size eight, multiplier one and seed 42. Fixed learning rate and
+epoch count keep the optimizer budget matched. Callbacks are explicit in the
+notebook; best-validation and recovery checkpoints remain managed by the core.
+Validation/test cover every saved deterministic evaluation patch and every
+selected full volume. `STEPS_PER_EPOCH=None` restores complete training epochs.
+Use a fresh study folder for changes to budget, orders, seeds or callbacks.
+
+One shared animal split and one saved evaluation-patch collection are used for
+every order and seed. `SPLIT_FILE` optionally supplies exact existing memberships.
+The study contract, each run's experiment file and the plan record the order.
+Grid-resampling order does not change target geometry, so shared crop coordinates
+remain valid; MRI intensities are recomputed under each variant's pipeline.
+Masks are reprocessed with the same nearest-neighbour policy in every variant.
+
+The notebook audits spacing after the actual reorientation/unit-correction
+prefix. Inputs already on the target grid bypass resampling. The training cell
+refuses a study where no input is affected. A pooled D1 difference can otherwise
+be diluted by unchanged scans: per-sequence and affected/unaffected animal Dice
+tables accompany the overall comparison. The audit is saved as
+`resampling_audit.csv` when the study finishes.
+
+The affected flag uses the resampler's exact tolerance. Small affine/header
+rounding can flag nominally isotropic inputs too; the audit also records actual
+spacing, anisotropy and maximum relative spacing change. A read-only header check
+of the current D1 inventory found all 112 scans trigger the resampler, including
+small spacing deviations in T1w and larger through-plane differences in T2w.
+The flag alone is not a measure of interpolation impact.
+
+To resume, retain the folder and exact settings, enable `RESUME_STUDY` and rerun
+configuration/data cells before training. The shared runner reuses completed
+fits and restores interrupted fits. To inspect completed results after restart,
+run setup/configuration and the result cells with explicit `RESULTS_DIR`;
+training is unnecessary. Source data, original notebooks and earlier runs are
+not modified.
+
+Validation lesion Dice supplies an exploratory ranking. Held-out tables contain
+native patch measurements separately from postprocessed full-volume ROI/brain
+Dice, IoU, HD95, ASSD, sensitivity, precision and volume measurements. Paired
+comparisons use order 1 as reference: candidate minus linear, with animal
+bootstrap intervals and Holm-adjusted Wilcoxon p-values. Timing records retain
+their existing workload definitions. Optional fresh-folder exports include
+validation/test paper workbooks, CSVs, the validation ranking and sequence table.
+
+This is a short-budget convergence/sensitivity screen, not a universal ranking of
+interpolators. Different seeds can change outcomes; a single split does not
+measure retraining uncertainty. Selecting a setting from test performance makes
+that cohort part of development. Higher spline orders may overshoot input
+intensities; no extra clipping is silently introduced.
+
+Tests cover configuration validation/default loading, routing at every stage,
+fixed affine interpolation, identical discrete GT/grid across orders, shared
+evaluation coordinates with recomputed MRI, a disabled notebook with no fitting,
+and a four-model synthetic training/evaluation pass. No real D1 training is
+launched while creating the notebook.
