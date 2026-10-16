@@ -561,6 +561,80 @@ def run_cross_validation(
     return result
 
 
+def run_development_refit(
+    data: PreparedData, *, resume_run: Path | None = None,
+) -> TrainingResult:
+    """Refit all development animals for an already fixed epoch budget.
+
+    This is deployment fitting, not an independent performance experiment.
+    There is no validation/test set, adaptive schedule or early stopping.
+    The existing fold runner supplies epoch recovery, training-loss checkpoint
+    selection and inference-model export. Set the duration from inner-validation
+    results before calling; external measurements must never determine it.
+    """
+    config = data.config
+    config.validate()
+    if config.initialization_by_fold:
+        raise ValueError("Deployment refitting requires one explicit initialization")
+    if config.training.monitor != "loss" or config.training.default_callbacks:
+        raise ValueError("Development refitting requires monitor='loss' and default_callbacks=False")
+    if config.training.validation_steps is not None:
+        raise ValueError("Development refitting has no validation batches")
+
+    from .initialization import pretraining_audit
+    from ..evaluation.training_state import run_lock, write_json
+
+    ids = data.subjects.subject_ids
+    audit = pretraining_audit(data, config.initialization, protected_ids=[])
+    settings = config.training
+    settings.validate(len(ids), cross_validation=False)
+    resume: bool = resume_run is not None
+    if resume:
+        run_dir = Path(resume_run).resolve()
+        validate_resume(data, run_dir)
+        saved = json.loads((run_dir / "splits.json").read_text(encoding="utf-8"))
+        if saved != {"train": ids, "validation": [], "test": []}:
+            raise ValueError("Development-refit animal selection changed")
+    else:
+        run_dir = settings.start_run()
+        write_json(run_dir / "splits.json", {"train": ids, "validation": [], "test": []})
+        save_provenance(config, data, run_dir)
+        write_json(run_dir / "refit.json", {
+            "purpose": "Deployment refit; no independent evaluation",
+            "epochs": settings.epochs, "selection": "minimum training loss within the fixed budget",
+        })
+    _callback_contract([], run_dir, resume=resume)
+    _save_pretraining_audits({"0": audit}, run_dir, resume=resume)
+    folder = run_dir / "fold_0"
+    folder.mkdir(exist_ok=resume)
+    split = FoldSplit(index=0, train_ids=ids, val_ids=[])
+    checkpoint = folder / "best.weights.h5"
+    context = FoldContext(split=split, output_dir=folder, config=settings, checkpoint_path=checkpoint)
+    factories = ExperimentFactories(data, callback_list=[], fixed_split=False)
+    metadata = ExperimentMetadata(
+        experiment_name=settings.model_name, model_variant=config.model.architecture,
+        dataset_name="+".join(dataset.name for dataset in config.data.datasets),
+    )
+    result = TrainingResult(run_dir=run_dir, metadata=metadata)
+
+    def no_validation(subject_ids: list[str]) -> None:
+        """Supply no selection data to Keras for this deployment-only fit."""
+        if subject_ids:
+            raise ValueError("Development refitting cannot receive validation animals")
+        return None
+
+    evaluation = EvaluationConfig(evaluate_validation=False, save_predictions=False)
+    with run_lock(run_dir):
+        train_fold(
+            context=context, train_factory=factories.training_data, val_factory=no_validation,
+            model_factory=factories.model, callback_factory=factories.callbacks,
+            evaluators={}, evaluation_config=config.to_dict(), result=result,
+            evaluation=evaluation, model_exporter=export_model, resume=resume,
+        )
+        save_training_result(result, settings)
+    return result
+
+
 def history_figure(result: TrainingResult) -> Any:
     """Create a native Plotly figure without changing or retraining the experiment."""
     import plotly.graph_objects as go

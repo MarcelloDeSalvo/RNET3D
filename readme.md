@@ -176,6 +176,10 @@ See [Manuscript tables from saved evaluations](docs/paper_tables.md) for the fin
 notebook dataframes, fold-averaged test metrics, anatomy summaries, animal
 confidence intervals and CSV/Excel exports without rerunning training.
 
+See [Sequential revision experiments](docs/revision_suite.md) for one configurable
+launcher with shared animal folds, matching TBI initialization, a one-step draft
+mode, checkpoint recovery and a compact four-table paper workbook.
+
 See [Inference and full-volume evaluation](docs/inference.md) for patch
 aggregation, output-head contracts and optional evaluation reports.
 

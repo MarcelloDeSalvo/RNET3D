@@ -5,6 +5,11 @@ own data loading, preprocessing, splits, fitting, recovery and evaluation.
 Use the **rnet** kernel; new notebooks keep training disabled until enabled.
 Your executed TBI notebook retains its existing settings and outputs.
 
+For sequential execution without notebook cells, use
+[run_revision_experiments.py](../scripts/run_revision_experiments.py).
+The [suite guide](../docs/revision_suite.md) describes shared folds, a small draft
+mode, recovery and the compact paper workbook with four sheets.
+
 MRI workflows share `example/RARE/TBI_fm_19_49/Anat/TBI_fm_19_49_N4.nii.gz`
 as their orientation reference. Its voxel axes are **R, I, A**: LR is axis 0,
 IS is axis 1, and AP is axis 2. Reorientation preserves world coordinates; it

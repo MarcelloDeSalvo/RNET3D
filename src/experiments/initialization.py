@@ -94,8 +94,24 @@ def load_pretraining_source(settings: InitializationConfig, *, include_test: boo
     if not split_file.is_file() or not manifest_file.is_file():
         raise ValueError("Pretraining requires source split.json and subjects.csv for the selected fold")
     split = json.loads(split_file.read_text(encoding="utf-8"))
-    if not isinstance(split, dict) or not split.get("train") or not split.get("validation"):
+    refit_file = run_dir / "refit.json"
+    is_refit: bool = refit_file.is_file()
+    if not isinstance(split, dict) or not split.get("train"):
         raise ValueError("Pretraining source must declare training and checkpoint-selection animals")
+    if not split.get("validation"):
+        if not is_refit:
+            raise ValueError("Pretraining source must declare training and checkpoint-selection animals")
+        refit = json.loads(refit_file.read_text(encoding="utf-8"))
+        refit_config = ExperimentConfig.load(experiment_file)
+        valid_refit = (
+            refit.get("purpose") == "Deployment refit; no independent evaluation"
+            and refit_config.training.monitor == "loss"
+            and not refit_config.training.default_callbacks
+            and refit.get("epochs") == refit_config.training.epochs
+            and not split.get("test")
+        )
+        if not valid_refit:
+            raise ValueError("Refit sources require a fixed-budget, training-only deployment contract")
 
     root_split = run_dir / "splits.json"
     if include_test and not split.get("test") and root_split != split_file and root_split.is_file():
@@ -222,6 +238,9 @@ def pretraining_audit(
         validation_ids=validation_ids, ancestors=next_ancestors,
     )
     files = [checkpoint, split_file, manifest_file, experiment_file]
+    refit_file = run_dir / "refit.json"
+    if refit_file.is_file():
+        files.append(refit_file)
     contract_file = run_dir / "data_contract.json"
     if contract_file.is_file():
         files.append(contract_file)
