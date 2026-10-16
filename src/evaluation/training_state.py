@@ -160,11 +160,47 @@ class EpochCheckpoint(tf.keras.callbacks.Callback):
         """Measure completed epoch time, including its validation pass."""
         self.started = time.perf_counter()
 
+    def _validate_monitor(self, epoch: int, values: dict[str, float]) -> None:
+        """Explain invalid selection metrics without advancing recovery state."""
+        value = values.get(self.monitor)
+        if value is not None and np.isfinite(value):
+            return
+
+        reason: str = "missing"
+        detail: str = f"{self.monitor!r} is missing from the epoch logs"
+        if value is not None:
+            reason = "nonfinite"
+            detail = f"{self.monitor!r} is {value!r}"
+
+        observed: dict[str, float | str] = {}
+        for name, metric in values.items():
+            observed[name] = metric
+            if not np.isfinite(metric):
+                observed[name] = repr(metric)
+
+        invalid_weights: list[str] = []
+        if self.model is not None:
+            for weight in self.model.weights:
+                if not np.all(np.isfinite(weight.numpy())):
+                    invalid_weights.append(weight.name)
+
+        report = {
+            "epoch": epoch + 1, "monitor": self.monitor, "reason": reason,
+            "logs": observed, "nonfinite_weights": invalid_weights,
+            "last_completed_epoch": self.completed_epochs,
+        }
+        report_path = self.folder / f"invalid_epoch_{epoch + 1}.json"
+        write_json(report_path, report)
+        raise ValueError(
+            f"Epoch {epoch + 1}: checkpoint-selection metric {detail}. "
+            f"Epoch logs: {values}. Diagnostic report: {report_path}. "
+            "This epoch was not committed for recovery."
+        )
+
     def on_epoch_end(self, epoch: int, logs: Any = None) -> None:
         """Commit latest state after the best-checkpoint callback has finished."""
         values = {key: float(value) for key, value in (logs or {}).items()}
-        if self.monitor not in values or not np.isfinite(values[self.monitor]):
-            raise ValueError("Every epoch needs a finite checkpoint-selection metric")
+        self._validate_monitor(epoch, values)
         # Newly compiled monitors have no observations for earlier epochs.
         for key in values:
             if key not in self.history:

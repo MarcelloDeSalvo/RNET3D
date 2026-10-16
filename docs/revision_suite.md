@@ -37,6 +37,23 @@ Draft and full runs occupy different directories and cannot be resumed into
 one another. Scientific training is never launched by running the file without
 an execution flag.
 
+If a draft made with the earlier 16-cube patch fails on its first epoch, start
+the corrected 32-cube draft under a new name:
+
+```powershell
+python scripts/run_revision_experiments.py --quick --run-name revision_v2
+```
+
+Changing the patch size requires a fresh draft because its copied images and
+model graph also change. The 32-cube input leaves eight spatial values per
+BatchNorm channel after four downsampling stages, even with batch size one.
+This avoids the singleton bottleneck of the earlier draft setting.
+
+A missing or non-finite checkpoint-selection metric stops fitting and writes
+`fold_N/invalid_epoch_E.json`. It contains the one-based epoch, all epoch metrics,
+any non-finite model weights (including BatchNorm statistics), and the last
+committed epoch. The failed epoch does not replace committed recovery state.
+
 ## Early configuration
 
 The launcher exposes animal selections, split files, seeds, epoch budgets,
@@ -151,7 +168,7 @@ The original input inventory is validated first. Small central physical fields
 are then copied into the suite's `draft_data` directory using linear MRI and
 nearest-neighbour label interpolation. Originals are never edited. The copied
 third-axis spacing differs slightly from training spacing to exercise resampling.
-Drafts use 16-cube inputs, small filters, batch size one, one epoch, one fitting
+Drafts use 32-cube inputs, small filters, batch size one, one epoch, one fitting
 step and one deterministic evaluation patch per scan. They still execute actual
 training, transfer, recovery, full-volume prediction, metric computation, refits
 and D4 evaluation on those small copies. Compilation can dominate this runtime.

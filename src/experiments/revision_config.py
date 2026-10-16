@@ -28,7 +28,9 @@ class DraftConfig:
     sham_animals: int = 6
     rat_animals: int = 3
     external_animals: int = 2
-    patch_size: tuple[int, int, int] = (16, 16, 16)
+    # Four downsampling stages leave a 2-cube bottleneck. A 16-cube input
+    # leaves only one value per BatchNorm channel when the draft batch is one.
+    patch_size: tuple[int, int, int] = (32, 32, 32)
     filters: tuple[int, int, int, int, int] = (2, 4, 8, 16, 32)
     epochs: int = 1
     steps_per_epoch: int = 1
@@ -127,6 +129,11 @@ class RevisionSuiteConfig:
             raise ValueError("Epoch, batch, fold and draft counts must be positive integers")
         if self.folds < 2 or self.draft.folds < 2:
             raise ValueError("Cross-validation requires at least two folds")
+        draft_shape = self.draft.patch_size
+        if len(draft_shape) != 3 or any(type(size) is not int or size < 16 or size % 16 for size in draft_shape):
+            raise ValueError("Draft patch dimensions must be positive multiples of 16")
+        if all(size == 16 for size in draft_shape):
+            raise ValueError("Draft BatchNorm needs more than one bottleneck voxel; use patch_size=(32, 32, 32)")
         if self.bootstrap_samples < 100:
             raise ValueError("bootstrap_samples must be at least 100")
         if not self.interpolation_orders or len(set(self.interpolation_orders)) != len(self.interpolation_orders):

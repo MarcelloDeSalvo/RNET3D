@@ -10,6 +10,58 @@ import tensorflow as tf
 from src.evaluation.k_fold import TrainingConfig, k_fold_loop
 
 
+@pytest.mark.parametrize("selection", [None, float("nan"), float("inf"), float("-inf")])
+def test_invalid_selection_reports_the_epoch_without_advancing_recovery(tmp_path, selection):
+    """A failed epoch retains the last committed history and explains why it failed."""
+    from src.evaluation.training_state import EpochCheckpoint, write_json
+
+    state = EpochCheckpoint(tmp_path, [], resume=False, monitor="val_loss")
+    state.history = {"loss": [0.5], "val_loss": [0.6]}
+    state.completed_epochs = 1
+    committed = {"completed_epochs": 1, "history": state.history}
+    write_json(state.path, committed)
+    values = {"loss": 0.4}
+    if selection is not None:
+        values["val_loss"] = selection
+
+    with pytest.raises(ValueError, match="Epoch 2:.*'val_loss'") as error:
+        state.on_epoch_end(1, values)
+
+    assert "Diagnostic report:" in str(error.value)
+    assert state.completed_epochs == 1
+    assert state.history == committed["history"]
+    assert json.loads(state.path.read_text()) == committed
+    assert not (tmp_path / "latest").exists()
+    report = json.loads((tmp_path / "invalid_epoch_2.json").read_text())
+    assert report["epoch"] == 2 and report["last_completed_epoch"] == 1
+    assert report["monitor"] == "val_loss"
+    if selection is None:
+        assert report["reason"] == "missing"
+    else:
+        assert report["reason"] == "nonfinite"
+        assert report["logs"]["val_loss"] == repr(selection)
+
+
+def test_invalid_selection_reports_nonfinite_batchnorm_statistics(tmp_path):
+    """Distinguish broken inference statistics from an absent validation metric."""
+    from src.evaluation.training_state import EpochCheckpoint
+
+    image = tf.keras.Input((1,))
+    normalization = tf.keras.layers.BatchNormalization()
+    model = tf.keras.Model(image, normalization(image))
+    model.compile(optimizer="sgd", loss="mse")
+    normalization.moving_variance.assign([float("nan")])
+    state = EpochCheckpoint(tmp_path, [], resume=False, monitor="val_loss")
+    state.set_model(model)
+
+    with pytest.raises(ValueError, match="'val_loss' is nan"):
+        state.on_epoch_end(0, {"loss": 0.5, "val_loss": float("nan")})
+
+    report = json.loads((tmp_path / "invalid_epoch_1.json").read_text())
+    assert report["nonfinite_weights"] == [normalization.moving_variance.name]
+    assert not state.path.exists()
+
+
 def test_interrupted_cv_restores_optimizer_and_skips_completed_folds(tmp_path):
     control = {"interrupt": True}
     initial_iterations = []

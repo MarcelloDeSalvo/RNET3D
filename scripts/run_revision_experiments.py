@@ -75,7 +75,7 @@ SAVE_PREDICTIONS: bool = True
 # Tiny real-data central fields and small networks. Drafts have their own root.
 DRAFT = DraftConfig(
     folds=2, d1_animals=6, sham_animals=6, rat_animals=3, external_animals=2,
-    epochs=1, steps_per_epoch=1, patch_size=(16, 16, 16), filters=(2, 4, 8, 16, 32),
+    epochs=1, steps_per_epoch=1, patch_size=(32, 32, 32), filters=(2, 4, 8, 16, 32),
 )
 
 

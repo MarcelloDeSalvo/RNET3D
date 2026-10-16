@@ -78,6 +78,52 @@ def revision_settings(tmp_path):
     )
 
 
+def test_draft_rejects_a_single_bottleneck_value_before_fitting(revision_settings):
+    draft = replace(revision_settings.draft, patch_size=(16, 16, 16))
+    settings = replace(revision_settings, draft=draft)
+    with pytest.raises(ValueError, match="more than one bottleneck voxel"):
+        suite.prepare_suite(settings, mode="draft")
+    assert not (revision_settings.output_root / "draft").exists()
+
+
+def test_default_draft_has_finite_training_and_validation_on_available_devices(revision_settings):
+    """Exercise the real loss and BatchNorm updates, including cuDNN when present."""
+    import tensorflow as tf
+    from src.experiments.revision_config import experiment_configuration
+    from src.experiments.training import build_model
+
+    config = experiment_configuration(
+        revision_settings, "d1", output_dir=revision_settings.output_root, mode="draft",
+    )
+    assert config.preprocessing.patch_size == (32, 32, 32)
+    devices = ["/CPU:0"]
+    if tf.config.list_physical_devices("GPU"):
+        devices.append("/GPU:0")
+    rng = np.random.default_rng(42)
+    shape = (1, *config.preprocessing.patch_size, 1)
+    image = rng.normal(size=shape).astype(np.float32)
+    regions = rng.integers(0, len(config.labels.names), size=shape[:-1])
+    targets = {
+        "regions": tf.one_hot(regions, len(config.labels.names)),
+        "brain_mask": (regions > 0).astype(np.float32)[..., None],
+    }
+
+    for device in devices:
+        tf.keras.backend.clear_session()
+        tf.keras.utils.set_random_seed(42)
+        with tf.device(device):
+            model = build_model(config)
+            trained = model.train_on_batch(image, targets, return_dict=True)
+            validated = model.test_on_batch(image, targets, return_dict=True)
+        assert all(np.isfinite(value) for value in trained.values()), (device, trained)
+        assert all(np.isfinite(value) for value in validated.values()), (device, validated)
+        for layer in model.layers:
+            if isinstance(layer, tf.keras.layers.BatchNormalization):
+                assert np.prod(layer.input_shape[1:-1]) > 1
+                assert np.isfinite(layer.moving_variance.numpy()).all(), (device, layer.name)
+    tf.keras.backend.clear_session()
+
+
 def test_folds_balance_complete_tbi_and_preserve_every_pretraining_role(revision_settings):
     plan = suite.prepare_suite(revision_settings)
     d1 = plan.data["d1"].subjects.subject_ids
