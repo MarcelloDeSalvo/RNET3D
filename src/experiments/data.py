@@ -112,6 +112,7 @@ class TrainingSelection:
 def resolve_training_selection(
     data: PreparedData, *, k_fold: bool = False,
     resume_run: Path | None = None, split_file: Path | None = None, fold_file: Path | None = None,
+    reference_file: Path | None = None, reference_fold: int = 0,
     strata: Mapping[str, str] | None = None,
     initializations: Sequence[InitializationConfig] | None = None,
     initializations_by_fold: Mapping[int, Sequence[InitializationConfig]] | None = None,
@@ -120,6 +121,8 @@ def resolve_training_selection(
 
     Saved memberships are authoritative. CV has no additional permanent test
     split: every selected animal contributes one independent outer holdout.
+    reference_file supplies a common plan; fixed mode selects reference_fold.
+    Explicit split files and resumed memberships override this generation default.
     Source memberships and initialization ancestors retain their existing guards.
     """
     if not isinstance(k_fold, bool):
@@ -129,6 +132,7 @@ def resolve_training_selection(
             raise ValueError("FOLD_FILE requires K_FOLD_COMPATIBLE=True")
         split = resolve_training_split(
             data, resume_run=resume_run, split_file=split_file, initializations=initializations,
+            reference_file=reference_file, reference_fold=reference_fold,
         )
         summary = data.split_summary(split)
         return TrainingSelection(split=split, folds=None, summary=summary)
@@ -151,6 +155,7 @@ def resolve_training_selection(
     else:
         folds = make_pretrained_cv_splits(
             data, strata=strata, initializations_by_fold=initializations_by_fold,
+            reference_file=reference_file,
         )
     if any(not fold.test_ids for fold in folds):
         raise ValueError("K-Fold-compatible mode requires independent outer holdouts")
@@ -194,6 +199,7 @@ def make_split(
 def resolve_training_split(
     data: PreparedData, *, resume_run: Path | None = None, split_file: Path | None = None,
     initializations: Sequence[InitializationConfig] | None = None,
+    reference_file: Path | None = None, reference_fold: int = 0,
 ) -> SubjectSplit:
     """Load exact saved roles or inherit source roles before splitting new animals.
 
@@ -201,6 +207,7 @@ def resolve_training_split(
     splits. New animals fill the requested overall validation/test proportions.
     Explicit/resumed memberships are never changed and must remain independent
     of source fitting; selection-validation may be shared across both stages.
+    A reference_file selects one fold's three roles before applying these checks.
     """
     from .initialization import pretraining_roles
 
@@ -218,6 +225,18 @@ def resolve_training_split(
                 raise ValueError("SPLIT_FILE differs from the resumed run's split")
     elif split_file is not None:
         split = SubjectSplit.load(split_file, data.subjects)
+    elif reference_file is not None:
+        from .splits import reference_folds
+
+        folds = reference_folds(data, reference_file)
+        if type(reference_fold) is not int or not 0 <= reference_fold < len(folds):
+            raise ValueError("REFERENCE_FOLD must identify a fold in REFERENCE_SPLITS")
+        selected = folds[reference_fold]
+        train_ids = tuple(selected.train_ids)
+        validation_ids = tuple(selected.val_ids)
+        test_ids = tuple(selected.test_ids)
+        split = SubjectSplit(train=train_ids, validation=validation_ids, test=test_ids)
+        split.validate(data.subjects)
 
     if split is not None:
         for animal in split.validation:
@@ -364,6 +383,7 @@ def make_pretrained_cv_splits(
     data: PreparedData, *, subject_ids: Sequence[str] | None = None,
     strata: Mapping[str, str] | None = None,
     initializations_by_fold: Mapping[int, Sequence[InitializationConfig]] | None = None,
+    reference_file: Path | None = None,
 ) -> list[FoldSplit]:
     """Reuse source folds and distribute additional animals across outer holdouts.
 
@@ -392,6 +412,20 @@ def make_pretrained_cv_splits(
             selected = initializations_by_fold.get(index, selected)
         roles = pretraining_roles(data, selected, subject_ids=animals)
         inherited.append(roles)
+    if reference_file is not None:
+        from .splits import reference_folds
+
+        folds = reference_folds(data, reference_file, subject_ids=animals, strata=strata)
+        if len(folds) != config.training.k:
+            raise ValueError("Configured K_FOLD_COUNT must match the reference plan's fold count")
+        for fold, roles in zip(folds, inherited):
+            for animal in fold.val_ids:
+                if roles.get(animal) == "train":
+                    raise ValueError(f"Pretraining leakage: reference validation animal was fitted by the source: {animal}")
+            for animal in fold.test_ids:
+                if roles.get(animal) in ("train", "validation"):
+                    raise ValueError(f"Pretraining leakage: reference test animal was used by the source: {animal}")
+        return folds
     matched = set(inherited[0])
     if any(set(roles) != matched for roles in inherited):
         raise ValueError("Pretraining source folds must cover the same animals; provide matching sources for every fold")

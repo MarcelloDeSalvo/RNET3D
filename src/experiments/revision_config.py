@@ -63,6 +63,9 @@ class RevisionSuiteConfig:
     folds_file: Path | None = None
     anchor_split_file: Path | None = None
     rat_folds_file: Path | None = None
+    reference_splits: Path | None = None
+    reference_fold: int = 0
+    ablation_mode: Literal["fixed_split", "cross_validation"] = "fixed_split"
 
     d1_epochs: int = 100
     mouse_full_epochs: int = 300
@@ -108,6 +111,10 @@ class RevisionSuiteConfig:
             raise ValueError("run_name must be a safe directory name")
         if self.folds_file is not None and self.anchor_split_file is not None:
             raise ValueError("Choose folds_file or anchor_split_file, not both")
+        if self.ablation_mode not in ("fixed_split", "cross_validation"):
+            raise ValueError("Ablation mode must be fixed_split or cross_validation")
+        if type(self.reference_fold) is not int or self.reference_fold < 0:
+            raise ValueError("reference_fold must be a nonnegative integer")
         if not self.seeds or len(set(self.seeds)) != len(self.seeds):
             raise ValueError("Provide distinct training seeds")
         if any(type(seed) is not int or seed < 0 for seed in self.seeds):
@@ -168,6 +175,9 @@ class RevisionSuiteConfig:
         for path in (self.folds_file, self.anchor_split_file, self.rat_folds_file, self.inter_rater_manifest):
             if path is not None and not Path(path).is_file():
                 raise FileNotFoundError(path)
+        if self.folds_file is None and self.anchor_split_file is None and self.reference_splits is not None:
+            if not Path(self.reference_splits).is_file():
+                raise FileNotFoundError(self.reference_splits)
 
 
 def experiment_configuration(

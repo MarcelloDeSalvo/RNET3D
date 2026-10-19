@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 
 from .config import DataConfig, DatasetSpec, ExperimentConfig, InitializationConfig
-from .data import PreparedData, prepare_data
+from .data import PreparedData, SubjectSplit, prepare_data
 from .revision_config import RevisionSuiteConfig, experiment_configuration
 from .revision_draft import balanced_sample, validate_draft_sources, write_draft_dataset
 from .revision_splits import (
@@ -83,7 +83,7 @@ def _selected_data(
         raise ValueError("D1 and SHAM selections contain the same biological animal")
     d1 = select_animals(d1, d1_ids)
     mouse_full = select_animals(mouse_full, (*d1_ids, *sham_ids))
-    source_selection = settings.folds_file or settings.anchor_split_file
+    source_selection = settings.folds_file or settings.anchor_split_file or settings.reference_splits
     if mode == "draft" and source_selection is None:
         balance = select_animals(mouse_full, d1_ids)
         selected_d1 = balanced_sample(balance, settings.draft.d1_animals, settings.split_seed)
@@ -152,10 +152,17 @@ def suite_jobs(settings: RevisionSuiteConfig) -> list[SuiteJob]:
         jobs.append(SuiteJob("mouse_full_reference", "mouse_full", "mouse_full", seed, source=source))
         for variant in settings.supervision_controls:
             name = f"mouse_full_{variant}"
-            jobs.append(SuiteJob(name, "mouse_full", "mouse_full", seed, variant, source=source))
+            group: str = "mouse_full_ablation"
+            kind: Literal["fixed_split", "cross_validation"] = settings.ablation_mode
+            if kind == "cross_validation":
+                group = "mouse_full"
+            jobs.append(SuiteJob(name, "mouse_full", group, seed, variant, kind, source=source))
     for seed in settings.seeds:
         for variant in settings.architecture_ablations:
-            jobs.append(SuiteJob(f"d1_{variant}", "d1", "d1", seed, variant))
+            group = "d1_ablation"
+            if settings.ablation_mode == "cross_validation":
+                group = "d1"
+            jobs.append(SuiteJob(f"d1_{variant}", "d1", group, seed, variant, settings.ablation_mode))
     if settings.include_rats:
         for seed in settings.seeds:
             source = f"d1_reference/seed_{seed}"
@@ -180,18 +187,31 @@ def prepare_suite(
     k: int = settings.folds
     if mode == "draft":
         k = settings.draft.folds
-    if settings.folds_file is not None:
-        supplied = read_selection(settings.folds_file)
+    selected_folds = settings.folds_file
+    if selected_folds is None and settings.anchor_split_file is None:
+        selected_folds = settings.reference_splits
+    if selected_folds is not None:
+        supplied = read_selection(
+            selected_folds, seed=settings.split_seed, validation_fraction=settings.validation_fraction,
+        )
         if not isinstance(supplied, list):
             raise ValueError("folds_file requires outer CV folds")
         k = len(supplied)
     splits = make_suite_splits(
         data["d1"], data["mouse_full"], data.get("rats"), k=k, seed=settings.split_seed,
-        validation_fraction=settings.validation_fraction, folds_file=settings.folds_file,
+        validation_fraction=settings.validation_fraction, folds_file=selected_folds,
         anchor_split_file=settings.anchor_split_file, rat_folds_file=settings.rat_folds_file,
     )
     if not 0 <= settings.rat_source_fold < len(splits.d1):
         raise ValueError("rat_source_fold must identify a source fold")
+    if settings.reference_fold >= len(splits.d1):
+        raise ValueError("reference_fold must identify a fold in the shared plan")
+    selected = splits.d1[settings.reference_fold]
+    train_ids = tuple(selected.train_ids)
+    validation_ids = tuple(selected.val_ids)
+    test_ids = tuple(selected.test_ids)
+    interpolation = SubjectSplit(train=train_ids, validation=validation_ids, test=test_ids)
+    splits = replace(splits, interpolation=interpolation)
     return SuitePlan(settings, mode, folder, data, external, splits, suite_jobs(settings))
 
 
@@ -214,6 +234,9 @@ def _input_records(plan: SuitePlan) -> list[dict[str, Any]]:
     ):
         if path is not None:
             paths.add(path.resolve())
+    if plan.settings.folds_file is None and plan.settings.anchor_split_file is None:
+        if plan.settings.reference_splits is not None:
+            paths.add(plan.settings.reference_splits.resolve())
     records: list[dict[str, Any]] = []
     for path in sorted(paths):
         stat = path.stat()
@@ -285,6 +308,10 @@ def job_configuration(plan: SuitePlan, job: SuiteJob) -> ExperimentConfig:
         k=len(folds), output_dir=str(plan.folder / "experiments"),
     )
     config = replace(base, training=training)
+    if job.kind == "fixed_split":
+        # CV seeds each fold with seed + index; match its selected reference fit.
+        training = replace(training, seed=job.seed + plan.settings.reference_fold)
+        config = replace(config, training=training)
     if job.group == "interpolation":
         preprocessing = replace(config.preprocessing, resampling_order=job.order)
         epochs = plan.settings.interpolation_epochs
@@ -322,6 +349,8 @@ def job_configuration(plan: SuitePlan, job: SuiteJob) -> ExperimentConfig:
             source_fold = 0
             if job.task == "rats":
                 source_fold = plan.settings.rat_source_fold
+            elif job.task == "mouse_full" and job.kind == "fixed_split":
+                source_fold = plan.settings.reference_fold
             initialization = InitializationConfig.from_run(source, fold=source_fold)
             config = replace(config, initialization=initialization)
     if job.kind == "refit":
@@ -343,8 +372,15 @@ def _execute_job(plan: SuitePlan, job: SuiteJob, callbacks: Sequence[Any]) -> Pa
     if (folder / "experiment.json").is_file():
         resume_run = folder
     if job.kind == "fixed_split":
-        # The interpolation pilot has a fixed learning rate and equal budgets.
-        result = run_training(data, plan.splits.interpolation, resume_run=resume_run, callbacks=[])
+        selected = getattr(plan.splits, job.task)[plan.settings.reference_fold]
+        train_ids = tuple(selected.train_ids)
+        validation_ids = tuple(selected.val_ids)
+        test_ids = tuple(selected.test_ids)
+        split = SubjectSplit(train=train_ids, validation=validation_ids, test=test_ids)
+        selected_callbacks = callbacks
+        if job.group == "interpolation":
+            selected_callbacks = []
+        result = run_training(data, split, resume_run=resume_run, callbacks=selected_callbacks)
     elif job.kind == "refit":
         result = run_development_refit(data, resume_run=resume_run)
     else:

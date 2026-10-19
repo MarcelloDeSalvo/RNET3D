@@ -91,6 +91,7 @@ def test_training_notebook_switch_routes_the_complete_selection(experiment, file
     context = {
         "config": config, "K_FOLD_COMPATIBLE": enabled, "RUN_TRAINING": True,
         "RESUME_RUN": None, "SPLIT_FILE": None, "FOLD_FILE": None,
+        "REFERENCE_SPLITS": None, "REFERENCE_FOLD": 0,
         "USE_TBI_PRETRAINING": False, "callbacks": [],
     }
     from src.experiments import data as data_module

@@ -10,6 +10,14 @@ For sequential execution without notebook cells, use
 The [suite guide](../docs/revision_suite.md) describes shared folds, a small draft
 mode, recovery and the compact paper workbook with four sheets.
 
+Mouse training and study notebooks now share `DATA_ROOT.parent / "D1_splits_final.json"`
+as their default animal plan. Fixed studies use reference fold zero; K-Fold uses
+all five folds. Historical `val` groups become outer tests, with separate inner
+validation drawn from training. MouseFull adds SHAM folds while retaining every
+D1 role. See the [reference split guide](../docs/reference_splits.md) for overrides
+and exact current counts. Rats retain separate animal folds; saved-model evaluation
+uses the checkpoint's saved memberships. Ablations default to fixed splits.
+
 MRI workflows share `example/RARE/TBI_fm_19_49/Anat/TBI_fm_19_49_N4.nii.gz`
 as their orientation reference. Its voxel axes are **R, I, A**: LR is axis 0,
 IS is axis 1, and AP is axis 2. Reorientation preserves world coordinates; it

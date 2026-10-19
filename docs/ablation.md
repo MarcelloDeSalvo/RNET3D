@@ -5,6 +5,13 @@ MouseFull D1+D3, eleven classes, corrected v1 loss and TBI feature initializatio
 Both keep `RUN_STUDY=False` until explicitly enabled. They expose complete
 configurations, the experiment matrix and actual Keras callbacks.
 
+Both ablation notebooks default to `K_FOLD_COMPATIBLE=False` and reuse fold zero
+of `DATA_ROOT.parent / "D1_splits_final.json"`. The [reference split guide](reference_splits.md)
+explains historical holdout conversion and the compatible MouseFull extension.
+Change `REFERENCE_FOLD` to select another predefined fold, or enable K-Fold to
+repeat every variant across the full reference plan. Explicit saved study splits
+and resumed memberships retain precedence over the default reference.
+
 ## Default matrix
 
 Every component row starts from the full reference and changes one setting.
@@ -33,8 +40,9 @@ ordering, filter widths and dropout settings remain unchanged. Older saved
 configurations without these fields load with both enabled. Conventional U-Net
 uses its existing builder and does not use these flags.
 
-Notebook 07 has six default variants; 07f has eight. With five outer folds and
-one seed this requires 30 or 40 fitted models, respectively. Optional rows add to
+Notebook 07 has six default variants; 07f has eight. The default fixed-split mode
+requires six or eight fits per seed. Optional five-fold mode requires 30 or 40
+fitted models, respectively. Optional rows add to
 that count. The displayed plan and model count should be reviewed before execution.
 
 ## Optional loss rows

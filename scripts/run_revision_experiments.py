@@ -6,6 +6,7 @@ import argparse
 import sys
 from dataclasses import replace
 from pathlib import Path
+from typing import Literal
 
 
 REPOSITORY: Path = Path(__file__).resolve().parents[1]
@@ -19,7 +20,7 @@ from src.experiments.revision_suite import run_revision_suite
 DATA_ROOT: Path = Path("D:/Other files/TESI_CNN/MANUSCRIPT_DATASET/normalized")
 REFERENCE: Path = REPOSITORY / "example/RARE/TBI_fm_19_49/Anat/TBI_fm_19_49_N4.nii.gz"
 OUTPUT_ROOT: Path = REPOSITORY / "results/revision_suite"
-RUN_NAME: str = "revision_v1"
+RUN_NAME: str = "revision_reference_v1"
 
 # None selects all animals in that cohort. Use canonical animal IDs, not scans.
 D1_IDS: tuple[str, ...] | None = None
@@ -33,6 +34,9 @@ ANIMAL_IDS: dict[str, str] = {}  # Only expert-confirmed cross-name animal links
 FOLDS_FILE: Path | None = None
 ANCHOR_SPLIT_FILE: Path | None = None
 RAT_FOLDS_FILE: Path | None = None
+REFERENCE_SPLITS: Path | None = DATA_ROOT.parent / "D1_splits_final.json"
+REFERENCE_FOLD: int = 0  # Fixed studies reuse this outer fold's train/validation/test roles.
+ABLATION_MODE: Literal["fixed_split", "cross_validation"] = "fixed_split"
 FOLDS: int = 5
 SPLIT_SEED: int = 42
 TRAINING_SEEDS: tuple[int, ...] = (42,)
@@ -86,6 +90,8 @@ def configuration() -> RevisionSuiteConfig:
         d1_ids=D1_IDS, sham_ids=SHAM_IDS, rat_ids=RAT_IDS, external_ids=D4_IDS,
         animal_ids=ANIMAL_IDS, folds_file=FOLDS_FILE, anchor_split_file=ANCHOR_SPLIT_FILE,
         rat_folds_file=RAT_FOLDS_FILE, folds=FOLDS, split_seed=SPLIT_SEED,
+        reference_splits=REFERENCE_SPLITS, reference_fold=REFERENCE_FOLD,
+        ablation_mode=ABLATION_MODE,
         seeds=TRAINING_SEEDS, validation_fraction=INNER_VALIDATION_FRACTION,
         d1_epochs=D1_EPOCHS, mouse_full_epochs=MOUSE_FULL_EPOCHS, rat_epochs=RAT_EPOCHS,
         interpolation_epochs=INTERPOLATION_EPOCHS, interpolation_steps=INTERPOLATION_STEPS,
@@ -114,15 +120,26 @@ def main() -> None:
     parser.add_argument("--run-name")
     parser.add_argument("--folds-file", type=Path)
     parser.add_argument("--anchor-split-file", type=Path)
+    parser.add_argument("--reference-splits", type=Path)
+    parser.add_argument("--reference-fold", type=int)
+    parser.add_argument("--ablation-mode", choices=("fixed_split", "cross_validation"))
+    parser.add_argument("--no-reference-splits", action="store_true", help="Generate fresh folds; permits a small automatic draft sample")
     args = parser.parse_args()
     if args.run and args.quick:
         parser.error("Choose --run or --quick")
     settings = configuration()
     overrides = {}
-    for name in ("data_root", "output_root", "reference", "run_name", "folds_file", "anchor_split_file"):
+    for name in (
+        "data_root", "output_root", "reference", "run_name", "folds_file", "anchor_split_file",
+        "reference_splits", "reference_fold", "ablation_mode",
+    ):
         value = getattr(args, name)
         if value is not None:
             overrides[name] = value
+    if args.data_root is not None and args.reference_splits is None:
+        overrides["reference_splits"] = args.data_root.parent / "D1_splits_final.json"
+    if args.no_reference_splits:
+        overrides["reference_splits"] = None
     settings = replace(settings, **overrides)
     mode = "full"
     if args.quick:

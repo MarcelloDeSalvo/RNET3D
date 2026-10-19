@@ -129,6 +129,7 @@ def notebook_context(experiment, folder, *, run=False, resume=False, monkeypatch
     replacements = {
         "DATA_ROOT": f"Path({str(experiment.data.root)!r})", "STUDY_DIR": f"Path({str(folder)!r})",
         "RUN_STUDY": repr(run), "RESUME_STUDY": repr(resume),
+        "REFERENCE_SPLITS": "None", "ORDERS": "(0, 1, 2, 3)",
         "EPOCHS": "1", "STEPS_PER_EPOCH": "None", "BATCH_SIZE": "2",
         "PATCH_SIZE": "(16, 16, 16)", "FILTERS": "(2, 4, 8, 16, 32)",
         "INFERENCE_STRIDE": "16", "BOOTSTRAP_SAMPLES": "100",

@@ -169,7 +169,7 @@ def test_provided_membership_order_does_not_create_a_false_leakage_error(revisio
     assert [fold.to_dict() for fold in selected.splits.d1] == entries
 
 
-def test_leaked_or_two_role_split_is_rejected_before_any_output(revision_settings, tmp_path):
+def test_leaked_or_incomplete_split_is_rejected_before_any_output(revision_settings, tmp_path):
     original = suite.prepare_suite(revision_settings)
     values = [fold.to_dict() for fold in original.splits.d1]
     values[0]["train"].append(values[0]["test"][0])
@@ -179,7 +179,7 @@ def test_leaked_or_two_role_split_is_rejected_before_any_output(revision_setting
         suite.prepare_suite(replace(revision_settings, folds_file=path))
     values[0].pop("test")
     path.write_text(json.dumps(values))
-    with pytest.raises(ValueError, match="separate train, validation and test"):
+    with pytest.raises(ValueError, match="cover all subjects|outer holdout|leakage"):
         read_selection(path)
     assert not original.folder.exists()
 

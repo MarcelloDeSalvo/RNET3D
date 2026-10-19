@@ -155,23 +155,42 @@ def _paired_effects(rows: pd.DataFrame, tables: PaperTables) -> pd.DataFrame:
     return rows.merge(selected[columns], on=keys, how="left", validate="one_to_one")
 
 
-def _costs(folder: Path, variant: str, seed: int | None) -> dict[str, Any]:
+def _costs(folder: Path, variant: str, seed: int | None, fold: int | None = None) -> dict[str, Any]:
     """Summarize recorded durations only; no extra performance benchmark is run."""
     row: dict[str, Any] = {"Variant": variant, "Seed": seed}
     training = _read(folder / "summary" / "fold_timings.csv")
+    if fold is not None and not training.empty:
+        training = training.loc[training["fold"].eq(fold)]
     if not training.empty:
         row["Parameters"] = int(training["parameter_count"].max())
         row["MeanTrainingMinutes"] = float(training["training_seconds"].mean() / 60)
     inference = []
-    for path in folder.glob("fold_*/evaluations/holdout/*/inference_timings.csv"):
-        table = _read(path)
-        if not table.empty:
-            inference.append(table)
+    folders = list(folder.glob("fold_*"))
+    if fold is not None:
+        folders = [folder / f"fold_{fold}"]
+    for selected in folders:
+        for role in ("holdout", "test"):
+            for path in selected.glob(f"evaluations/{role}/*/inference_timings.csv"):
+                table = _read(path)
+                if not table.empty:
+                    inference.append(table)
     if inference:
         timings = pd.concat(inference, ignore_index=True)
         columns = ["PreprocessingSeconds", "InferenceSeconds", "PostprocessingSeconds"]
         row["MeanVolumeSeconds"] = float(timings[columns].sum(axis=1).mean())
     return row
+
+
+def _fixed_ablation_rows(table: pd.DataFrame, source_fold: int | None) -> pd.DataFrame:
+    """Reuse only the chosen CV reference fold as a fixed-study baseline.
+
+    Fixed runs save execution fold zero and role test. Normalize the reused
+    reference to those identifiers for paired reporting; source files stay intact.
+    """
+    if table.empty or source_fold is None:
+        return table
+    selected = table.loc[table["Fold"].eq(source_fold) & table["DatasetRole"].eq("holdout")]
+    return selected.assign(Fold=0, DatasetRole="test")
 
 
 def _external_volume_checks(metrics: pd.DataFrame, output: Path, samples: int) -> list[dict[str, Any]]:
@@ -289,6 +308,16 @@ def export_suite_summary(suite_dir: Path, *, bootstrap_samples: int = 2000) -> P
         group, variant = name.split("/", 1)
         job = {"variant": variant, "seed": None, "name": name}
         by_group.setdefault(group, []).append((job, Path(folder)))
+    reference_fold = contract["settings"].get("reference_fold", 0)
+    for group in list(by_group):
+        if not group.endswith("_ablation"):
+            continue
+        task = group.removesuffix("_ablation")
+        for job in contract["jobs"]:
+            if job["group"] == task and job["variant"] == "reference":
+                reference_job = {**job, "reference_fold": reference_fold}
+                folder = root / "experiments" / job["name"] / f"seed_{job['seed']}"
+                by_group[group].insert(0, (reference_job, folder))
 
     main: list[pd.DataFrame] = []
     ablations: list[pd.DataFrame] = []
@@ -302,6 +331,10 @@ def export_suite_summary(suite_dir: Path, *, bootstrap_samples: int = 2000) -> P
         patches: list[pd.DataFrame] = []
         costs: list[dict[str, Any]] = []
         for job, folder in jobs:
+            source_fold = job.get("reference_fold")
+            identity: dict[str, Any] = {"Variant": job["variant"]}
+            if job["seed"] is not None:
+                identity["Seed"] = job["seed"]
             metric_path = _result_file(folder, "full_volume_metrics.csv")
             table = _read(metric_path)
             recovered_patch = pd.DataFrame()
@@ -309,12 +342,15 @@ def export_suite_summary(suite_dir: Path, *, bootstrap_samples: int = 2000) -> P
             recovered_sources: list[Path] = []
             if table.empty:
                 table, recovered_patch, recovered_classifier, recovered_sources = _committed_folds(folder)
+            table = _fixed_ablation_rows(table, source_fold)
             expected = len(contract["splits"].get(group, []))
-            if group == "interpolation":
+            if group == "interpolation" or group.endswith("_ablation"):
                 expected = 1
             observed = 0
             if not table.empty:
                 table = table.assign(Variant=job["variant"])
+                if job["seed"] is not None:
+                    table = table.assign(Seed=job["seed"])
                 if job["seed"] is None:
                     # A collaborator supplies predictions, not a fabricated
                     # training history. At least require the agreed outer IDs.
@@ -330,18 +366,21 @@ def export_suite_summary(suite_dir: Path, *, bootstrap_samples: int = 2000) -> P
                         raise ValueError(f"Comparator {job['name']} does not match the shared outer-fold animal IDs")
                 observed = table["Fold"].nunique()
                 measurements.append(table)
-                costs.append(_costs(folder, job["variant"], job["seed"]))
+                costs.append(_costs(folder, job["variant"], job["seed"], fold=source_fold))
                 if not recovered_patch.empty:
-                    patches.append(recovered_patch.assign(Variant=job["variant"]))
+                    recovered_patch = _fixed_ablation_rows(recovered_patch, source_fold)
+                    patches.append(recovered_patch.assign(**identity))
                 if not recovered_classifier.empty:
-                    classifiers.append(recovered_classifier.assign(Variant=job["variant"]))
+                    recovered_classifier = _fixed_ablation_rows(recovered_classifier, source_fold)
+                    classifiers.append(recovered_classifier.assign(**identity))
                 for name, destination in (("classifier_predictions.csv", classifiers), ("patch_metrics.csv", patches)):
                     if recovered_sources:
                         continue
                     path = _result_file(folder, name)
                     values = _read(path)
                     if not values.empty:
-                        destination.append(values.assign(Variant=job["variant"]))
+                        values = _fixed_ablation_rows(values, source_fold)
+                        destination.append(values.assign(**identity))
                         sources.append({"Path": str(path), "SHA256": hashlib.sha256(path.read_bytes()).hexdigest()})
                 selected_sources = recovered_sources
                 if not selected_sources:
@@ -373,14 +412,17 @@ def export_suite_summary(suite_dir: Path, *, bootstrap_samples: int = 2000) -> P
         tables = build_paper_tables(metrics, patch_metrics=patch, classifier_predictions=classifier, settings=settings)
         for name, table in tables.tables().items():
             table.to_csv(audit / f"{group}_{name}.csv", index=False)
-        compact = _main_rows(tables, group)
+        task = group.removesuffix("_ablation")
+        compact = _main_rows(tables, task)
         compact = _paired_effects(compact, tables)
+        if group.endswith("_ablation"):
+            compact = compact.assign(Mode="fixed_split", ReferenceFold=reference_fold)
         cost_table = pd.DataFrame(costs)
         if not cost_table.empty:
             cost_table = cost_table.loc[cost_table["Seed"].notna()]
         if not cost_table.empty:
             compact = compact.merge(cost_table, on=["Variant", "Seed"], how="left", validate="many_to_one")
-        if group == "interpolation":
+        if group == "interpolation" or group.endswith("_ablation"):
             ablations.append(compact)
         else:
             controls = {
@@ -471,6 +513,7 @@ def export_suite_summary(suite_dir: Path, *, bootstrap_samples: int = 2000) -> P
         "SHAM/TBI, datasets and seeds stay separate. Missing GT is never scored. Interpolation uses validation results.\n"
         "Inspect ../audit/coverage.csv before claiming a completed study. No missing fold or experiment is invented.\n"
         "Ablation lesion differences are candidate minus reference; Holm correction includes the exported per-region/metric comparison family.\n"
+        "Fixed ablations reuse only the chosen CV reference fold, with one-fold animal intervals and no fabricated fold SD.\n"
         "Classifier intervals use animals. D4 correction does not validate treatment-effect preservation; TOST is not supplied.\n"
         "Refit training supplies a deployment model, not another independent performance estimate.\n"
     )

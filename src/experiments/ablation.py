@@ -175,6 +175,7 @@ class StudyVariant(Protocol):
 def study_selection(
     data: PreparedData, *, mode: Literal["fixed_split", "cross_validation"],
     study_dir: Path, split_file: Path | None = None, fold_file: Path | None = None,
+    reference_file: Path | None = None, reference_fold: int = 0,
     resume: bool = False, initializations: Sequence[InitializationConfig] | None = None,
     initializations_by_fold: Mapping[int, Sequence[InitializationConfig]] | None = None,
 ) -> TrainingSelection:
@@ -189,6 +190,7 @@ def study_selection(
         data, k_fold=k_fold, resume_run=resume_dir,
         split_file=split_file, fold_file=fold_file, initializations=initializations,
         initializations_by_fold=initializations_by_fold,
+        reference_file=reference_file, reference_fold=reference_fold,
     )
 
 

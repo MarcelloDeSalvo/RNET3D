@@ -73,12 +73,19 @@ must still be described honestly; a new runner cannot erase their history.
 
 ## Shared splits and initialization
 
+The launcher defaults to `REFERENCE_SPLITS=DATA_ROOT.parent / "D1_splits_final.json"`
+and `REFERENCE_FOLD=0`. The [reference split guide](reference_splits.md) describes
+the historical train/val conversion, exact current memberships and overrides.
+Saved `val` groups become outer tests; new inner validation comes only from
+their training pools. The original file is never rewritten. Set
+`REFERENCE_SPLITS=None` (or `--no-reference-splits`) to generate fresh folds.
+
 Use canonical animal IDs such as `D1/SUBJ_0001`. A selected rat includes all its
 registered scans. `D1_IDS`, `SHAM_IDS`, `RAT_IDS` and `D4_IDS` default to all animals
 in each cohort. `ANIMAL_IDS` links only expert-confirmed biological identities;
 reused unqualified names are never assumed to identify the same animal.
 
-With no supplied split file:
+With no reference or supplied split file:
 
 1. D1 and D3 are each balanced by complete versus partial anatomical annotation,
    excluding lesion. Small strata are distributed rather than duplicated.
@@ -99,8 +106,8 @@ With no supplied split file:
 ```
 
 The illustrative fragment needs the remaining folds and actual canonical IDs.
-Every selected animal must be an outer test animal exactly once. Two-role
-historical validation-only folds, overlap, unknown IDs, missing coverage or a
+Every selected animal must be an outer test animal exactly once. Historical
+two-role CV is converted as described above. Overlap, unknown IDs, missing coverage or a
 projection with empty D1 fitting/validation/test roles are rejected. A supplied
 D1 plan remains exact; the suite adds compatible D3 folds. A supplied joint plan
 remains exact and its D1 projection supplies pretraining. Its fold count takes
@@ -131,13 +138,16 @@ The default one-seed, five-fold suite runs:
 1. Four fixed-split interpolation pilots, anchored to D1 fold zero. Linear remains
    the frozen main-study setting; pilot scores never configure subsequent runs.
 2. The five D1 reference folds, reused as main results and MouseFull sources.
-3. MouseFull reference and its three classifier/masking controls: 20 fits.
-4. Four D1 component removals: 20 fits, reusing the reference from step 2.
+3. Five MouseFull reference folds, then three fixed classifier/masking controls
+   on the selected reference fold: eight fits.
+4. Four fixed D1 component removals: four fits, reusing the matching reference fold.
 5. Five rat fine-tuning fits, all using the predefined mouse source fold.
 6. Two deployment refits: all selected D1, then all selected D1+D3.
 7. One D4 evaluation using the refitted MouseFull checkpoint, not an ensemble.
 
-That is 56 fits including pilots and release refits. Optional switches and seeds
+That is 28 fits including pilots and release refits. Set
+`ABLATION_MODE="cross_validation"` to repeat controls and component ablations
+across all folds instead (56 fits). Optional switches and seeds
 change the displayed count. `experiment_plan.csv` gives the exact plan before
 execution. All variants share saved deterministic evaluation patches within
 their task. Random training augmentations are not guaranteed bitwise identical.
