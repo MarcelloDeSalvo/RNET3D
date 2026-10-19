@@ -6,8 +6,10 @@ Both keep `RUN_STUDY=False` until explicitly enabled. They expose complete
 configurations, the experiment matrix and actual Keras callbacks.
 
 Both ablation notebooks default to `K_FOLD_COMPATIBLE=False` and reuse fold zero
-of `DATA_ROOT.parent / "D1_splits_final.json"`. The [reference split guide](reference_splits.md)
-explains historical holdout conversion and the compatible MouseFull extension.
+of a saved three-role plan. Notebook 07 selects `D1_splits_final.json`;
+07f selects `MouseFull_5fold_balanced_splits.json`. The
+[reference split guide](reference_splits.md) describes their exact roles,
+preserved D1 outer tests and separate balanced MouseFull plan.
 Change `REFERENCE_FOLD` to select another predefined fold, or enable K-Fold to
 repeat every variant across the full reference plan. Explicit saved study splits
 and resumed memberships retain precedence over the default reference.

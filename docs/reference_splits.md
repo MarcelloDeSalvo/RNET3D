@@ -12,18 +12,34 @@ use the dedicated balanced plan described below. Source JSON files are read only
 parsing and cohort extension live in `src/experiments/splits.py`; the existing
 selection helpers apply pretraining checks before returning memberships.
 
-## Interpretation of the existing file
+## Explicit three-way D1 reference
 
-The file contains five historical `train`/`val` folds covering 112 D1 animals.
-`D1_SUBJ_0001` is translated to the canonical `D1/SUBJ_0001` spelling. Each saved
-`val` group is retained as that fold's independent outer test group. Inner
-validation is drawn from the saved training pool only, with seed `42 + fold`
-and fraction `0.2` of that pool. The remaining pool is used for fitting.
+The file now stores five explicit `train`/`validation`/`test` folds covering
+112 D1 animals, using canonical IDs such as `D1/SUBJ_0001`. Every animal from
+each historical `val` list remains in the same fold's outer `test` list, in
+the same order. No test animals were taken for validation. Inner validation
+was sampled only from historical training, with seed `42 + fold` and fraction
+`0.2` of that pool.
 
-This preserves the original outer tests and avoids using those animals for
-checkpoint selection, LR scheduling or early stopping. A supplied three-role
-`train`/`validation`/`test` plan is retained exactly, including list order.
-Validation rejects repeated holdouts, overlapping roles and incomplete coverage.
+These are exactly the memberships the refactored loader already resolved from
+the two-role file; the migration makes them visible in the JSON. Loading does
+not split validation again or change roles when the generation seed/fraction
+changes. Original bytes are archived under `split_backups/`; the companion
+`D1_splits_final.metadata.json` records the backup, file digests and settings.
+
+| Fold | Training | Inner validation | Outer test |
+|---|---:|---:|---:|
+| 0 | 71 | 18 | 23 |
+| 1 | 71 | 18 | 23 |
+| 2 | 72 | 18 | 22 |
+| 3 | 72 | 18 | 22 |
+| 4 | 72 | 18 | 22 |
+
+All 112 animals are tested exactly once. Roles are disjoint within each fold,
+and test animals never guide checkpoint selection or LR scheduling. The loader
+still supports historical two-role inputs, but preserves explicit three-role
+plans exactly, including order. Validation rejects repeated holdouts,
+overlapping roles and incomplete coverage.
 
 With the current inventory, reference fold zero has:
 
@@ -71,7 +87,7 @@ selects all five folds. All models start from scratch. Saved/resumed roles remai
 authoritative, so changing a reference does not relabel an existing model's tests.
 Use a fresh run/study for the new plan; 07f has a separate balanced study folder.
 
-The historical D1 plan is unchanged. Its complete D1 test counts are 3/2/2/1/1,
+Historical D1 outer test memberships are unchanged. Their complete D1 counts are 3/2/2/1/1,
 so preserving those exact roles would not achieve the requested 2/2/2/2/1 balance.
 Notebook 05 and the launcher retain their existing defaults. To use this joint
 plan for the entire launcher, pass `--folds-file` with the new path and a fresh
@@ -114,8 +130,8 @@ D:/Other files/TESI_CNN/MANUSCRIPT_DATASET/D1_fixed_split_from_kfold_fold_0.json
 
 It contains canonical `train`, `validation` and `test` arrays with 71, 18 and 23
 animals. Its companion `.metadata.json` records the source JSON digest, fold,
-seed, inner-validation fraction and compatibility scope. The original reference
-file remains unchanged.
+seed, inner-validation fraction and compatibility scope. Its role lists are
+unchanged by the D1 reference migration and still match fold zero exactly.
 
 Notebook 01 loads this file by default with `K_FOLD_COMPATIBLE=False`. Start a
 new run with `RESUME_RUN=None`. Its checkpoint can initialize either rat notebook

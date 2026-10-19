@@ -2,7 +2,9 @@
 
 All mouse training, cross-validation and ablations start from scratch on the
 same frozen animal memberships. Notebook 01 uses the derived fixed fold-zero
-file; mouse CV uses every fold of the unchanged `D1_splits_final.json`.
+file; mouse CV uses every explicit three-role fold of `D1_splits_final.json`.
+The D1 reference retains every historical outer test animal; validation comes
+only from the original training pools.
 See [reference splits](reference_splits.md) for filenames and exact counts.
 Sharing memberships does not share weights.
 

@@ -43,6 +43,23 @@ def test_old_holdouts_are_preserved_and_inner_validation_uses_only_old_train(ref
     assert reference_file.read_bytes() == original
 
 
+def test_explicit_three_role_export_preserves_resolved_roles_without_resplitting(reference_file, tmp_path):
+    """Materializing the existing interpretation must not reduce outer tests."""
+    original = json.loads(reference_file.read_bytes())
+    resolved = read_selection(reference_file, seed=42, validation_fraction=0.2)
+    path = tmp_path / "explicit_three_way.json"
+    payload = [fold.to_dict() for fold in resolved]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    # Once saved explicitly, generation settings cannot move animals again.
+    reloaded = read_selection(path, seed=999, validation_fraction=0.5)
+    assert reloaded == resolved
+    for old, fold in zip(original, reloaded):
+        expected = [animal.replace("D1_", "D1/", 1) for animal in old["val"]]
+        assert fold.test_ids == expected
+        assert set(fold.val_ids).isdisjoint(fold.test_ids)
+
+
 def test_fixed_and_cv_selections_share_the_same_reference_roles(revision_settings, reference_file):
     plan = suite.prepare_suite(revision_settings)
     data = plan.data["d1"]

@@ -20,7 +20,7 @@ from src.experiments.revision_suite import run_revision_suite
 DATA_ROOT: Path = Path("D:/Other files/TESI_CNN/MANUSCRIPT_DATASET/normalized")
 REFERENCE: Path = REPOSITORY / "example/RARE/TBI_fm_19_49/Anat/TBI_fm_19_49_N4.nii.gz"
 OUTPUT_ROOT: Path = REPOSITORY / "results/revision_suite"
-RUN_NAME: str = "revision_scratch_v1"
+RUN_NAME: str = "revision_three_way_v1"
 
 # None selects all animals in that cohort. Use canonical animal IDs, not scans.
 D1_IDS: tuple[str, ...] | None = None

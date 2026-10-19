@@ -75,9 +75,10 @@ must still be described honestly; a new runner cannot erase their history.
 
 The launcher defaults to `REFERENCE_SPLITS=DATA_ROOT.parent / "D1_splits_final.json"`
 and `REFERENCE_FOLD=0`. The [reference split guide](reference_splits.md) describes
-the historical train/val conversion, exact current memberships and overrides.
-Saved `val` groups become outer tests; new inner validation comes only from
-their training pools. The original file is never rewritten. Set
+the explicit train/validation/test roles, exact memberships and overrides.
+All historical outer test animals are retained, with inner validation drawn
+only from their original training pools. The launcher reads the saved roles
+without resplitting or rewriting them. Set
 `REFERENCE_SPLITS=None` (or `--no-reference-splits`) to generate fresh folds.
 
 Use canonical animal IDs such as `D1/SUBJ_0001`. A selected rat includes all its
@@ -193,7 +194,7 @@ validation experiment. Draft tables contain a `DRAFT=True` column and warning.
 ## Results: only four paper tables
 
 ```text
-results/revision_suite/full/revision_scratch_v1/
+results/revision_suite/full/revision_three_way_v1/
   suite.json                 # frozen settings, source fingerprints and jobs
   splits.json                # master, source and rat plans
   split_membership.csv       # animal + scan roles for collaborator handoff
