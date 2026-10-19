@@ -148,15 +148,14 @@ def suite_jobs(settings: RevisionSuiteConfig) -> list[SuiteJob]:
     for seed in settings.seeds:
         jobs.append(SuiteJob("d1_reference", "d1", "d1", seed))
     for seed in settings.seeds:
-        source = f"d1_reference/seed_{seed}"
-        jobs.append(SuiteJob("mouse_full_reference", "mouse_full", "mouse_full", seed, source=source))
+        jobs.append(SuiteJob("mouse_full_reference", "mouse_full", "mouse_full", seed))
         for variant in settings.supervision_controls:
             name = f"mouse_full_{variant}"
             group: str = "mouse_full_ablation"
             kind: Literal["fixed_split", "cross_validation"] = settings.ablation_mode
             if kind == "cross_validation":
                 group = "mouse_full"
-            jobs.append(SuiteJob(name, "mouse_full", group, seed, variant, kind, source=source))
+            jobs.append(SuiteJob(name, "mouse_full", group, seed, variant, kind))
     for seed in settings.seeds:
         for variant in settings.architecture_ablations:
             group = "d1_ablation"
@@ -170,8 +169,7 @@ def suite_jobs(settings: RevisionSuiteConfig) -> list[SuiteJob]:
     if settings.include_release:
         seed = settings.release_seed
         jobs.append(SuiteJob("release_tbi", "d1", "release", seed, kind="refit"))
-        source = f"release_tbi/seed_{seed}"
-        jobs.append(SuiteJob("release_mouse_full", "mouse_full", "release", seed, kind="refit", source=source))
+        jobs.append(SuiteJob("release_mouse_full", "mouse_full", "release", seed, kind="refit"))
     return jobs
 
 
@@ -338,21 +336,12 @@ def job_configuration(plan: SuitePlan, job: SuiteJob) -> ExperimentConfig:
     config = replace(config, model=model, loss=loss)
 
     if job.source is not None:
+        if job.task != "rats":
+            raise ValueError("Suite mouse experiments start from scratch; pretraining is reserved for rat fine-tuning")
         source = plan.folder / "experiments" / job.source
-        if job.task == "mouse_full" and job.kind == "cross_validation":
-            sources = {
-                fold.index: InitializationConfig.from_run(source, fold=fold.index)
-                for fold in folds
-            }
-            config = replace(config, initialization_by_fold=sources)
-        else:
-            source_fold = 0
-            if job.task == "rats":
-                source_fold = plan.settings.rat_source_fold
-            elif job.task == "mouse_full" and job.kind == "fixed_split":
-                source_fold = plan.settings.reference_fold
-            initialization = InitializationConfig.from_run(source, fold=source_fold)
-            config = replace(config, initialization=initialization)
+        source_fold = plan.settings.rat_source_fold
+        initialization = InitializationConfig.from_run(source, fold=source_fold)
+        config = replace(config, initialization=initialization)
     if job.kind == "refit":
         epochs = _refit_epochs(plan, job.task)
         training = replace(config.training, epochs=epochs, monitor="loss")

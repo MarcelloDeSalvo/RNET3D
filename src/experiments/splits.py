@@ -198,7 +198,7 @@ def reference_folds(
     """Preserve reference animal roles and extend additional cohorts once.
 
     The same seed and inner fraction produce identical D1 roles for fixed
-    training, CV, ablations and MouseFull pretraining. Additional SHAM animals
+    training, CV and MouseFull ablations. Additional SHAM animals
     are balanced by anatomy coverage unless explicit strata are supplied.
     """
     config = data.config

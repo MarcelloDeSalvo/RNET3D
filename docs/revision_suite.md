@@ -92,7 +92,7 @@ With no reference or supplied split file:
 2. Every animal appears in one outer holdout. Each fold has separate fitting
    and inner-validation animals.
 3. The MouseFull plan combines those cohort assignments. Its D1 projection is
-   exactly the TBI pretraining plan. The nine complete TBI animals are therefore
+   exactly the D1 reference plan. The nine complete TBI animals are therefore
    spread across folds, rather than relying on complete SHAM cases for balance.
 4. Rat folds leave one animal out, reserve inner validation from the remainder,
    and retain all timepoints together.
@@ -110,7 +110,7 @@ Every selected animal must be an outer test animal exactly once. Historical
 two-role CV is converted as described above. Overlap, unknown IDs, missing coverage or a
 projection with empty D1 fitting/validation/test roles are rejected. A supplied
 D1 plan remains exact; the suite adds compatible D3 folds. A supplied joint plan
-remains exact and its D1 projection supplies pretraining. Its fold count takes
+remains exact and its D1 projection preserves D1 memberships. Its fold count takes
 precedence over generation settings.
 
 Alternatively, `ANCHOR_SPLIT_FILE` accepts an existing fixed
@@ -120,12 +120,12 @@ holdouts from animals outside that first test set. Later folds have their own
 inner validation. Such anchored folds can have unequal sizes. You cannot supply
 both split sources. `RAT_FOLDS_FILE` optionally supplies an independent rat plan.
 
-Each MouseFull fold loads the same-index D1 checkpoint. The normal recursive
-pretraining audit rejects source fitting on target inner-validation animals and
-any source fitting/selection on target holdouts. Shared source/target inner
-validation is allowed and recorded. Source graphs are checked before transfer.
-Architecture ablations are on D1 and start from scratch, so they do not require
-another family of MouseFull source checkpoints.
+Every D1 and MouseFull fold, ablation and deployment refit starts from scratch.
+The shared file coordinates animal roles without sharing weights. Only rat
+fine-tuning loads the predefined D1 reference fold; D2 animals are independent
+of that source cohort and the existing recursive provenance audit remains active.
+Notebook 05 retains optional TBI initialization for a separate fixed-mode final
+model, outside the sequential reviewer's mouse training protocol.
 
 These checks establish declared identity/role separation. They cannot detect
 undocumented animals appearing under unrelated names. Resolve those identities
@@ -137,12 +137,12 @@ The default one-seed, five-fold suite runs:
 
 1. Four fixed-split interpolation pilots, anchored to D1 fold zero. Linear remains
    the frozen main-study setting; pilot scores never configure subsequent runs.
-2. The five D1 reference folds, reused as main results and MouseFull sources.
+2. Five scratch D1 reference folds, reused as main results and rat sources.
 3. Five MouseFull reference folds, then three fixed classifier/masking controls
    on the selected reference fold: eight fits.
 4. Four fixed D1 component removals: four fits, reusing the matching reference fold.
 5. Five rat fine-tuning fits, all using the predefined mouse source fold.
-6. Two deployment refits: all selected D1, then all selected D1+D3.
+6. Two independent scratch deployment refits: all selected D1 and all selected D1+D3.
 7. One D4 evaluation using the refitted MouseFull checkpoint, not an ensemble.
 
 That is 28 fits including pilots and release refits. Set
@@ -193,7 +193,7 @@ validation experiment. Draft tables contain a `DRAFT=True` column and warning.
 ## Results: only four paper tables
 
 ```text
-results/revision_suite/full/revision_v1/
+results/revision_suite/full/revision_scratch_v1/
   suite.json                 # frozen settings, source fingerprints and jobs
   splits.json                # master, source and rat plans
   split_membership.csv       # animal + scan roles for collaborator handoff

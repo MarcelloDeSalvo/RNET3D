@@ -4,20 +4,13 @@
 
 Notebooks 05, 06 and 07f select `dice_ce_gradient_fix` version 1. SHAM lesion
 masks are available empty annotations in every version; no absence flag is used.
-Notebook 07f enables TBI backbone initialization by default. V3 remains an
-explicit experimental alternative. Network defaults are unchanged.
-
-`TBI_RUN` and `TBI_FOLD` select committed best source weights.
-`TBI_FOLD_SOURCES` maps each target fold to `(source_run, source_fold)`; the
-resulting `ExperimentConfig.initialization_by_fold` is saved with the run.
-Each target model has fresh output heads and a fresh optimizer.
-
-07f exposes `TBI_VARIANT_RUNS` for matching sources by architecture and
-`TBI_VARIANT_FOLD_SOURCES` for matching sources by variant and target fold.
-Residual, attention and downsampling changes require their corresponding TBI
-backbones: transfer rejects different graphs rather than copying layers by
-accidental position/shape. No-classifier can share the reference backbone.
-Set `USE_TBI_PRETRAINING=False` for an explicit scratch study. Previews do not fit.
+All mouse training, CV and ablations start from scratch on shared reference
+memberships. V3 remains an explicit experimental alternative. Network defaults
+are unchanged. Notebook 05 alone exposes `USE_TBI_PRETRAINING=False` for a
+separate fixed-mode final model. Its `TBI_RUN` and `TBI_FOLD` select committed
+best source weights; transferred features get fresh output heads and optimizer.
+That option is unavailable in mouse CV and ablations. Rat fine-tuning retains
+its independent D1 source. Previews do not fit.
 
 ## Pretraining leakage and inventory
 
@@ -61,8 +54,9 @@ fitting/selection; those assignments remain invalid. Three target validation
 animals only contributed to source selection-validation and may be shared.
 Existing files were not modified. A fresh automatic split preserves the source's
 77/23/12 D1 roles and allocates D3 to reach 138/40/20 overall, passing the audit
-without retraining the source or reserving extra animals. CV needs corresponding
-source folds whose held-out animals collectively cover D1 once.
+without retraining the source or reserving extra animals. This remains an option
+for notebook 05's fixed-mode final model. Mouse CV instead starts from scratch
+with the frozen reference animal roles.
 
 ## Best-checkpoint measurements
 

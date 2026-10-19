@@ -20,7 +20,7 @@ from src.experiments.revision_suite import run_revision_suite
 DATA_ROOT: Path = Path("D:/Other files/TESI_CNN/MANUSCRIPT_DATASET/normalized")
 REFERENCE: Path = REPOSITORY / "example/RARE/TBI_fm_19_49/Anat/TBI_fm_19_49_N4.nii.gz"
 OUTPUT_ROOT: Path = REPOSITORY / "results/revision_suite"
-RUN_NAME: str = "revision_reference_v1"
+RUN_NAME: str = "revision_scratch_v1"
 
 # None selects all animals in that cohort. Use canonical animal IDs, not scans.
 D1_IDS: tuple[str, ...] | None = None
@@ -73,6 +73,9 @@ EXTERNAL_RESULTS: dict[str, Path] = {}  # Example: {"d1/nnunet": Path("...")}
 # up; neither D4 nor outer-test metrics select the release model or its duration.
 RELEASE_SEED: int = 42
 RAT_SOURCE_FOLD: int = 0
+# All mouse fits, including deployment refits, start from scratch. Only rat
+# fine-tuning reuses this predefined D1 fold; notebook 05 retains optional TBI
+# initialization for a separate fixed-split MouseFull final model.
 MIXED_PRECISION: bool = False
 SAVE_PREDICTIONS: bool = True
 

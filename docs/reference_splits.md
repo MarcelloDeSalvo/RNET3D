@@ -58,19 +58,18 @@ its original folder, mode, configuration and saved membership. Inference and
 result notebooks read a model's saved splits, rather than assigning new test
 animals to existing weights. Inspection notebooks do not generate splits.
 
-An old TBI checkpoint may be incompatible with the new reference roles. The
-leakage guard remains active: it must not have fitted the target validation/test
-animals or selected its checkpoint using target test animals. Train compatible
-D1 source checkpoints with notebook 01 in K-Fold mode or notebook 02, then use
-their matching folds for MouseFull. A changed default does not make old weights
-independent of previously seen animals.
+All mouse experiments start from scratch, including every CV fold and ablation.
+The shared plan coordinates animal roles; it does not share model weights. Rat
+notebooks 03/04 fine-tune a chosen D1 checkpoint because D2 animals are independent
+of D1. Notebook 05 alone retains optional mouse pretraining for a separate
+fixed-mode final model, with the existing source leakage checks.
 
 ## Exported notebook 01 baseline
 
 The fixed-split file is available beside the dataset:
 
 ```text
-D:/Other files/TESI_CNN/MANUSCRIPT_DATASET/D1_baseline_fold_0_split.json
+D:/Other files/TESI_CNN/MANUSCRIPT_DATASET/D1_fixed_split_from_kfold_fold_0.json
 ```
 
 It contains canonical `train`, `validation` and `test` arrays with 71, 18 and 23
@@ -79,25 +78,28 @@ seed, inner-validation fraction and compatibility scope. The original reference
 file remains unchanged.
 
 Notebook 01 loads this file by default with `K_FOLD_COMPATIBLE=False`. Start a
-new run with `RESUME_RUN=None`. After fitting, set `TBI_RUN` in notebook 05 or
-07f to that run's printed folder, with `TBI_FOLD=0` and `REFERENCE_FOLD=0`.
-The saved D1 source roles match the MouseFull fold-zero roles; source validation
-may be shared with downstream validation, while downstream tests are excluded
-from both source fitting and checkpoint selection.
+new run with `RESUME_RUN=None`. Its checkpoint can initialize either rat notebook
+without reserving extra D1 animals for D2. For the optional fixed-mode final
+MouseFull model in notebook 05, select its run as `TBI_RUN`, enable
+`USE_TBI_PRETRAINING`, and keep `TBI_FOLD=0` and `REFERENCE_FOLD=0`. Source
+validation may be shared with target validation; target tests must remain
+excluded from source fitting and checkpoint selection.
 
-One D1 baseline cannot be independent for every downstream outer fold: every
-D1 animal is in an outer test set once. To initialize all five downstream folds,
-train all five corresponding source models using notebook 01 with
-`K_FOLD_COMPATIBLE=True` or notebook 02. Notebook 01 clears its fixed `SPLIT_FILE`
-in CV mode and uses the complete reference plan. For another fixed reference
-fold, set `SPLIT_FILE=None` and choose `REFERENCE_FOLD`.
+One D1 baseline cannot provide independent pretraining for all mouse outer folds:
+every D1 animal is an outer test animal once. Notebook 02, MouseFull CV and
+ablations therefore each train fresh models. Notebook 01's optional CV also
+starts fresh in every fold; it clears the fixed `SPLIT_FILE` and uses the complete
+reference plan. For another fixed reference fold, set `SPLIT_FILE=None` and
+choose `REFERENCE_FOLD`. One D1 checkpoint can initialize every independent rat
+fold, provided its choice does not use rat test performance.
 
 ## Sequential launcher
 
 The visible settings are `REFERENCE_SPLITS`, `REFERENCE_FOLD` and
 `ABLATION_MODE="fixed_split"`. Main D1/MouseFull/rat reference studies retain CV;
 component and classifier/masking ablations fit once on the selected reference
-fold. Each fixed MouseFull control loads the matching D1 source fold. Summary
+fold. Every mouse fit starts from scratch; only rat fine-tuning loads the
+predefined D1 reference fold. Summary
 tables reuse only that CV reference fold as their ablation baseline; its other
 folds remain in the main CV results. The baseline is not fitted twice. Fixed
 results report one observed fold and do not acquire an invented fold SD.

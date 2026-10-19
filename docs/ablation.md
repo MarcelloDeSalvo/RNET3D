@@ -1,7 +1,7 @@
 # Matched component and loss ablations
 
 Notebook 07 uses D1 and the historical four-class task. Notebook 07f uses
-MouseFull D1+D3, eleven classes, corrected v1 loss and TBI feature initialization.
+MouseFull D1+D3, eleven classes, corrected v1 loss and scratch initialization.
 Both keep `RUN_STUDY=False` until explicitly enabled. They expose complete
 configurations, the experiment matrix and actual Keras callbacks.
 
@@ -101,23 +101,14 @@ metrics remain available with their own definitions.
 
 ## Initialization and matching
 
-07f retains `USE_TBI_PRETRAINING=True`. Every selected variant/fold needs an
-auditable source excluding target holdout/test animals and never fitting target
-validation animals. Source selection-validation may be shared across stages.
-Residual, attention, downsampling and multiscale changes require matching TBI
-backbones. Configure `TBI_VARIANT_RUNS` for a fixed split or
-`TBI_VARIANT_FOLD_SOURCES` for per-fold sources.
+Every reference, component and masking-control model in 07/07f starts from
+fresh random weights and a fresh optimizer. No TBI checkpoint, architecture-matched
+source family or per-fold initialization map is required. Shared animal roles
+come from the reference file, not from weights trained by notebook 01 or 02.
 
-Head-fusion, classifier and loss changes can reuse the reference TBI backbone.
-Complete encoder/decoder weights transfer through the finest decoder boundary;
-region, brain and classifier heads remain fresh. Source graphs and weight shapes
-are validated before any weights are copied. Sources with a different backbone
-are rejected rather than partially copied. Set `USE_TBI_PRETRAINING=False` only
-for an explicitly chosen scratch study.
-
-Fresh study splits inherit memberships from every selected source, rejecting
-conflicting assignments. Matching source CV folds are reused before splitting
-additional animals. See [pretraining split selection](pretraining_splits.md).
+Notebook 05 alone retains optional TBI initialization for a separate fixed-mode
+final-model experiment. It is disabled by default and is not used by the reviewer
+ablation matrix. See [pretraining policy](pretraining_splits.md).
 
 The runner reuses identical animal splits, saved evaluation patches, seeds,
 callback settings and maximum epochs. Random training augmentations are not

@@ -39,25 +39,26 @@ predicts the complete test scans and reports missing annotations separately from
 empty structures. Extra anatomy outside the configured task maps to background.
 The current original-width model configuration is explicit; it is not inferred
 from the small-filter prototype in the old domain-adaptation notebook.
-Notebook 05 and MouseFull K-Fold notebook 06 expose `USE_TBI_PRETRAINING=True`,
-`TBI_RUN`, `TBI_FOLD` and `FREEZE_BACKBONE=False`. Set the source run explicitly;
-an interrupted TBI run with one committed epoch is enough. Without a source,
-data previews remain available but the training cell cannot silently start from
-scratch. Set `USE_TBI_PRETRAINING=False` to choose scratch training deliberately.
+All mouse notebooks and pipeline jobs start from scratch on shared reference
+memberships, including each MouseFull CV fold and ablation. Notebook 05 alone
+retains `USE_TBI_PRETRAINING=False`, `TBI_RUN`, `TBI_FOLD` and
+`FREEZE_BACKBONE=False` for a separate fixed-mode final model. To enable it,
+set the source run explicitly; an interrupted TBI run with one committed epoch
+is enough. Its output group gains `_tbi_pretrained`, and CV mode rejects this
+option. Training with pretraining enabled requires a valid source.
 Pretraining transfers encoder/decoder feature weights, while the eleven-class
 ROI head, binary brain head and SHAM/TBI classifier receive fresh initialization.
 All transferred features are fine-tuned unless freezing is explicitly enabled.
-Each CV fold reloads its selected source features and gets fresh heads and
-a fresh optimizer. Training resumption restores the target run's fitting state.
+Training resumption restores the target run's fitting state.
 
 MouseFull contains the same D1 animals as TBI training. A source that trained or
 selected weights on later held-out animals compromises independent evaluation.
 Fresh fixed splits automatically preserve source training/validation/test roles
 and fill the overall requested fractions with additional animals. Shared
 selection-validation is allowed; final test animals must be unseen in source
-fitting and selection. CV uses matching source folds and splits additional
-animals; an overlapping common checkpoint cannot supply all independent outer
-holdouts. Explicit/resumed memberships are kept and audited. See
+fitting and selection. An overlapping common checkpoint cannot supply all
+independent mouse outer holdouts, which is why mouse CV starts from scratch.
+Explicit/resumed memberships are kept and audited. See
 [the shared split policy](pretraining_splits.md).
 
 `notebook/06_mouse_full_kfold.ipynb` uses the same complete MouseFull settings

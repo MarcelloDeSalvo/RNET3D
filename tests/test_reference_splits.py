@@ -99,7 +99,7 @@ def test_ablation_defaults_and_cv_override(revision_settings, reference_file):
     assert all(job.kind == "cross_validation" for job in repeated.jobs if job.name.startswith("d1_no_"))
 
 
-def test_fixed_controls_route_matching_source_and_animal_roles(revision_settings, reference_file, monkeypatch):
+def test_fixed_controls_start_from_scratch_and_preserve_reference_roles(revision_settings, reference_file, monkeypatch):
     from src.experiments import training
     from types import SimpleNamespace
 
@@ -122,17 +122,41 @@ def test_fixed_controls_route_matching_source_and_animal_roles(revision_settings
 
     from src.experiments.config import InitializationConfig
 
-    sources = []
-
-    def source(run_dir, *, fold):
-        sources.append((run_dir, fold))
-        return InitializationConfig()
+    def source(*args, **kwargs):
+        pytest.fail("Mouse ablations must not load a pretrained checkpoint")
 
     monkeypatch.setattr(InitializationConfig, "from_run", staticmethod(source))
     job = next(job for job in plan.jobs if job.name == "mouse_full_no_classifier")
     suite._execute_job(plan, job, callbacks=[])
-    assert sources[0][1] == 1
+    assert called[1][0].initialization.mode == "scratch"
+    assert called[1][0].initialization_by_fold == {}
     assert called[1][1].test == tuple(plan.splits.mouse_full[1].test_ids)
+
+
+def test_suite_reserves_pretraining_for_independent_rats(revision_settings, monkeypatch):
+    from src.experiments.config import InitializationConfig
+
+    plan = suite.prepare_suite(revision_settings)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("No mouse job may resolve source weights")
+
+    monkeypatch.setattr(InitializationConfig, "from_run", staticmethod(forbidden))
+    for job in plan.jobs:
+        if job.task == "rats":
+            assert job.source == f"d1_reference/seed_{job.seed}"
+            continue
+        assert job.source is None
+        # Refit duration is read from CV reports; it does not affect initialization.
+        monkeypatch.setattr(suite, "_refit_epochs", lambda *args: 1)
+        config = suite.job_configuration(plan, job)
+        assert config.initialization.mode == "scratch"
+        assert config.initialization_by_fold == {}
+
+    mouse_job = next(job for job in plan.jobs if job.name == "mouse_full_reference")
+    invalid = replace(mouse_job, source="d1_reference/seed_42")
+    with pytest.raises(ValueError, match="start from scratch"):
+        suite.job_configuration(plan, invalid)
 
 
 @pytest.mark.parametrize("reference_fold", [0, 1])

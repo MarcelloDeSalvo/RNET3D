@@ -32,7 +32,7 @@ use LR reduction, TensorBoard histograms, early stopping and CSV logging.
 Notebooks 01/03/05 also expose `K_FOLD_COMPATIBLE=False`: enable it to run every
 outer fold with the same complete configuration. Studies 07/07f/08 expose the
 same boolean to select CV. The corresponding callback cell then defaults to
-LR reduction only; source CV checkpoints can be reused for matching MouseFull folds.
+LR reduction only. Every mouse fold starts from scratch.
 Standard K-Fold uses only LR reduction by default, with no early stopping; study
 notebooks follow their selected `MODE`. Rat notebook 04 has no LR callback and
 selects weights using training loss. Edit the constructors/list directly to change this.
@@ -44,7 +44,7 @@ and restores best weights before evaluation, so EarlyStopping itself uses
 
 | Notebook | Responsibility | Status |
 |---|---|---|
-| [01_tbi_mouse_training.ipynb](01_tbi_mouse_training.ipynb) | D1 training and volume evaluation; optional full CV for reusable pretraining sources | Implemented; `K_FOLD_COMPATIBLE` switch |
+| [01_tbi_mouse_training.ipynb](01_tbi_mouse_training.ipynb) | D1 fixed reference training and volume evaluation; source for independent rat fine-tuning, optional full CV | Implemented; `K_FOLD_COMPATIBLE` switch |
 | [02_tbi_mouse_kfold.ipynb](02_tbi_mouse_kfold.ipynb) | D1 grouped CV with separate checkpoint validation and outer holdouts | Implemented |
 | [03_rat_finetuning.ipynb](03_rat_finetuning.ipynb) | D2 fine-tuning and independent evaluation; optional grouped outer CV | Implemented; `K_FOLD_COMPATIBLE` switch |
 | [04_rat_kfold.ipynb](04_rat_kfold.ipynb) | Historical leave-one-rat-out fine-tuning with all longitudinal scans | Implemented |
@@ -80,18 +80,18 @@ uses five saved center-biased patches per scan. Every fold starts from the same
 explicitly chosen mouse checkpoint and a fresh optimizer.
 
 MouseFull preserves the old source-label/channel order and SHAM/TBI classifier.
-Notebooks 05/06 expose TBI feature transfer through `USE_TBI_PRETRAINING`,
-`TBI_RUN`, `TBI_FOLD` and `FREEZE_BACKBONE`. A saved epoch in a stopped source run
-is sufficient; the committed best weights are selected automatically. Features
-transfer, output heads remain fresh, and each target model uses a fresh optimizer.
-Fresh fixed splits inherit source animal roles and fill the overall requested
-fractions with new animals. Source selection-validation can be shared with
-target selection-validation; fitted animals cannot become validation/test, and
-source selection animals cannot become final test. Initialization ancestors are
-checked too. Matching CV checkpoints are exposed through `TBI_FOLD_SOURCES`;
-the planner reuses their source folds and splits additional animals. A shared
-overlapping D1 checkpoint cannot provide independent full MouseFull CV.
-Scratch training remains explicit. See [pretraining splits](../docs/pretraining_splits.md).
+All mouse training, CV and ablations start from scratch on the shared reference
+memberships. Notebook 01 uses `D1_fixed_split_from_kfold_fold_0.json`; the
+five-fold source `D1_splits_final.json` is unchanged. Only notebook 05 retains
+optional TBI feature transfer for a separate fixed-mode final model:
+`USE_TBI_PRETRAINING=False`, `TBI_RUN`, `TBI_FOLD` and `FREEZE_BACKBONE`.
+Enabling it transfers features while initializing fresh output heads and a
+fresh optimizer; its run name gains `_tbi_pretrained`. It cannot be combined
+with CV. Source fitting must exclude target validation/test animals; source
+selection-validation can be shared with target validation but must exclude
+target tests. Source ancestry is audited too. See
+[pretraining splits](../docs/pretraining_splits.md). Rats retain mouse transfer;
+their independent D2 animals can share one predefined D1 checkpoint across folds.
 Unavailable classes follow normalized annotation metadata and use the corrected
 logits-based loss. Confirmed cross-cohort duplicates can be grouped explicitly;
 the notebook does not infer biological identity from similar original IDs.

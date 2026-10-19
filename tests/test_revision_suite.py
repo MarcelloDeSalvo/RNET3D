@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.experiments.config import ExperimentConfig
 from src.experiments.revision_config import DraftConfig, RevisionSuiteConfig
 from src.experiments.revision_splits import (
     make_suite_splits, project_folds, read_selection, validate_folds,
@@ -307,7 +308,7 @@ def test_interrupted_cv_can_report_committed_folds_before_summary_csv_exists(rev
 
 
 def test_complete_draft_fits_every_stage_and_resumes_without_fitting(revision_settings, monkeypatch, eager_tensorflow):
-    """Actual tiny CPU fits, backbone transfer, deployment refits and D4 inference."""
+    """Actual scratch mouse fits, rat transfer, deployment refits and D4 inference."""
     folder = suite.run_revision_suite(revision_settings, mode="draft")
     state = json.loads((folder / "state.json").read_text())
     assert state["status"] == "complete" and state["external_complete"]
@@ -330,7 +331,16 @@ def test_complete_draft_fits_every_stage_and_resumes_without_fitting(revision_se
     assert {"d1", "mouse_full", "rats", "D4"}.issubset(set(main.Task))
     for index in range(2):
         path = folder / f"experiments/mouse_full_reference/seed_42/fold_{index}/initialization.json"
-        assert path.is_file()
+        initialization = json.loads(path.read_text())
+        assert initialization["mode"] == "scratch"
+    for item in state["jobs"].values():
+        run = Path(item["directory"])
+        config = ExperimentConfig.load(run / "experiment.json")
+        if config.data.datasets[0].name == "D2":
+            assert config.initialization.mode != "scratch"
+        else:
+            assert config.initialization.mode == "scratch"
+            assert not config.initialization_by_fold
     external = folder / "external/D4/pretraining_audit.json"
     assert json.loads(external.read_text())["sha256"]
     release = folder / "experiments/release_mouse_full/seed_42"

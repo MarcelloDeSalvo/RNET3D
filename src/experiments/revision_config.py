@@ -44,6 +44,8 @@ class RevisionSuiteConfig:
     folds_file accepts either a complete D1 plan or a joint D1+D3 plan.
     anchor_split_file instead fixes train/validation/test in fold zero and
     generates the remaining outer folds. No saved membership is overwritten.
+    All mouse fits start from scratch; only independent rat fine-tuning loads
+    a D1 checkpoint. Optional MouseFull pretraining is confined to notebook 05.
     """
 
     data_root: Path

@@ -171,7 +171,7 @@ def test_configuration_cell_exposes_and_applies_the_switch(experiment, filename,
         if enabled:
             assert context["SPLIT_FILE"] is None
         else:
-            baseline_file = experiment.data.root.parent / "D1_baseline_fold_0_split.json"
+            baseline_file = experiment.data.root.parent / "D1_fixed_split_from_kfold_fold_0.json"
             assert context["SPLIT_FILE"] == baseline_file
 
     if filename.startswith(("07_", "07f_", "08_")):
@@ -185,3 +185,62 @@ def test_configuration_cell_exposes_and_applies_the_switch(experiment, filename,
             expected_role = "holdout"
         assert context["evaluation_role"] == expected_role
         assert context["config"].training.model_name.endswith("_kfold") == enabled
+
+
+@pytest.mark.parametrize("filename", [
+    "01_tbi_mouse_training.ipynb", "02_tbi_mouse_kfold.ipynb", "05_mouse_full_training.ipynb",
+    "06_mouse_full_kfold.ipynb", "07_ablation.ipynb", "07f_ablation.ipynb", "08_unet_comparison.ipynb",
+])
+def test_mouse_notebook_defaults_do_not_resolve_pretrained_weights(experiment, filename, tmp_path, monkeypatch):
+    from src.experiments.config import InitializationConfig
+
+    path = Path(__file__).resolve().parents[1] / "notebook" / filename
+    cells = json.loads(path.read_text(encoding="utf-8"))["cells"]
+    code = next("".join(cell["source"]) for cell in cells if "training = TrainingConfig(" in "".join(cell["source"]))
+    code = re.sub(r"DATA_ROOT: Path = [^\n]+", "DATA_ROOT: Path = dataset_root", code)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Default mouse configurations must not load a source checkpoint")
+
+    monkeypatch.setattr(InitializationConfig, "from_run", staticmethod(forbidden))
+    context = {
+        "Path": Path, "REPO_ROOT": tmp_path, "TRAINING_SEED": 42,
+        "REFERENCE": experiment.preprocessing.reference, "dataset_root": experiment.data.root,
+    }
+    exec(code, context)
+    config = context["config"]
+    assert config.initialization.mode == "scratch"
+    assert not config.initialization_by_fold
+    if filename in ("06_mouse_full_kfold.ipynb", "07f_ablation.ipynb"):
+        assert "USE_TBI_PRETRAINING" not in context
+
+
+def test_notebook_05_pretraining_is_optional_and_fixed_mode_only(experiment, tmp_path, monkeypatch):
+    from src.experiments.config import InitializationConfig
+
+    path = Path(__file__).resolve().parents[1] / "notebook/05_mouse_full_training.ipynb"
+    cells = json.loads(path.read_text(encoding="utf-8"))["cells"]
+    code = next("".join(cell["source"]) for cell in cells if "training = TrainingConfig(" in "".join(cell["source"]))
+    code = re.sub(r"DATA_ROOT: Path = [^\n]+", "DATA_ROOT: Path = dataset_root", code)
+    code = re.sub(r"TBI_RUN: Path \| None = [^\n]+", "TBI_RUN: Path | None = source_run", code)
+    code = code.replace("USE_TBI_PRETRAINING: bool = False", "USE_TBI_PRETRAINING: bool = True")
+    checkpoint = tmp_path / "source.weights.h5"
+    checkpoint.write_bytes(b"Configuration check; no model construction")
+    sources = []
+
+    def source(**kwargs):
+        sources.append(kwargs)
+        return InitializationConfig(mode="backbone", checkpoint=checkpoint)
+
+    monkeypatch.setattr(InitializationConfig, "from_run", staticmethod(source))
+    context = {
+        "Path": Path, "REPO_ROOT": tmp_path, "TRAINING_SEED": 42, "source_run": tmp_path,
+        "REFERENCE": experiment.preprocessing.reference, "dataset_root": experiment.data.root,
+    }
+    exec(code, context)
+    assert context["config"].initialization.mode == "backbone"
+    assert sources[0]["fold"] == 0
+    cv_code = code.replace("K_FOLD_COMPATIBLE: bool = False", "K_FOLD_COMPATIBLE: bool = True")
+    with pytest.raises(ValueError, match="optional TBI pretraining is for fixed-mode notebook 05 only"):
+        exec(cv_code, context)
+    assert len(sources) == 1
