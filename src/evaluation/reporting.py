@@ -11,7 +11,7 @@ import pandas as pd
 
 
 SCAN_METADATA: tuple[str, ...] = (
-    "Condition", "Modality", "Timepoint", "Subgroup", "Strain", "Species", "Protocol", "FusedBoundary",
+    "OriginalID", "Condition", "Modality", "Timepoint", "Subgroup", "Strain", "Species", "Protocol", "FusedBoundary",
 )
 MODEL_COLUMNS: tuple[str, ...] = ("Variant", "Seed", "Fold", "DatasetRole")
 

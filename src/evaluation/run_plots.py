@@ -78,7 +78,8 @@ def load_run_plot_data(run_dir: Path, *, metrics_file: Path | None = None) -> Ru
     An explicit metrics_file supports stopped-checkpoint evaluations. No latest
     run/evaluation is selected. Missing evaluations leave metrics empty, allowing
     loss inspection while training is unfinished. Saved metadata supplies condition
-    and modality; absent facts remain 'unknown'.
+    and modality; absent facts remain 'unknown'. Hover metadata retains original
+    IDs and strain, using saved c52/cd1 protocol codes when strain is unspecified.
     """
     run_dir = Path(run_dir).resolve()
     if not run_dir.is_dir():
@@ -162,14 +163,21 @@ def load_run_plot_data(run_dir: Path, *, metrics_file: Path | None = None) -> Ru
                 "Subject": record["animal"], "Scan": record["scan"][1],
                 "Condition": scan_metadata.get("condition", "unknown"),
                 "Modality": scan_metadata.get("modality", "unknown"),
+                "OriginalID": scan_metadata.get("original_id", "unknown"),
+                "Strain": scan_metadata.get("strain", "unknown"),
+                "Protocol": scan_metadata.get("protocol", "unknown"),
             })
         metrics = attach_scan_metadata(metrics, pd.DataFrame(metadata))
         sources.append(contract_file)
 
-    for column in ("Condition", "Modality"):
+    for column in ("Condition", "Modality", "OriginalID", "Strain", "Protocol"):
         if column not in metrics:
             metrics[column] = "unknown"
         metrics[column] = metrics[column].fillna("unknown").replace("", "unknown")
+    missing_strain = metrics["Strain"].isin(("unknown", "unspecified"))
+    strain_protocol = metrics["Protocol"].str.casefold().isin(("c52", "cd1"))
+    use_protocol = missing_strain & strain_protocol
+    metrics.loc[use_protocol, "Strain"] = metrics.loc[use_protocol, "Protocol"]
     if "Head" not in metrics:
         metrics["Head"] = "regions"
         brain = metrics["Region"].str.casefold().eq("brain")
@@ -177,6 +185,16 @@ def load_run_plot_data(run_dir: Path, *, metrics_file: Path | None = None) -> Ru
 
     source_files = tuple(sources)
     return RunPlotData(history=history, metrics=metrics, sources=source_files)
+
+
+def _hover_metadata(values: pd.Series) -> str:
+    """List supplied metadata values without duplicating an animal's plot point."""
+    known = values.dropna().astype(str)
+    known = known.loc[~known.isin(("", "unknown", "unspecified"))]
+    if known.empty:
+        return "unknown"
+
+    return ", ".join(sorted(known.unique()))
 
 
 def animal_metric_points(
@@ -188,6 +206,8 @@ def animal_metric_points(
     point represents one animal within that stratum, even with longitudinal
     scans or repeated fixed-test predictions across folds. Missing/unavailable
     measurements are excluded; genuine zero and both-empty scores are retained.
+    Original IDs and strains describe the resulting points without changing
+    grouping or weights; multiple supplied values are listed together.
     """
     if metrics.empty:
         raise ValueError("No saved full-volume metrics; evaluate the run first or supply METRICS_FILE")
@@ -198,6 +218,10 @@ def animal_metric_points(
         available = sorted(metrics["DatasetRole"].unique())
         raise ValueError(f"No finite {metric} measurements for roles {tuple(roles)}; available roles: {available}")
 
+    for column in ("OriginalID", "Strain"):
+        if column not in selected:
+            selected[column] = "unknown"
+
     keys: list[str] = ["Dataset", "DatasetRole", "Condition", "Modality", "Head", "Region", "Metric", "Unit", "Subject"]
     scan_keys = [*keys, "Scan"]
     scans = selected.groupby(scan_keys, dropna=False)["Value"].mean().reset_index()
@@ -205,4 +229,8 @@ def animal_metric_points(
         Value=("Value", "mean"), Scans=("Scan", "nunique"),
     ).reset_index()
     fold_counts = selected.groupby(keys, dropna=False)["Fold"].nunique().reset_index(name="Folds")
-    return animals.merge(fold_counts, on=keys, validate="one_to_one")
+    metadata = selected.groupby(keys, dropna=False).agg(
+        OriginalID=("OriginalID", _hover_metadata), Strain=("Strain", _hover_metadata),
+    ).reset_index()
+    animals = animals.merge(fold_counts, on=keys, validate="one_to_one")
+    return animals.merge(metadata, on=keys, validate="one_to_one")

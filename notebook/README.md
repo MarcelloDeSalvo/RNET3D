@@ -111,7 +111,8 @@ The diagnostic notebooks are:
 
 - [plot_training_results.ipynb](plot_training_results.ipynb): choose a single-run
   or K-Fold folder, inspect interactive Plotly loss curves and plot a chosen
-  full-volume test metric by condition and modality. Hover identifies animals;
+  full-volume test metric by condition and modality. Hover shows normalized and
+  original IDs plus strain (using saved protocol codes when strain is absent);
   legends toggle curves and conditions. Animal averages retain separate cohorts
   and evaluation roles. Exports offline HTML/JSON figures, raw/animal CSVs,
   coverage and settings; optional PNG/PDF/SVG needs Kaleido. An explicit metrics-file

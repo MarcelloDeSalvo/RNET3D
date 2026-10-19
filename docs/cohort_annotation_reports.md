@@ -79,7 +79,10 @@ per-region animal-bootstrap summaries.
 `region_coverage` retains unavailable/empty statuses by condition and region.
 `subgroup_summary` reports separate descriptive strata for condition, modality,
 timepoint, subgroup, strain and expert-provided `FusedBoundary` when available.
-Strain is not guessed from folder names. A `FusedBoundary` flag must be supplied
+Strain is not guessed from folder names. Training-result plots retain original
+IDs and use the saved protocol code (for example `c52` or `cd1`) when an explicit
+strain is absent; other reports retain their existing metadata policy.
+A `FusedBoundary` flag must be supplied
 explicitly by an expert; the report never diagnoses fusion from predictions.
 
 New scan manifests/full-volume rows preserve known acquisition and condition

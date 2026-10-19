@@ -25,9 +25,9 @@ def measurement(subject: str = "D1/mouse_a", scan: str = "day_1", **changes) -> 
 
 def test_animal_points_average_predictions_before_timepoints_and_keep_strata():
     rows = [
-        measurement(Value=0.2), measurement(Fold=1, Value=0.4),
+        measurement(Value=0.2, OriginalID="original_mouse_a", Strain="c52"), measurement(Fold=1, Value=0.4),
         measurement(scan="day_2", Value=0.9),
-        measurement(scan="T1", Modality="T1w", Value=0.8),
+        measurement(scan="T1", Modality="T1w", Value=0.8, OriginalID="original_mouse_a_T1"),
         measurement(subject="D3/sham", Dataset="D3", Condition="SHAM", Value=0.0),
         measurement(subject="D3/empty", Dataset="D3", Condition="SHAM", Value=1.0, Status="both_empty"),
         measurement(subject="D3/missing", Value=np.nan, Status="unavailable"),
@@ -38,6 +38,10 @@ def test_animal_points_average_predictions_before_timepoints_and_keep_strata():
     mouse = points.loc[points.Subject.eq("D1/mouse_a") & points.Modality.eq("T2w")].iloc[0]
     assert mouse.Value == pytest.approx(0.6)
     assert mouse.Scans == 2 and mouse.Folds == 2
+    assert mouse.OriginalID == "original_mouse_a" and mouse.Strain == "c52"
+    t1 = points.loc[points.Subject.eq("D1/mouse_a") & points.Modality.eq("T1w")].iloc[0]
+    assert t1.OriginalID == "original_mouse_a_T1"
+    assert t1.Strain == "unknown"
     assert len(points) == 4
     assert points.loc[points.Subject.eq("D3/sham"), "Value"].item() == 0.0
     assert points.loc[points.Subject.eq("D3/empty"), "Value"].item() == 1.0
@@ -53,12 +57,19 @@ def test_load_prefers_committed_epochs_and_one_aggregate_metric_export(tmp_path)
     for folder in (tmp_path / "regions", tmp_path / "summary"):
         folder.mkdir()
         pd.DataFrame([measurement()]).to_csv(folder / "full_volume_metrics.csv", index=False)
+    manifest = pd.DataFrame([{
+        "Subject": "D1/mouse_a", "Scan": "day_1", "Dataset": "D1",
+        "OriginalID": "original_mouse_a", "Strain": "c52",
+    }])
+    manifest.to_csv(tmp_path / "subjects.csv", index=False)
 
     result = load_run_plot_data(tmp_path)
     assert result.history.Epoch.max() == 2
     assert len(result.metrics) == 1
     assert result.metrics.SourceFile.str.contains("summary", regex=False).all()
-    assert len(result.sources) == 2
+    assert result.metrics.OriginalID.item() == "original_mouse_a"
+    assert result.metrics.Strain.item() == "c52"
+    assert len(result.sources) == 3
 
 
 def test_partial_cv_reads_fold_results_without_summary_and_does_not_relabel_validation(tmp_path):
@@ -88,13 +99,26 @@ def test_explicit_checkpoint_metrics_use_saved_contract_metadata(tmp_path):
     pd.DataFrame([row]).to_csv(metric_file, index=False)
     contract = [{
         "animal": "D1/mouse_a", "scan": ["D1_T2w", "day_1"],
-        "metadata": {"condition": "TBI", "modality": "T2w"},
+        "metadata": {"condition": "TBI", "modality": "T2w", "original_id": "original_mouse_a", "protocol": "c52"},
     }]
     (run / "data_contract.json").write_text(json.dumps(contract))
     result = load_run_plot_data(run, metrics_file=metric_file)
     assert result.metrics.Condition.item() == "TBI"
     assert result.metrics.Modality.item() == "T2w"
+    assert result.metrics.OriginalID.item() == "original_mouse_a"
+    assert result.metrics.Strain.item() == "c52"
     assert result.history.empty
+
+    contract[0]["metadata"]["strain"] = "declared-strain"
+    (run / "data_contract.json").write_text(json.dumps(contract))
+    explicit = load_run_plot_data(run, metrics_file=metric_file)
+    assert explicit.metrics.Strain.item() == "declared-strain"
+
+    contract[0]["metadata"].pop("strain")
+    contract[0]["metadata"]["protocol"] = "unrelated-protocol"
+    (run / "data_contract.json").write_text(json.dumps(contract))
+    unrelated = load_run_plot_data(run, metrics_file=metric_file)
+    assert unrelated.metrics.Strain.item() == "unknown"
 
     contract[0]["metadata"]["condition"] = "SHAM"
     (run / "data_contract.json").write_text(json.dumps(contract))
@@ -131,6 +155,11 @@ def test_plotting_notebook_runs_and_exports_interactive_figures_and_animal_data(
         measurement(subject="D1/sham", Condition="SHAM", Modality="T1w", Value=1.0),
         measurement(subject="D3/healthy", Dataset="D3", Condition="SHAM", Value=0.95, Fold=1),
     ]
+    for row in rows:
+        row["OriginalID"] = "original_" + row["Subject"]
+        row["Strain"] = "c52"
+        if row["Dataset"] == "D3":
+            row["Strain"] = "cd1"
     pd.DataFrame(rows).to_csv(run / "full_volume_metrics.csv", index=False)
     path = Path(__file__).resolve().parents[1] / "notebook/plot_training_results.ipynb"
     notebook = json.loads(path.read_text(encoding="utf-8"))
@@ -161,6 +190,11 @@ def test_plotting_notebook_runs_and_exports_interactive_figures_and_animal_data(
     assert all(trace.type == "box" and trace.boxpoints == "all" for trace in boxes.data)
     subjects = {subject for trace in boxes.data for subject in trace.hovertext}
     assert subjects == {row["Subject"] for row in rows}
+    metadata = {row["Subject"]: (row["OriginalID"], row["Strain"]) for row in rows}
+    for trace in boxes.data:
+        assert "Original ID=" in trace.hovertemplate and "Strain=" in trace.hovertemplate
+        for subject, custom in zip(trace.hovertext, trace.customdata):
+            assert tuple(custom[:2]) == metadata[subject]
     assert boxes.layout.yaxis.matches is None
     assert boxes.layout.yaxis2.matches == "y"
     assert boxes.layout.yaxis3.matches is None
@@ -168,6 +202,8 @@ def test_plotting_notebook_runs_and_exports_interactive_figures_and_animal_data(
     points = pd.read_csv(export / "animal_metric_points.csv")
     assert len(points) == 4
     assert set(points.Condition) == {"TBI", "SHAM"}
+    assert set(points.OriginalID) == {row["OriginalID"] for row in rows}
+    assert set(points.Strain) == {"c52", "cd1"}
     settings = json.loads((export / "plot_settings.json").read_text())
     assert settings["metric"] == "Dice"
     assert settings["plot_backend"] == "plotly"
