@@ -506,6 +506,8 @@ def run_cross_validation(
 
     By default each outer fold has separate training, selection-validation and
     holdout animals. Old two-role split files remain diagnostic selection folds.
+    Fixed-epoch leave-one-out folds instead have only train/holdout animals and
+    omit validation during fitting; every configured epoch must finish first.
     callbacks is copied separately for each fold; no early stopping is added
     implicitly. Relative log paths are resolved within each fold's directory.
     """
@@ -642,6 +644,8 @@ def history_figure(result: TrainingResult) -> Any:
     figure = go.Figure()
     for fold, history in enumerate(result.histories):
         for key in ("loss", "val_loss"):
+            if key not in history:
+                continue
             values = history[key]
             epochs = list(range(1, len(values) + 1))
             figure.add_trace(go.Scatter(x=epochs, y=values, mode="lines", name=f"Fold {fold}: {key}"))

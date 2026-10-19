@@ -21,9 +21,10 @@ Example::
         fve_callbacks={"regions": RegionEvaluator},
     )
 
-The runner always owns a best-weights checkpoint so that evaluation uses the
-selected epoch. ``callbacks_factory`` can add callbacks or replace the default
-TensorBoard, ReduceLROnPlateau, and CSVLogger callbacks.
+The runner owns the selected-weight checkpoint. By default it restores the
+best monitored epoch; fixed_epochs=True skips validation during fitting and
+uses final-epoch weights after the full budget. ``callbacks_factory`` can add
+callbacks or replace the default TensorBoard, ReduceLROnPlateau, and CSVLogger callbacks.
 
 Optional reviewer-ready setup::
 
@@ -246,7 +247,7 @@ class TrainingConfig:
     Attributes:
         model_name: Name of the experiment group.
         k: Expected number of folds, including with a custom splitter.
-        epochs: Maximum epochs in each fold.
+        epochs: Maximum epochs, or the exact required budget with fixed_epochs.
         batch_size: Batch size used only when inferring training steps.
         data_multiplier: Training-only multiplier when inferring steps.
         seed: Random seed used for splits and per-fold initialization.
@@ -256,8 +257,11 @@ class TrainingConfig:
         validation_steps: Explicit validation batches per epoch, or None.
         infer_steps_from_ids: Infer missing steps from the number of subjects.
             Keep False for datasets with their own cardinality or patch sampling.
-        monitor: Validation metric used to select the best model weights.
+        monitor: Logged metric used for best-model selection. Fixed-epoch fitting
+            uses loss only to check that recovery state contains finite values.
         monitor_mode: Whether smaller or larger monitor values are better.
+        fixed_epochs: Fit the complete budget without validation monitoring,
+            early stopping or plateau scheduling; evaluate final-epoch weights.
         default_callbacks: Whether to add standard logging and LR callbacks.
         histogram_freq: TensorBoard histogram frequency if enabled.
         save_model: Whether to save the restored model after training.
@@ -278,6 +282,7 @@ class TrainingConfig:
     infer_steps_from_ids: bool = False
     monitor: str = "val_loss"
     monitor_mode: Literal["min", "max"] = "min"
+    fixed_epochs: bool = False
     default_callbacks: bool = True
     histogram_freq: int = 0
     save_model: bool = True
@@ -307,6 +312,13 @@ class TrainingConfig:
                 raise ValueError(f"{name} must be positive")
         if self.monitor_mode not in {"min", "max"} or not self.monitor:
             raise ValueError("monitor_mode must be 'min' or 'max' and monitor cannot be empty")
+        if not isinstance(self.fixed_epochs, bool):
+            raise ValueError("fixed_epochs must be a boolean")
+        if self.fixed_epochs:
+            if self.monitor != "loss" or self.default_callbacks:
+                raise ValueError("Fixed-epoch fitting requires monitor='loss' and default_callbacks=False")
+            if self.validation_steps is not None:
+                raise ValueError("Fixed-epoch fitting has no validation_steps")
         if self.histogram_freq < 0:
             raise ValueError("histogram_freq must be nonnegative")
         reserved = {"x", "validation_data", "epochs", "initial_epoch", "callbacks", "steps_per_epoch", "validation_steps"}
@@ -328,6 +340,8 @@ class TrainingConfig:
         elif self.infer_steps_from_ids:
             steps["steps_per_epoch"] = math.ceil(n_train * self.data_multiplier / self.batch_size)
 
+        if self.fixed_epochs:
+            return steps
         if self.validation_steps is not None:
             steps["validation_steps"] = self.validation_steps
         elif self.infer_steps_from_ids:
@@ -386,7 +400,7 @@ class FoldTiming:
 
 @dataclass(frozen=True)
 class FoldSplit:
-    """One fold's disjoint training, selection-validation and optional holdout animals."""
+    """Disjoint fitting, optional inner-validation and outer-holdout animals."""
 
     index: int
     train_ids: list[str]
@@ -395,8 +409,8 @@ class FoldSplit:
 
     def validate(self, all_ids: set[str]) -> None:
         """Ensure no duplicated, unknown, or overlapping subjects occur."""
-        if not self.train_ids or not self.val_ids:
-            raise ValueError(f"Fold {self.index}: training and validation cannot be empty")
+        if not self.train_ids or not (self.val_ids or self.test_ids):
+            raise ValueError(f"Fold {self.index}: training and an evaluation cohort cannot be empty")
         selected = self.train_ids + self.val_ids + self.test_ids
         roles = (self.train_ids, self.val_ids, self.test_ids)
         if any(len(role) != len(set(role)) for role in roles):
@@ -600,6 +614,16 @@ def _best_epoch(history: History, monitor: str, mode: str) -> int:
     return int(np.argmin(values) if mode == "min" else np.argmax(values))
 
 
+def _selected_epoch(history: History, config: TrainingConfig) -> int:
+    """Return the evaluated epoch, enforcing a completed fixed training budget."""
+    if config.fixed_epochs:
+        completed = len(history.get("loss", []))
+        if completed != config.epochs:
+            raise ValueError("Fixed-epoch evaluation requires the complete configured epoch budget")
+        return completed - 1
+    return _best_epoch(history, config.monitor, config.monitor_mode)
+
+
 def _build_callbacks(
     context: FoldContext, factory: CallbackFactory | None, *, resume: bool = False,
 ) -> list[Any]:
@@ -618,7 +642,10 @@ def _build_callbacks(
     if factory is not None:
         callbacks.extend(factory(context))
 
+    adaptive_callbacks = (tf.keras.callbacks.EarlyStopping, tf.keras.callbacks.ReduceLROnPlateau)
     for callback in callbacks:
+        if config.fixed_epochs and isinstance(callback, adaptive_callbacks):
+            raise ValueError("Fixed-epoch fitting cannot use early stopping or ReduceLROnPlateau")
         if isinstance(callback, tf.keras.callbacks.EarlyStopping) and callback.restore_best_weights:
             raise ValueError("The runner restores its selected checkpoint; use restore_best_weights=False")
         if isinstance(callback, tf.keras.callbacks.ModelCheckpoint):
@@ -627,10 +654,11 @@ def _build_callbacks(
             if requested_path == managed_path:
                 raise ValueError("An extra ModelCheckpoint must use a different file from the managed best checkpoint")
 
-    # The checkpoint is appended last, and always uses the same monitor as reporting.
+    # Fixed protocols save each latest epoch; other fits select the monitored best.
+    save_best_only: bool = not config.fixed_epochs
     callbacks.append(tf.keras.callbacks.ModelCheckpoint(
         filepath=str(context.checkpoint_path), monitor=config.monitor,
-        mode=config.monitor_mode, save_best_only=True, save_weights_only=True,
+        mode=config.monitor_mode, save_best_only=save_best_only, save_weights_only=True,
     ))
     return callbacks
 
@@ -665,7 +693,7 @@ def _save_summary(result: TrainingResult, config: TrainingConfig, metrics: Seque
     keys = [config.monitor, "val_loss", *(f"val_{key}" for key in metrics)]
 
     for history in result.histories:
-        epoch = _best_epoch(history, config.monitor, config.monitor_mode)
+        epoch = _selected_epoch(history, config)
         selected.append({key: history[key][epoch] for key in dict.fromkeys(keys) if key in history})
 
     best = pd.DataFrame(selected)
@@ -730,7 +758,7 @@ def train_fold(
     resume: bool = False,
     patch_evaluator: Callable[[Any, Sequence[str], Mapping[str, Any]], pd.DataFrame] | None = None,
 ) -> None:
-    """Train a fresh model, restore its best checkpoint and evaluate one fold."""
+    """Fit one fold and evaluate its validation-selected or fixed final weights."""
     import tensorflow as tf
     from .training_state import EpochCheckpoint, write_json
 
@@ -778,7 +806,9 @@ def train_fold(
     tf.keras.utils.set_random_seed(config.seed + split.index)
 
     train_data = train_factory(split.train_ids)
-    val_data = val_factory(split.val_ids)
+    val_data = None
+    if not config.fixed_epochs:
+        val_data = val_factory(split.val_ids)
     for role, dataset in (("training", train_data), ("validation", val_data)):
         if isinstance(dataset, tf.keras.utils.Sequence) and len(dataset) == 0:
             raise ValueError(f"Fold {split.index}: {role} generator has no complete batches; reduce batch_size")
@@ -795,7 +825,10 @@ def train_fold(
     steps = config.fit_steps(len(split.train_ids), len(split.val_ids))
     fit_options = {**config.fit_kwargs, **steps}
 
-    LOGGER.info("Fold %d: %d training, %d validation subjects", split.index, len(split.train_ids), len(split.val_ids))
+    validation_count: int = 0
+    if not config.fixed_epochs:
+        validation_count = len(split.val_ids)
+    LOGGER.info("Fold %d: %d training, %d validation subjects", split.index, len(split.train_ids), validation_count)
     if isinstance(val_data, tf.keras.utils.Sequence) and config.validation_steps is not None:
         if config.validation_steps != len(val_data):
             raise ValueError("validation_steps must cover every validation batch exactly once")
@@ -806,8 +839,8 @@ def train_fold(
         )
     training_seconds = state.training_seconds
     history = state.history
-    best_epoch = _best_epoch(history, config.monitor, config.monitor_mode)
-    selected_epoch = best_epoch + 1
+    epoch_index = _selected_epoch(history, config)
+    selected_epoch = epoch_index + 1
     if not context.checkpoint_path.is_file():
         raise FileNotFoundError(f"No best-weights checkpoint at {context.checkpoint_path}")
 
@@ -896,7 +929,7 @@ def train_fold(
         evaluation_seconds=time.perf_counter() - eval_start,
         epochs_completed=len(history[config.monitor]),
         parameter_count=int(model.count_params()),
-        best_epoch=best_epoch,
+        best_epoch=epoch_index,
     )
     result.timings.append(timing)
     (folder / "timing.json").write_text(json.dumps(asdict(timing), indent=2), encoding="utf-8")
@@ -1011,6 +1044,7 @@ def k_fold_loop(
         if splitter is not None:
             raise ValueError("Resume uses the saved splits, not a new splitter")
         saved_config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
+        saved_config = asdict(TrainingConfig.from_input(saved_config))
         current_config = {**asdict(settings), "run_id": run_dir.name}
         current_config = json.loads(json.dumps(current_config, default=str))
         if saved_config != current_config:
@@ -1050,6 +1084,12 @@ def k_fold_loop(
         folds = _splits(ids, split_settings, splitter)
     else:
         folds = load_fold_splits(precomputed_splits, ids, settings.k)
+    for fold in folds:
+        if settings.fixed_epochs:
+            if fold.val_ids or not fold.test_ids:
+                raise ValueError("Fixed-epoch CV requires empty validation and nonempty outer-test roles; start a fresh run with matching splits")
+        elif settings.monitor.startswith("val_") and not fold.val_ids:
+            raise ValueError("Validation-based checkpoint selection requires inner-validation animals")
     evaluators = _named_evaluators(fve_callbacks)
     metrics = list(metrics_dictionary or {})
     if fold_validator is not None:

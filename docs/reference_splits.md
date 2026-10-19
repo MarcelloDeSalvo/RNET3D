@@ -55,8 +55,9 @@ nested CV. Freeze the experiment settings before inspecting outer-test results;
 use only training/inner validation for tuning, scheduling and checkpoint selection.
 Report those decisions and exact fold memberships. This addresses Reviewer 2's
 test-driven selection concern; nested CV or a separate fixed tuning set was
-described as the preferred design. Historical rat notebook 04 has no inner
-validation and therefore retains training-loss selection and a fixed LR.
+described as the preferred design. Rat notebook 04 has no inner validation;
+it uses a fixed LR and epoch budget, skips fitting-time validation, and evaluates
+final-epoch weights on the held-out rat. Its new results use the `holdout` role.
 
 With the current inventory, reference fold zero has:
 

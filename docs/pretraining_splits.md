@@ -92,8 +92,10 @@ early stopping and CSV logging; standard CV uses LR reduction only. Best and
 recovery checkpoints are managed in both modes. Viewers default to `test` in
 fixed mode and `holdout` in CV; override the role when inspecting older runs.
 Notebook 03's grouped CV has independent inner validation and outer holdouts.
-Historical rat notebook 04 holds out every scan of one rat, with no LR callback
-and training-loss checkpoint selection; its saved diagnostic role is `validation`.
+Rat notebook 04 holds out every scan of one rat, with `fixed_epochs=True`, no
+per-epoch validation, no adaptive LR/early stopping, and final-epoch evaluation.
+New runs save the omitted animal as `holdout`; older runs retain their saved
+`validation` role and original checkpoint policy.
 
 The core still tests optional per-fold source mappings, longitudinal grouping,
 annotation balancing, inherited memberships, conflicting sources and leakage

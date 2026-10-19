@@ -123,7 +123,10 @@ class EpochCheckpoint(tf.keras.callbacks.Callback):
         for callback in self.callbacks:
             name = type(callback).__name__
             values = {}
-            for field in fields.get(name, ()):
+            saved_fields = fields.get(name, ())
+            if isinstance(callback, tf.keras.callbacks.ModelCheckpoint) and not callback.save_best_only:
+                saved_fields = ()
+            for field in saved_fields:
                 if hasattr(callback, field):
                     value = getattr(callback, field)
                     if isinstance(value, np.generic):
@@ -223,10 +226,13 @@ class EpochCheckpoint(tf.keras.callbacks.Callback):
                 break
         if managed_callback is None:
             raise ValueError("Epoch recovery requires the managed best-weights checkpoint")
-        best = float(managed_callback.best)
-        previous_best = self.record.get("selected_metric")
+        select_latest: bool = not managed_callback.save_best_only
+        selected_metric = values[self.monitor]
+        if not select_latest:
+            selected_metric = float(managed_callback.best)
+        previous_metric = self.record.get("selected_metric")
         selected_checkpoint = self.record.get("selected_checkpoint")
-        if selected_checkpoint is None or best != previous_best:
+        if select_latest or selected_checkpoint is None or selected_metric != previous_metric:
             selected_path = self.folder / "latest" / f"selected_{self.completed_epochs}.weights.h5"
             shutil.copyfile(self.folder / "best.weights.h5", selected_path)
             selected_checkpoint = str(selected_path.relative_to(self.folder))
@@ -237,7 +243,7 @@ class EpochCheckpoint(tf.keras.callbacks.Callback):
             "graph_sha256": self.graph_sha256,
             "completed_epochs": self.completed_epochs, "history": self.history,
             "training_seconds": self.training_seconds, "fit_complete": bool(self.model.stop_training),
-            "selected_checkpoint": selected_checkpoint, "selected_metric": best,
+            "selected_checkpoint": selected_checkpoint, "selected_metric": selected_metric,
             "callbacks": callback_states, "python_random_state": random.getstate(),
             "numpy_random_state": [numpy_state[0], numpy_state[1].tolist(), *numpy_state[2:]],
         }

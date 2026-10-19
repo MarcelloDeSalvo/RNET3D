@@ -248,6 +248,7 @@ def test_visible_notebook_lists_match_original_single_and_cv_policies():
         if path.name.startswith('04_'):
             assert callbacks == []
             assert 'monitor="loss"' in config
+            assert 'fixed_epochs=True' in config
         else:
             assert callbacks[0].factor == 0.5 and callbacks[0].patience == 10 and callbacks[0].min_lr == 1e-7
         if path.name.startswith(('02_', '06_')):
@@ -273,9 +274,9 @@ def test_visible_notebook_lists_match_original_single_and_cv_policies():
         assert len(calls) == 1 and 'callbacks=callbacks' in calls[0]
 
 
-def test_rat_notebook_checkpoint_and_lr_do_not_depend_on_held_out_loss(tmp_path):
-    """Contradictory held-out curves cannot change the selected fitting epoch."""
-    from src.evaluation.k_fold import TrainingConfig, _best_epoch
+def test_rat_notebook_keeps_final_weights_without_using_loss_minima(tmp_path):
+    """Neither a fitting-loss minimum nor supplied diagnostic scores selects an epoch."""
+    from src.evaluation.k_fold import TrainingConfig, _selected_epoch
     from src.evaluation.training_state import EpochCheckpoint
 
     notebook_path = Path(__file__).resolve().parents[1] / 'notebook/04_rat_kfold.ipynb'
@@ -287,20 +288,22 @@ def test_rat_notebook_checkpoint_and_lr_do_not_depend_on_held_out_loss(tmp_path)
                      and any(isinstance(target, ast.Name) and target.id == 'training' for target in node.targets))
     namespace = {'TrainingConfig': TrainingConfig, 'TRAINING_SEED': 42, 'REPO_ROOT': tmp_path}
     exec(compile(ast.Module(body=[statement], type_ignores=[]), str(notebook_path), 'exec'), namespace)
-    config = namespace['training']
+    assert namespace['training'].epochs == 100
+    config = replace(namespace['training'], epochs=3)
     callback_source = next(source for source in sources if 'callbacks: list[tf.keras.callbacks.Callback]' in source)
     exec(callback_source, namespace)
-    assert config.monitor == 'loss' and not config.default_callbacks
+    assert config.fixed_epochs and config.monitor == 'loss' and not config.default_callbacks
     selected_epochs = []
     for index, validation_curve in enumerate(([3.0, 2.0, 0.01], [0.01, 3.0, 2.0])):
         folder = tmp_path / f'case_{index}'
         folder.mkdir()
         context = FoldContext(
-            split=FoldSplit(index=index, train_ids=['rat_train'], val_ids=['rat_held_out']),
+            split=FoldSplit(index=index, train_ids=['rat_train'], val_ids=[], test_ids=['rat_held_out']),
             output_dir=folder, config=config, checkpoint_path=folder / 'best.weights.h5',
         )
         callbacks = _build_callbacks(context, lambda context: namespace['callbacks'])
         assert [type(callback).__name__ for callback in callbacks] == ['ModelCheckpoint']
+        assert not callbacks[0].save_best_only
         model = tf.keras.Sequential([tf.keras.layers.Dense(1, use_bias=False, input_shape=(1,))])
         model.compile(optimizer=tf.keras.optimizers.SGD(0.001), loss='mse')
         model.stop_training = False
@@ -316,12 +319,12 @@ def test_rat_notebook_checkpoint_and_lr_do_not_depend_on_held_out_loss(tmp_path)
             for callback in callbacks:
                 callback.on_epoch_end(epoch, logs)
             state.on_epoch_end(epoch, logs)
-        selected_epochs.append(_best_epoch(state.history, config.monitor, config.monitor_mode))
+        selected_epochs.append(_selected_epoch(state.history, config))
         model.load_weights(str(context.checkpoint_path))
-        np.testing.assert_array_equal(model.layers[0].get_weights()[0], [[2.0]])
+        np.testing.assert_array_equal(model.layers[0].get_weights()[0], [[3.0]])
         assert float(tf.keras.backend.get_value(model.optimizer.learning_rate)) == pytest.approx(0.001)
-        assert state.record['selected_metric'] == 1.0
-    assert selected_epochs == [1, 1]
+        assert state.record['selected_metric'] == 1.5
+    assert selected_epochs == [2, 2]
 
 
 def test_extra_checkpoint_uses_its_own_file_and_cannot_replace_managed_best(experiment, tmp_path):

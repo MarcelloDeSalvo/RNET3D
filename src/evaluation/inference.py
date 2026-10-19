@@ -645,7 +645,7 @@ def best_checkpoint_settings(
     original_label_ids: bool | None = None, postprocessing: PostprocessingConfig | None = None,
     evaluate_patches: bool = False,
 ) -> SavedModelEvaluationConfig:
-    """Select the saved cohort and best committed weights of a stopped/completed run.
+    """Select a saved cohort and its committed validation-best or fixed final weights.
 
     Fixed-split test animals come from splits.json; outer holdouts and rat
     validation come from fold_N/split.json. CV test/external cohorts come from
@@ -653,6 +653,7 @@ def best_checkpoint_settings(
     into the training run. No finished-fit flag or optimizer state is required.
     An explicit reference overrides the saved input orientation for evaluation.
     Label/postprocessing overrides do not change fitting weights or recovery.
+    Fixed-epoch runs require their complete budget before holdout evaluation.
     """
     from uuid import uuid4
     from ..experiments.config import ExperimentConfig
@@ -690,9 +691,13 @@ def best_checkpoint_settings(
 
     model_file = fold_dir / "best.weights.h5"
     state_file = fold_dir / "training_state.json"
+    state: dict[str, Any] = {}
     if state_file.exists():
         state = json.loads(state_file.read_text(encoding="utf-8"))
         model_file = fold_dir / state["selected_checkpoint"]
+    if config.training.fixed_epochs:
+        if not state_file.is_file() or state.get("completed_epochs") != config.training.epochs:
+            raise ValueError("Complete the fixed epoch budget before evaluating its outer holdout")
     if not model_file.is_file():
         raise FileNotFoundError("No saved best checkpoint; complete an epoch before evaluating")
 

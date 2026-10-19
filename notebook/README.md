@@ -42,8 +42,9 @@ outer fold with the same complete configuration. Studies 07/07f/08 expose the
 same boolean to select CV. The corresponding callback cell then defaults to
 LR reduction only. Every mouse fold starts from scratch.
 Standard K-Fold uses only LR reduction by default, with no early stopping; study
-notebooks follow their selected `MODE`. Rat notebook 04 has no LR callback and
-selects weights using training loss. Edit the constructors/list directly to change this.
+notebooks follow their selected `MODE`. Rat notebook 04 uses `fixed_epochs=True`:
+no fitting-time validation or adaptive callbacks, and final-epoch weights for its
+outer holdout. Edit the visible settings directly to change the protocol.
 Relative logging paths are scoped to each run/fold. Fresh callback copies prevent
 state sharing across folds/seeds/variants, and saved `callbacks.json` settings
 are checked on resume. The runner handles best/recovery checkpoints separately
@@ -55,7 +56,7 @@ and restores best weights before evaluation, so EarlyStopping itself uses
 | [01_tbi_mouse_training.ipynb](01_tbi_mouse_training.ipynb) | D1 fixed reference training and volume evaluation; source for independent rat fine-tuning, optional full CV | Implemented; `K_FOLD_COMPATIBLE` switch |
 | [02_tbi_mouse_kfold.ipynb](02_tbi_mouse_kfold.ipynb) | D1 grouped CV with separate checkpoint validation and outer holdouts | Implemented |
 | [03_rat_finetuning.ipynb](03_rat_finetuning.ipynb) | D2 fine-tuning and independent evaluation; optional grouped outer CV | Implemented; `K_FOLD_COMPATIBLE` switch |
-| [04_rat_kfold.ipynb](04_rat_kfold.ipynb) | Historical leave-one-rat-out fine-tuning with all longitudinal scans | Implemented |
+| [04_rat_kfold.ipynb](04_rat_kfold.ipynb) | Fixed 100-epoch leave-one-rat-out fine-tuning; final weights and independent longitudinal holdouts | Implemented |
 | [05_mouse_full_training.ipynb](05_mouse_full_training.ipynb) | D1+D3 training and volume evaluation, eleven classes and partial labels; optional full CV | Implemented; `K_FOLD_COMPATIBLE` switch |
 | [06_mouse_full_kfold.ipynb](06_mouse_full_kfold.ipynb) | D1+D3 grouped CV with anatomy-balanced outer folds and separate checkpoint validation | Implemented |
 | [07_ablation.ipynb](07_ablation.ipynb) | Matched residual, attention, multiscale, head-fusion and downsampling ablations; optional loss/training rows | Implemented |
@@ -80,10 +81,9 @@ and grouped outer CV. Classifiers are disabled for both models because the
 existing U-Net does not support that head; neither model's dropout is changed.
 
 Rat CV retains the old animal split: train on four rats and evaluate the fifth.
-For new runs its learning rate is fixed and the checkpoint uses training loss,
-so the held-out rat does not control automatic scheduling or weight selection.
-Its curves remain diagnostic; saved memberships/viewers retain the `validation`
-role. Older runs retain their original validation-driven selection. Evaluation
+New runs use a fixed LR and epoch budget, with no per-epoch validation or
+loss-based epoch selection. The final epoch is evaluated on the omitted rat,
+saved as `holdout`. Older runs retain their original roles and selection policy. Evaluation
 uses five saved center-biased patches per scan. Every fold starts from the same
 explicitly chosen mouse checkpoint and a fresh optimizer.
 
@@ -158,14 +158,15 @@ Native Plotly menus select scans/planes, and a slider selects slices. Use the
 manifest row indices to load other animals, timepoints or folds; study notebooks
 also select a variant/seed. Missing annotations remain explicit. `VIEW_RUN` can
 inspect a matching existing run without fitting. Predictions must have been
-saved during evaluation; no inference is repeated. Rat CV displays validation
-predictions, while ordinary CV displays independent outer holdouts.
+saved during evaluation; no inference is repeated. New rat CV displays independent
+outer holdouts; historical rat validation predictions remain available by role.
 
 The final **Evaluate the best checkpoint after stopping training** cell in each
 training/study notebook works independently of its interrupted `result`. Set
 `CHECKPOINT_RUN`, choose a fold and enable `RUN_CHECKPOINT_EVALUATION`. After a
 kernel restart, run only repository setup and that final cell. Saved settings
 and cohorts are loaded automatically; no fit or optimizer restoration occurs.
+Notebook 04 requires its complete fixed epoch budget before holdout evaluation.
 When available, the committed selected-weight snapshot is used instead of a
 possibly interrupted best-file overwrite. Predictions/metrics go to a fresh
 folder outside the training run; checkpoint history and completion state are

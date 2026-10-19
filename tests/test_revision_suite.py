@@ -87,6 +87,23 @@ def test_draft_rejects_a_single_bottleneck_value_before_fitting(revision_setting
     assert not (revision_settings.output_root / "draft").exists()
 
 
+def test_older_suite_training_defaults_remain_resumable_without_rewriting_contract(revision_settings):
+    folder = suite.run_revision_suite(revision_settings, plan_only=True)
+    path = folder / "suite.json"
+    contract = json.loads(path.read_text())
+    for config in contract["task_configurations"].values():
+        config["training"].pop("fixed_epochs")
+    path.write_text(json.dumps(contract))
+    previous = path.read_bytes()
+    assert suite.run_revision_suite(revision_settings, plan_only=True, resume=True) == folder
+    assert path.read_bytes() == previous
+
+    contract["task_configurations"]["d1"]["training"]["fixed_epochs"] = True
+    path.write_text(json.dumps(contract))
+    with pytest.raises(ValueError, match="Suite configuration"):
+        suite.run_revision_suite(revision_settings, plan_only=True, resume=True)
+
+
 def test_default_draft_has_finite_training_and_validation_on_available_devices(revision_settings):
     """Exercise the real loss and BatchNorm updates, including cuDNN when present."""
     import tensorflow as tf

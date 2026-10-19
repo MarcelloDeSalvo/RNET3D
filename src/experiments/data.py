@@ -488,11 +488,11 @@ def make_pretrained_cv_splits(
 
 
 def make_leave_one_animal_out_splits(subjects: list[str]) -> list[FoldSplit]:
-    """Match historical rat CV: select/evaluate one animal, train on all others.
+    """Hold out one complete animal and fit all others under a fixed protocol.
 
-    These two-role folds use the omitted animal for checkpoint selection and
-    full-volume validation. They do not provide an independent outer test set.
-    Scan expansion remains the responsibility of SubjectIndex and the factories.
+    No inner validation is reserved. Use TrainingConfig.fixed_epochs=True so
+    held-out scans are evaluated only after fitting. SubjectIndex expands each
+    animal to every registered longitudinal scan.
     """
     if len(subjects) < 2:
         raise ValueError("Leave-one-animal-out requires at least two animals")
@@ -505,7 +505,7 @@ def make_leave_one_animal_out_splits(subjects: list[str]) -> list[FoldSplit]:
     folds: list[FoldSplit] = []
     for index, animal in enumerate(ids):
         training_ids = [subject for subject in ids if subject != animal]
-        fold = FoldSplit(index=index, train_ids=training_ids, val_ids=[animal])
+        fold = FoldSplit(index=index, train_ids=training_ids, val_ids=[], test_ids=[animal])
         fold.validate(set(ids))
         folds.append(fold)
 

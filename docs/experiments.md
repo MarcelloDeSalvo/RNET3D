@@ -7,16 +7,19 @@ background, lesion, merged lateral ventricles, and third ventricle.
 `notebook/02_tbi_mouse_kfold.ipynb` uses the same factories for grouped K-Fold,
 with separate checkpoint-selection validation and independent outer holdout
 animals. Training is disabled until its configuration and split counts are reviewed.
-For the historical rat CV protocol, use `notebook/04_rat_kfold.ipynb` and set
+For fixed-protocol rat CV, use `notebook/04_rat_kfold.ipynb` and set
 `MOUSE_CHECKPOINT`. Its complete D2 configuration uses 112-cube patches, five folds,
 100 epochs, batch size four and training multiplier five. Each fold initializes
 from the same mouse weights, trains on four rats, and evaluates every available
 timepoint of the remaining rat. New notebook 04 runs use a fixed learning rate,
-an empty explicit callback list and `monitor="loss"` for training-only checkpoint
-selection. The remaining rat supplies diagnostic curves but controls no automatic
-scheduling, stopping or selection. Saved split/viewer roles remain `validation`;
-older runs retain their validation-driven selection and must not be relabelled.
-Validation reuses five saved center-biased patches per scan and retains
+an empty explicit callback list and `fixed_epochs=True`. No validation dataset
+is passed during fitting; metrics use the final epoch rather than a loss minimum.
+The remaining rat is an independent `holdout`, evaluated only after all 100
+epochs. Viewers, checkpoint evaluation and paper tables default to that role.
+Recovery remains available after every epoch. The shared `best.weights.h5`
+filename contains final-epoch weights in this mode; `BestEpoch` records epoch 100.
+Older runs retain their saved selection policy and roles and must not be relabelled.
+Post-fit patch evaluation reuses five saved center-biased patches per scan and retains
 incomplete batches. The original notebook's random validation
 augmentation and nearest image interpolation are not reproduced. Full-volume
 postprocessing retains the historical ventricle separation and brain cleanup.

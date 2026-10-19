@@ -418,6 +418,9 @@ def run_revision_suite(
         if not resume:
             raise FileExistsError(f"Suite exists; use resume=True: {plan.folder}")
         saved = json.loads(contract_path.read_text(encoding="utf-8"))
+        for task, task_config in saved.get("task_configurations", {}).items():
+            saved["task_configurations"][task] = ExperimentConfig.from_dict(task_config).to_dict()
+        saved = _json_value(saved)
         if saved != contract:
             raise ValueError("Suite configuration, source files, callbacks or split memberships changed")
     else:

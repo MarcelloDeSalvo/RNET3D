@@ -163,11 +163,11 @@ No patch-balance audit, parameter-capacity matching or additional hardware
 benchmark is introduced. Symmetry addresses the correction assumption, not voxel
 class balance. Existing loss weights and timing records can be reported directly.
 
-Notebook 04 keeps every held-out rat scan out of fitting. New runs have no
-ReduceLROnPlateau/early stopping and select the lowest training-loss checkpoint
-with `monitor="loss"`. Its held-out curves are diagnostic, with the legacy
-`validation` role retained for saved splits/viewers. They must not be used to
-choose settings after viewing results. Older runs used held-out `val_loss` for
-scheduling/selection; changing the notebook cannot repair those measurements
-retroactively. The other standard CV workflows use separate inner validation
+Notebook 04 keeps every held-out rat scan out of fitting. New runs set
+`fixed_epochs=True`: no fitting-time validation or adaptive LR/early stopping,
+and final-epoch weights for post-fit `holdout` evaluation. All four other rats
+remain in fitting. Recovery is saved after every epoch, but held-out metrics
+require the complete predefined budget. Historical runs retain their saved
+`validation` roles and selection policies; the change cannot repair earlier
+test-driven selection retroactively. The other standard CV workflows use separate inner validation
 and outer holdouts; their validation-driven callbacks remain appropriate.

@@ -110,6 +110,12 @@ def test_interrupted_cv_restores_optimizer_and_skips_completed_folds(tmp_path):
     # A crash after best-weight writing but before state commit must roll back
     # that file to the selected weights paired with the committed epoch.
     (folder / "fold_0" / "best.weights.h5").write_bytes(b"uncommitted checkpoint")
+    # Saved mouse runs predate the optional fixed-epoch flag; their default
+    # validation-based protocol must remain resumable without rewriting inputs.
+    config_file = folder / "config.json"
+    saved_config = json.loads(config_file.read_text())
+    saved_config.pop("fixed_epochs")
+    config_file.write_text(json.dumps(saved_config))
     control["interrupt"] = False
     result = k_fold_loop(
         dataset, dataset, model, config, ids, callbacks_factory=callbacks, resume_run=folder,

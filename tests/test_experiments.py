@@ -548,7 +548,7 @@ def test_outer_cv_folds_keep_longitudinal_animals_out_of_selection(experiment, t
 
 
 def test_leave_one_animal_out_evaluates_all_timepoints_once(experiment, tmp_path):
-    """Match the old rat split without leaking a longitudinal scan into training."""
+    """Evaluate each complete animal once without reserving it for validation."""
     from src.experiments.data import make_leave_one_animal_out_splits
     from src.evaluation.k_fold import load_fold_splits
 
@@ -559,14 +559,14 @@ def test_leave_one_animal_out_evaluates_all_timepoints_once(experiment, tmp_path
     assert folds == make_leave_one_animal_out_splits(list(reversed(animals)))
     evaluated_scans = []
     for fold in folds:
-        assert len(fold.val_ids) == 1
+        assert len(fold.test_ids) == 1
         assert len(fold.train_ids) == len(animals) - 1
-        assert not fold.test_ids
+        assert not fold.val_ids
         train_scans = data.subjects.scan_keys(fold.train_ids)
-        val_scans = data.subjects.scan_keys(fold.val_ids)
+        val_scans = data.subjects.scan_keys(fold.test_ids)
         assert not set(train_scans) & set(val_scans)
         evaluated_scans.extend(val_scans)
-        generator = data.make_generator(fold.val_ids, training=False, batch_size=1)
+        generator = data.make_generator(fold.test_ids, training=False, batch_size=1)
         assert len(generator) == len(val_scans)
 
     assert sorted(evaluated_scans) == sorted(data.subjects.scan_keys(animals))
