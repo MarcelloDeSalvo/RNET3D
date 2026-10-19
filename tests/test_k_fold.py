@@ -1,6 +1,7 @@
 ﻿"""Subject grouping and runner integration, using small on-disk NIfTI scans."""
 
 import json
+import weakref
 from pathlib import Path
 
 import nibabel as nib
@@ -129,6 +130,7 @@ def test_small_keras_run_exports_manifest_and_reusable_splits(tmp_path, indexed_
     tf = pytest.importorskip('tensorflow')
     loader, index = indexed_data
     calls = []
+    models = []
 
     def dataset_factory(subject_ids):
         keys = index.scan_keys(subject_ids)
@@ -141,12 +143,15 @@ def test_small_keras_run_exports_manifest_and_reusable_splits(tmp_path, indexed_
         return dataset.with_options(options)
 
     def model_factory():
+        assert all(reference() is None for reference in models)
         model = tf.keras.Sequential([tf.keras.layers.Input((1,)), tf.keras.layers.Dense(1)])
         model.compile(optimizer='sgd', loss='mse')
+        models.append(weakref.ref(model))
         return model
 
     class Evaluator:
         def __init__(self, model, subject_ids, options):
+            self.model = model
             self.ids = subject_ids
             assert Path(options['evaluation_dir']).is_dir()
         def evaluate(self):
@@ -159,6 +164,7 @@ def test_small_keras_run_exports_manifest_and_reusable_splits(tmp_path, indexed_
     result = cv.k_fold_loop(dataset_factory, dataset_factory, model_factory, config, cv_ids,
                             fve_callbacks={'regions': Evaluator}, evaluation=evaluation, subject_index=index)
     assert len(result.histories) == 2
+    assert all(reference() is None for reference in models)
     assert len(calls) == 4
     manifest = pd.read_csv(result.run_dir / 'subjects.csv')
     assert len(manifest) == 9

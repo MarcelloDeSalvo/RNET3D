@@ -776,7 +776,9 @@ def prepare_data(config: ExperimentConfig, *, require_training_loss: bool = True
                     raise ValueError("Explicit available_labels must include background zero")
 
             if scan.get_sham():
-                lesion_voxels = np.any(scan.labels.get_fdata() == 1)
+                lesion_data: np.ndarray = scan.labels.get_fdata(caching="unchanged")
+                lesion_voxels = np.any(lesion_data == 1)
+                del lesion_data
                 if lesion_voxels:
                     raise ValueError(f"{scan.id}: verified lesion absence conflicts with lesion-positive voxels")
                 available.add(1)

@@ -104,6 +104,7 @@ def test_sham_supplies_an_available_empty_lesion_target(experiment, version, exp
     config = replace(experiment, loss=loss, data=replace(experiment.data, datasets=(dataset,)))
     data = prepare_data(config)
     scan = data.loader.get_subject(('D1_T1w', 'SUBJ_0000'))
+    assert not scan.labels.in_memory
     assert 1 not in scan.unavailable_labels
     assert annotation_values(scan) == {0, 1, 2}
     _, targets = data.make_generator(['D1/SUBJ_0000'], training=False)[0]

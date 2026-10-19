@@ -229,7 +229,7 @@ class RandomCroppingPrediction:
     def preprocess_input(self, input_img: ImageInput) -> tuple[Array, Shape3D, Shape3D]:
         """Load NIfTI voxel data or accept a 3D array, then pad to patch size."""
         if isinstance(input_img, nib.spatialimages.SpatialImage):
-            volume: Array = input_img.get_fdata()
+            volume: Array = input_img.get_fdata(caching="unchanged")
         else:
             volume = np.asarray(input_img)
         if volume.ndim != 3 or any(size == 0 for size in volume.shape):
@@ -522,7 +522,7 @@ class ExperimentVolumeEvaluator:
                     label for source, label in output_labels.ground_truth_mapping.items() if source in unavailable
                 }
                 available_classes = sorted(set(identity_mapping) - unavailable_classes)
-                reference_data = reference.get_fdata()
+                reference_data = reference.get_fdata(caching="unchanged")
                 table = segmentation_metrics_table(
                     reference=reference_data, prediction=processed.regions, spacing_mm=spacing,
                     regions=regions, subject=subject_id, scan=scan.id,
@@ -538,7 +538,7 @@ class ExperimentVolumeEvaluator:
                     reference_brain = references[1]
                     if reference_brain.shape != image.shape or not np.allclose(reference_brain.affine, image.affine):
                         raise ValueError(f"{scan.id}: brain reference must share the inference grid")
-                    brain_reference = reference_brain.get_fdata() != 0
+                    brain_reference = reference_brain.get_fdata(caching="unchanged") != 0
                     brain_available = [1]
                 brain_table = segmentation_metrics_table(
                     reference=brain_reference, prediction=processed.brain_mask, spacing_mm=spacing,
@@ -570,7 +570,7 @@ class ExperimentVolumeEvaluator:
                         )
                         # Store integer data, rather than asking NIfTI to scale
                         # floating-point labels into the int16 storage range.
-                        restored_data = restored.get_fdata().astype(np.int16)
+                        restored_data = restored.get_fdata(caching="unchanged").astype(np.int16)
                         saved_mask = nib.Nifti1Image(restored_data, restored.affine, restored.header)
                         saved_mask.set_data_dtype(np.int16)
                         saved_mask.header.set_slope_inter(1, 0)
@@ -1416,7 +1416,7 @@ class FullVolumeEvaluation:
             prediction = outputs.brain_mask
         if callback is not None:
             prediction = callback(prediction)
-        reference: Array = processed_gt.get_fdata()
+        reference: Array = processed_gt.get_fdata(caching="unchanged")
         if reference.shape != prediction.shape:
             raise ValueError('Prediction and preprocessed ground truth shapes differ')
 

@@ -165,6 +165,9 @@ def test_notebook_trains_four_tiny_models_and_exports_comparable_results(pilot_e
     namespace, shown = notebook_context(pilot_experiment, folder, run=True, monkeypatch=monkeypatch)
     study = namespace["study"]
     assert len(study.runs) == 4
+    for key in namespace["prepared"].loader.get_subjects_list():
+        scan = namespace["prepared"].loader.get_subject(key)
+        assert all(not image.in_memory for image in scan.get_images())
     assert set(study.metrics.Variant) == {"order_0", "order_1", "order_2", "order_3"}
     assert set(study.patch_metrics.DatasetRole) == {"validation", "test"}
     assert len(namespace["validation_ranking"]) == 4

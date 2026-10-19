@@ -803,6 +803,8 @@ def train_fold(
         raise ValueError("Best weights alone cannot resume training; epoch recovery state is missing")
 
     tf.keras.backend.clear_session()
+    # Collect model/callback cycles before allocating the next fit's graph.
+    gc.collect()
     tf.keras.utils.set_random_seed(config.seed + split.index)
 
     train_data = train_factory(split.train_ids)
@@ -922,6 +924,7 @@ def train_fold(
                 classifier_table.to_json(classifier_path, orient="table", indent=2)
                 classifier_table.to_csv(evaluator_dir / "classifier_predictions.csv", index=False)
                 saved_evaluations[-1]["classifier_predictions"] = str(classifier_path.relative_to(folder))
+            del evaluator
 
     timing = FoldTiming(
         fold=split.index,
@@ -936,7 +939,8 @@ def train_fold(
     write_json(completion_path, {"history": history, "timing": asdict(timing),
                                 "evaluations": saved_evaluations, "patch_metrics": patch_path})
 
-    del model, train_data, val_data
+    del callbacks, state, model, train_data, val_data
+    tf.keras.backend.clear_session()
     gc.collect()
 
 

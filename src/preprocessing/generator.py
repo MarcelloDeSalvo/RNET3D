@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from ..utils.loader import Rodent, RodentDatasets, SubjectKey
 
 
-BatchArray: TypeAlias = NDArray[np.float64]
+BatchArray: TypeAlias = NDArray[np.float32]
 Batch: TypeAlias = tuple[BatchArray, list[BatchArray]]
 
 
@@ -148,9 +148,9 @@ class MultiTaskGenerator(tf.keras.utils.Sequence):
             image, processed_masks = preprocessor.preprocess(image, masks)
             roi_mask, brain_mask = processed_masks
 
-        image_data: BatchArray = image.get_fdata()
-        roi_data: BatchArray = roi_mask.get_fdata()
-        brain_data: BatchArray = brain_mask.get_fdata()
+        image_data: BatchArray = image.get_fdata(dtype=np.float32, caching="unchanged")
+        roi_data: NDArray = roi_mask.get_fdata(caching="unchanged")
+        brain_data: BatchArray = brain_mask.get_fdata(dtype=np.float32, caching="unchanged")
 
         for data in (image_data, roi_data, brain_data):
             if data.shape != self.dim:
@@ -181,15 +181,15 @@ class MultiTaskGenerator(tf.keras.utils.Sequence):
         self, batch_ids: Sequence[SubjectKey],
         preprocessors: Sequence[Preprocessor] | None = None,
     ) -> Batch:
-        """Load each subject once and fill arrays with the historical float64 dtype."""
+        """Fill float32 batches, matching Keras inputs without double-sized buffers."""
         sample_count: int = len(batch_ids)
         image_shape: tuple[int, ...] = (sample_count, *self.dim, self.n_input_channels)
         region_shape: tuple[int, ...] = (sample_count, *self.dim, self.n_classes)
         mask_shape: tuple[int, ...] = (sample_count, *self.dim, 1)
 
-        images: BatchArray = np.zeros(image_shape, dtype=np.float64)
-        regions: BatchArray = np.zeros(region_shape, dtype=np.float64)
-        brain_masks: BatchArray = np.zeros(mask_shape, dtype=np.float64)
+        images: BatchArray = np.zeros(image_shape, dtype=np.float32)
+        regions: BatchArray = np.zeros(region_shape, dtype=np.float32)
+        brain_masks: BatchArray = np.zeros(mask_shape, dtype=np.float32)
         subjects: list[Rodent] = []
 
         for position, subject_key in enumerate(batch_ids):
@@ -244,7 +244,7 @@ class MultiTaskGenerator(tf.keras.utils.Sequence):
 
         targets: list[BatchArray] = [regions, brain_masks]
         if self.with_classifier:
-            conditions: BatchArray = np.zeros((len(subjects), 1), dtype=np.float64)
+            conditions: BatchArray = np.zeros((len(subjects), 1), dtype=np.float32)
             for position, subject in enumerate(subjects):
                 if not subject.get_sham():
                     conditions[position, 0] = 1
@@ -268,7 +268,7 @@ class DomainAdaptationGenerator(MultiTaskGenerator):
     ) -> list[BatchArray]:
         """Preserve existing ignored-channel and SHAM/TBI target conventions."""
         condition_shape: tuple[int, int] = (len(subjects), 1)
-        conditions: BatchArray = np.zeros(condition_shape, dtype=np.float64)
+        conditions: BatchArray = np.zeros(condition_shape, dtype=np.float32)
 
         for position, subject in enumerate(subjects):
             unavailable_labels: Sequence[int] | None = subject.get_unavailable_labels()

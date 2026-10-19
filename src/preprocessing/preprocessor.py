@@ -112,7 +112,7 @@ def _padding(shape: Sequence[int], target: Sequence[int], random: bool = False) 
 
 def _pad(image: NiftiImage, widths: Padding, mode: str) -> NiftiImage:
     """Pad data and shift its affine by the amount added before each axis."""
-    source_data: NDArray = image.get_fdata()
+    source_data: NDArray = image.get_fdata(caching="unchanged")
     data = np.pad(source_data, widths, mode=mode)
 
     offset: list[int] = [-before for before, _ in widths]
@@ -126,7 +126,7 @@ def _resample(image: NiftiImage, reference: NiftiImage, is_mask: bool, order: in
     _check_image(image)
     _check_image(reference)
 
-    source_data: NDArray = image.get_fdata()
+    source_data: NDArray = image.get_fdata(caching="unchanged")
 
     if _same_grid(image, reference):
         return _new_image(source_data, reference)
@@ -136,7 +136,7 @@ def _resample(image: NiftiImage, reference: NiftiImage, is_mask: bool, order: in
     interpolation_order: int = 0 if is_mask else order
     result = resample_from_to(floating_image, target_grid, order=interpolation_order)
 
-    result_data: NDArray = result.get_fdata()
+    result_data: NDArray = result.get_fdata(caching="unchanged")
 
     return _new_image(result_data, reference)
 
@@ -151,12 +151,12 @@ def _resize_grid(image: NiftiImage, shape: Coordinates, spacing: Sequence[float]
     affine[:3, 3] = center - affine[:3, :3] @ ((np.asarray(shape) - 1) / 2)
 
     # Edge extension represents the outer half-voxel without inventing a zero border.
-    source_data: NDArray = image.get_fdata()
+    source_data: NDArray = image.get_fdata(caching="unchanged")
     floating_image = _new_image(source_data, image)
     target_grid = (shape, affine)
     result = resample_from_to(floating_image, target_grid, order=order, mode="nearest")
 
-    result_data: NDArray = result.get_fdata()
+    result_data: NDArray = result.get_fdata(caching="unchanged")
 
     return _new_image(result_data, image, affine)
 
@@ -330,7 +330,11 @@ class Preprocessor:
         self.global_probability: float = 0
 
     def preprocess(self, imgs: ImageInput = None, masks: ImageInput = None, path: str | None = None) -> PreprocessResult:
-        """Run steps, preserving single-image/list and paired-input return formats."""
+        """Run steps without caching voxel arrays on caller-owned NIfTI proxies.
+
+        The loader retains source images for the experiment's lifetime. Reads
+        use caching="unchanged" so each batch releases its full-volume data.
+        """
         if not _images(imgs) + _images(masks):
             raise ValueError("Provide at least one image or mask")
 
@@ -380,7 +384,7 @@ class Preprocessor:
         restored = MapLabels(mapping=mapping).execute(restored, is_mask=True)
         # CorrectX10 changes units, not voxel indices: restore the original header
         # only after resampling in the corrected coordinate system.
-        restored_data: NDArray = restored.get_fdata()
+        restored_data: NDArray = restored.get_fdata(caching="unchanged")
         restored = _new_image(restored_data, original_image)
 
         if save_path is not None:
@@ -452,7 +456,7 @@ class Resample(PreprocessingStep):
         if self.orthogonal and has_shear:
             shape, affine = _orthogonal_grid(image, self.target_resolution)
             target_grid = (shape, affine)
-            source_data: NDArray = image.get_fdata()
+            source_data: NDArray = image.get_fdata(caching="unchanged")
             floating_image = _new_image(source_data, image)
             interpolation_order: int = self.interpolation
             if is_mask:
@@ -462,11 +466,11 @@ class Resample(PreprocessingStep):
                 floating_image, target_grid, order=interpolation_order,
                 mode="constant", cval=0,
             )
-            result_data: NDArray = result.get_fdata()
+            result_data: NDArray = result.get_fdata(caching="unchanged")
             return _new_image(result_data, image, affine)
 
         if np.allclose(spacing, self.target_resolution, rtol=0, atol=1e-8):
-            source_data: NDArray = image.get_fdata()
+            source_data: NDArray = image.get_fdata(caching="unchanged")
 
             return _new_image(source_data, image)
 
@@ -518,7 +522,7 @@ class CorrectX10(PreprocessingStep):
         center = (np.asarray(image.shape) - 1) / 2
         affine[:3, 3] = nib.affines.apply_affine(image.affine, center) - affine[:3, :3] @ center
 
-        source_data: NDArray = image.get_fdata()
+        source_data: NDArray = image.get_fdata(caching="unchanged")
 
         return _new_image(source_data, image, affine)
 
@@ -558,7 +562,7 @@ class MapLabels(PreprocessingStep):
         if not is_mask:
             return image
 
-        data = image.get_fdata()
+        data = image.get_fdata(caching="unchanged")
 
         if not np.all(np.isfinite(data)) or np.any(data != np.rint(data)):
             raise ValueError("Masks must contain finite integer label values")
@@ -592,7 +596,7 @@ class Reorient(PreprocessingStep):
         transform = ornt_transform(source_orientation, reference_orientation)
 
         result = image.as_reoriented(transform)
-        result_data: NDArray = result.get_fdata()
+        result_data: NDArray = result.get_fdata(caching="unchanged")
 
         return _new_image(result_data, result)
 
@@ -641,7 +645,7 @@ class N4BiasFieldCorrection(PreprocessingStep):
             return image
 
         origin, spacing, direction = _lps_geometry(image)
-        source_data: NDArray = image.get_fdata()
+        source_data: NDArray = image.get_fdata(caching="unchanged")
         ants_image = ants.from_numpy(source_data, origin=origin, spacing=spacing, direction=direction)
 
         corrected = self._correct_bias_field(ants_image)
@@ -722,7 +726,7 @@ class Normalize(PreprocessingStep):
         if is_mask:
             return image
 
-        data = image.get_fdata()
+        data = image.get_fdata(caching="unchanged")
 
         if not np.all(np.isfinite(data)):
             raise ValueError("Cannot normalize non-finite intensities")
@@ -803,7 +807,7 @@ class PadderCutter(PreprocessingStep):
         starts = [(size - wanted) // 2 for size, wanted in zip(padded.shape, self.img_size)]
         slices = tuple(slice(start, start + size) for start, size in zip(starts, self.img_size))
 
-        cropped_data: NDArray = padded.get_fdata()[slices]
+        cropped_data: NDArray = padded.get_fdata(caching="unchanged")[slices]
         affine: NDArray = _shift_affine(padded.affine, starts)
 
         return _new_image(cropped_data, padded, affine)
@@ -860,7 +864,7 @@ class SaveNifti(PreprocessingStep):
         if self.reference is not None:
             result = _resample(image, self.reference, is_mask)
         else:
-            source_data: NDArray = image.get_fdata()
+            source_data: NDArray = image.get_fdata(caching="unchanged")
             result = _new_image(source_data, image)
 
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -935,7 +939,7 @@ class Noise(PreprocessingStep):
 
         std = np.random.uniform(*self.noise_range)
 
-        source_data: NDArray = image.get_fdata()
+        source_data: NDArray = image.get_fdata(caching="unchanged")
         if self.std_units == "image_std":
             intensity_std: float = float(np.std(source_data))
             if not np.isfinite(intensity_std):
@@ -978,7 +982,7 @@ class GaussianBlur(PreprocessingStep):
             spacing: NDArray = nib.affines.voxel_sizes(image.affine)
             sigma = sigma / spacing
 
-        source_data: NDArray = image.get_fdata()
+        source_data: NDArray = image.get_fdata(caching="unchanged")
         blurred_data: NDArray = gaussian_filter(source_data, sigma)
 
         return _new_image(blurred_data, image)
@@ -1037,7 +1041,7 @@ class RandomAffine(PreprocessingStep):
             raise ValueError("Scale factor must be positive and finite")
 
         origin, spacing, direction = _lps_geometry(image)
-        source_data: NDArray = image.get_fdata().transpose(2, 1, 0)
+        source_data: NDArray = image.get_fdata(caching="unchanged").transpose(2, 1, 0)
         itk_image = sitk.GetImageFromArray(source_data)
         itk_image.SetOrigin(origin)
         itk_image.SetSpacing(spacing)
@@ -1132,7 +1136,7 @@ class Flip(PreprocessingStep):
         if axis not in (0, 1, 2):
             raise ValueError("Flip axis must be 0, 1, or 2")
 
-        source_data: NDArray = image.get_fdata()
+        source_data: NDArray = image.get_fdata(caching="unchanged")
         flipped_data: NDArray = np.flip(source_data, axis=axis)
 
         return _new_image(flipped_data, image)
@@ -1233,7 +1237,7 @@ class RandomCropping(PreprocessingStep):
             raise ValueError("Crop coordinates are outside the image")
 
         slices = tuple(slice(start, start + size) for start, size in zip(starts, self.dim))
-        cropped_data: NDArray = image.get_fdata()[slices]
+        cropped_data: NDArray = image.get_fdata(caching="unchanged")[slices]
         affine: NDArray = _shift_affine(image.affine, starts)
 
         return _new_image(cropped_data, image, affine)

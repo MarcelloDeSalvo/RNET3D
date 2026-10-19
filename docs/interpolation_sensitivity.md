@@ -58,6 +58,22 @@ run setup/configuration and the result cells with explicit `RESULTS_DIR`;
 training is unnecessary. Source data, original notebooks and earlier runs are
 not modified.
 
+If a run reports a NumPy allocation failure from resampling, this is host RAM
+exhaustion, even when TensorFlow wraps it in `ResourceExhaustedError`. Preprocessing
+and evaluation now read NIfTI data without filling the source images' persistent
+float64 caches. A representative D1 scan previously retained about 60 MiB across
+its MRI and two masks; keeping every scan cached consumed several GiB. Resampling
+still uses the same float64 calculations and interpolation orders. Generator
+batches use float32, matching the conversion Keras already performed before
+fitting, and completed fits release their model/callback references.
+
+After updating from the caching implementation, restart the notebook kernel to
+release arrays and TensorFlow state retained by the failed execution. Keep the
+same `STUDY_DIR`, enable `RESUME_STUDY=True`, and rerun the setup and training
+cells with the same experiment settings. Recovery restarts the interrupted
+epoch from the last committed checkpoint; completed variants are reused. If
+no epoch has finished yet, that variant starts again from its initialization.
+
 Validation lesion Dice supplies an exploratory ranking. Held-out tables contain
 native patch measurements separately from postprocessed full-volume ROI/brain
 Dice, IoU, HD95, ASSD, sensitivity, precision and volume measurements. Paired

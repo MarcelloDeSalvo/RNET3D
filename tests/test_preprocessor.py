@@ -23,6 +23,41 @@ def world(img, voxel):
     return nib.affines.apply_affine(img.affine, voxel)
 
 
+@pytest.mark.parametrize("step", [
+    p.CorrectX10(), p.Reorient(image()), p.Resample((0.1, 0.15, 0.2)),
+    p.Scale(2), p.Padder((10, 10, 10)), p.PadderCutter((5, 10, 7)),
+    p.RandomCropping((4, 4, 4)), p.Flip([0]), p.Normalize(),
+    p.Noise((0.01, 0.01), probability=1), p.GaussianBlur((0.5, 0.5), probability=1),
+    p.MapLabels(mapping={0: 0, 13: 1}),
+    p.RandomAffine(rotation_range=(0, 0), probability=1),
+])
+def test_steps_do_not_retain_source_proxy_arrays(tmp_path, step):
+    """Full-volume steps must not accumulate float64 caches across loader scans."""
+    mri_path = tmp_path / "mri.nii.gz"
+    mask_path = tmp_path / "labels.nii.gz"
+    nib.save(image(), mri_path)
+    nib.save(image(np.full((8, 8, 8), 13, dtype=np.int16)), mask_path)
+    source, mask = nib.load(mri_path), nib.load(mask_path)
+
+    for _ in range(2):
+        result, result_mask = step.apply(source, mask)
+        assert result.shape == result_mask.shape
+        assert not source.in_memory
+        assert not mask.in_memory
+
+
+def test_preprocessing_keeps_a_callers_existing_cache(tmp_path):
+    """Non-caching reads do not clear or replace intentionally cached arrays."""
+    path = tmp_path / "mri.nii.gz"
+    nib.save(image(), path)
+    source = nib.load(path)
+    cached = source.get_fdata()
+    expected = cached.copy()
+    p.Preprocessor([p.CorrectX10(), p.Normalize()]).preprocess(source)
+    assert source.get_fdata() is cached
+    np.testing.assert_array_equal(cached, expected)
+
+
 @pytest.mark.parametrize("mode", ["minmax", "zscore"])
 def test_constant_normalization_and_mask_passthrough(mode):
     source = image(np.ones((4, 4, 4)))

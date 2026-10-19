@@ -54,8 +54,10 @@ def test_batches_preserve_channels_dtype_and_singleton_axis(dataset, generator_t
     assert images.shape == (2, 2, 3, 1, 3)
     assert targets[0].shape == (2, 2, 3, 1, 2)
     assert targets[1].shape == (2, 2, 3, 1, 1)
-    assert images.dtype == np.float64
-    assert all(target.dtype == np.float64 for target in targets)
+    assert images.dtype == np.float32
+    assert all(target.dtype == np.float32 for target in targets)
+    arrays = [images, *targets]
+    assert sum(array.nbytes for array in arrays) == 4 * sum(array.size for array in arrays)
     assert np.all(images[0] == 1) and np.all(images[1] == 2)
     assert np.all(targets[0][0, ..., 0] == 1)
     assert np.all(targets[0][1, ..., 1] == 1)
@@ -65,6 +67,25 @@ def test_batches_preserve_channels_dtype_and_singleton_axis(dataset, generator_t
         np.testing.assert_array_equal(targets[2], [[1], [1]])
     else:
         assert len(targets) == 2
+
+
+@pytest.mark.parametrize("generator_type", [MultiTaskGenerator, DomainAdaptationGenerator])
+def test_batches_do_not_cache_source_voxel_arrays(dataset, generator_type):
+    """Repeated passes leave loader proxies empty, including without preprocessing."""
+    from src.preprocessing.preprocessor import CorrectX10, Preprocessor
+
+    loader, config = dataset
+    ids = loader.get_subjects_list()
+    pipelines = [None, Preprocessor([CorrectX10()])]
+    for pipeline in pipelines:
+        generator = generator_type(
+            ids, loader, config, shuffle=False, drop_last=False, preprocessor=pipeline,
+        )
+        for _ in range(2):
+            for index in range(len(generator)):
+                generator[index]
+                for key in ids:
+                    assert all(not image.in_memory for image in loader.get_subject(key).get_images())
 
 
 def test_domain_targets_keep_raw_label_order_and_subject_specific_flags(dataset):

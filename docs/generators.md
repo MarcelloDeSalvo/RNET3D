@@ -11,8 +11,9 @@ lines separate initialization, validation, processing and returns.
 
 - Outputs remain `(images, [regions, brain_mask])` for multitask batches and
   `(images, [regions, brain_mask, condition])` for domain adaptation.
-- Output arrays remain float64. One image is repeated across input channels;
-  configuring several channels does not load several MRI modalities.
+- Output arrays use float32, matching Keras's fitting inputs and halving batch
+  storage relative to the historical float64 arrays. One image is repeated across
+  input channels; configuring several channels does not load several MRI modalities.
 - Only complete batches are returned. The final remainder is dropped, and a
   collection smaller than `batch_size` has zero batches.
 - Shuffling uses NumPy's global random state. `__getcase__` returns an ID in
@@ -51,8 +52,9 @@ lines separate initialization, validation, processing and returns.
   encoding alone does not verify that training losses ignore those channels.
 - Shape checks do not establish physical alignment. Spatial preprocessing
   checks image/mask affines; callers bypassing it must supply aligned volumes.
-- Float64 output allocation is retained for compatibility. Switching to float32
-  could reduce batch memory and should be considered separately.
+- NIfTI reads leave source proxy caches unfilled. This also applies when
+  preprocessing is disabled, so repeated epochs do not retain every scan's
+  image and two masks as float64 arrays in the loader.
 
 ## Validation
 
@@ -61,4 +63,4 @@ Run `python -m pytest tests/test_generator.py tests/test_loader.py -q` in the
 singleton-axis encoding, repeated channels, ignored channels, SHAM/TBI flags,
 batch bounds, invalid labels, missing masks and shuffle/list ownership.
 
-No model training, loss changes or notebook edits were made for this refactor.
+Model architecture, loss computations and notebook settings are unchanged.
