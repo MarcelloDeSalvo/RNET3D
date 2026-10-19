@@ -151,12 +151,22 @@ reverse one raises an error. No training-loss policy was changed.
 **Normalization:** constant intensity images become zeros in either normalization
 mode. Unknown modes and nonfinite intensities raise errors. Masks pass through.
 
-**Spacing correction:** `CorrectX10` now corrects only qualifying axes, with
-an absolute ratio tolerance of `0.5` around ten (previously `5`). It remains a
-dataset-specific heuristic: a legitimate spacing near ten times the reference
-cannot be distinguished from a units error using the affine alone. Omit this
-step when physical spacing has already been verified. It preserves the grid
-center and does not change voxel data.
+**Spacing correction:** `CorrectX10` uses an absolute ratio tolerance of `0.5`
+around ten. When at least two axes match this factor and every axis is at least
+`10 - tolerance` times the target spacing, it divides the complete grid's spacing
+by ten. Thus an inflated anisotropic T2w scan with `(1, 1, 3)` mm becomes
+`(0.1, 0.1, 0.3)` mm, preserving its three-to-one slice anisotropy. Otherwise
+only individually qualifying axes are corrected, retaining mixed-axis handling.
+Already correct `(0.1, 0.1, 0.3)` mm scans pass through. The grid center, shear,
+voxel values and MRI/mask alignment are preserved; this step does not resample.
+`corrected_affine()` exposes the same header-only calculation to draft generation.
+
+This remains a dataset-specific heuristic: a legitimate spacing near ten times
+the reference cannot be distinguished from a units error using the affine
+alone. Omit this step when physical spacing has already been verified.
+Saved evaluation-patch contracts record the correction version. Start a new
+run/study after changing this policy rather than mixing old crop coordinates
+and checkpoints with the corrected geometry. Original NIfTI files are unchanged.
 
 **Configuration:** probabilities, dimensions, ranges, axes, and N4 settings are
 validated. N4 defaults are independent between instances. Configuration export

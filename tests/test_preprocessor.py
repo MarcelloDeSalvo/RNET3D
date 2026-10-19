@@ -246,6 +246,53 @@ def test_spacing_correction_is_per_axis_and_round_trips():
     np.testing.assert_array_equal(p.CorrectX10().execute(genuine_anisotropic).affine, genuine_anisotropic.affine)
 
 
+@pytest.mark.parametrize("spacing,expected", [
+    ((1.0, 1.0, 3.0), (0.1, 0.1, 0.3)),
+    ((3.0, 1.0, 1.0), (0.3, 0.1, 0.1)),
+    ((0.98, 1.02, 3.0), (0.098, 0.102, 0.3)),
+    ((0.1, 0.1, 0.3), (0.1, 0.1, 0.3)),
+    ((0.1, 1.0, 1.0), (0.1, 0.1, 0.1)),
+])
+def test_x10_correction_preserves_slice_anisotropy_and_aligned_masks(spacing, expected):
+    """Uniform inflated T2w units must not leave a three-mm slice spacing."""
+    affine = np.diag([*spacing, 1.0])
+    affine[:3, 3] = (8, -5, 2)
+    source = image(affine=affine)
+    mask = image(np.full(source.shape, 13, dtype=np.int16), affine=affine)
+    pipeline = p.Preprocessor([p.CorrectX10()])
+    corrected, corrected_mask = pipeline.preprocess(source, mask)
+
+    np.testing.assert_allclose(nib.affines.voxel_sizes(corrected.affine), expected)
+    np.testing.assert_array_equal(corrected.affine, corrected_mask.affine)
+    np.testing.assert_array_equal(corrected.get_fdata(), source.get_fdata())
+    np.testing.assert_array_equal(corrected_mask.get_fdata(), mask.get_fdata())
+    center = (np.asarray(source.shape) - 1) / 2
+    np.testing.assert_allclose(world(corrected, center), world(source, center))
+
+    restored = pipeline.deprocess(corrected_mask, mask, {13: 13})
+    np.testing.assert_array_equal(restored.affine, mask.affine)
+    np.testing.assert_array_equal(restored.get_fdata(), mask.get_fdata())
+
+
+def test_anisotropic_x10_resampling_has_the_correct_slice_count(tmp_path):
+    """The problematic 1,1,3 spacing should triple slices, not multiply by 30."""
+    affine = np.diag([1.0, 1.0, 3.0, 1.0])
+    source = image(np.ones((8, 8, 4)), affine=affine)
+    path = tmp_path / "scaled.nii.gz"
+    nib.save(source, path)
+    proxy = nib.load(path)
+    correction = p.CorrectX10()
+    corrected_affine = correction.corrected_affine(proxy)
+    assert not proxy.in_memory
+    np.testing.assert_allclose(nib.affines.voxel_sizes(corrected_affine), (0.1, 0.1, 0.3))
+
+    pipeline = p.Preprocessor([correction, p.Resample((0.1, 0.1, 0.1))])
+    output, output_mask = pipeline.preprocess(proxy, proxy)
+    assert output.shape == output_mask.shape == (8, 8, 12)
+    np.testing.assert_array_equal(output.affine, output_mask.affine)
+    assert not proxy.in_memory
+
+
 def test_unknown_labels_and_irreversible_mapping():
     source = image(np.full((2, 2, 2), 13))
     with pytest.raises(ValueError, match="Unmapped mask labels"):

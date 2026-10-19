@@ -491,11 +491,15 @@ class Resample(PreprocessingStep):
 
 
 class CorrectX10(PreprocessingStep):
-    """Correct only axes whose spacing is close to ten times a known reference.
+    """Correct inflated units while retaining genuine slice anisotropy.
 
-    This is a dataset-specific units heuristic, not a general resampling step.
-    Omit it for data whose physical spacing has already been verified.
+    Two axes near ten times the reference, with all axes at least that large,
+    indicate a uniform units error: divide all spacings by ten. Otherwise only
+    individually qualifying axes are corrected. Omit this dataset-specific
+    heuristic when physical spacing has already been verified.
     """
+
+    geometry_version: int = 2
 
     def __init__(self, reference_resolution: Sequence[float] = (0.1, 0.1, 0.1), threshold: float = 0.5, verbose: bool = False) -> None:
         """Validate and store the settings for this preprocessing step."""
@@ -508,20 +512,31 @@ class CorrectX10(PreprocessingStep):
 
         self.threshold: float = threshold
 
-    def execute(self, image: NiftiImage, is_mask: bool = False, **parameters: Any) -> NiftiImage:
-        """Correct qualifying axes, preserving data and the physical grid center."""
+    def corrected_affine(self, image: NiftiImage) -> NDArray[np.float64]:
+        """Compute the corrected grid from headers without reading voxel arrays."""
         _check_image(image)
 
-        spacing = nib.affines.voxel_sizes(image.affine)
-        ratio_error: NDArray = spacing / self.reference_resolution - 10
+        spacing: NDArray = nib.affines.voxel_sizes(image.affine)
+        ratios: NDArray = spacing / self.reference_resolution
+        ratio_error: NDArray = ratios - 10
         needs_correction: NDArray = np.abs(ratio_error) < self.threshold
-        factors = np.where(needs_correction, 10, 1)
 
-        affine = image.affine.copy()
+        matching_axes: int = int(np.count_nonzero(needs_correction))
+        all_axes_inflated: bool = bool(np.all(ratios >= 10 - self.threshold))
+        if matching_axes >= 2 and all_axes_inflated:
+            needs_correction = np.ones(3, dtype=bool)
+
+        factors: NDArray = np.where(needs_correction, 10, 1)
+        affine: NDArray[np.float64] = image.affine.copy()
         affine[:3, :3] /= factors
-        center = (np.asarray(image.shape) - 1) / 2
+        center: NDArray = (np.asarray(image.shape) - 1) / 2
         affine[:3, 3] = nib.affines.apply_affine(image.affine, center) - affine[:3, :3] @ center
 
+        return affine
+
+    def execute(self, image: NiftiImage, is_mask: bool = False, **parameters: Any) -> NiftiImage:
+        """Correct image/mask geometry without resampling or changing voxel data."""
+        affine: NDArray = self.corrected_affine(image)
         source_data: NDArray = image.get_fdata(caching="unchanged")
 
         return _new_image(source_data, image, affine)

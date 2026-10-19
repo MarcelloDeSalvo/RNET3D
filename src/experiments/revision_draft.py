@@ -31,17 +31,13 @@ def balanced_sample(data: PreparedData, count: int, seed: int) -> list[str]:
 
 def _corrected_affine(image: nib.Nifti1Image, resolution: Sequence[float], correct: bool) -> np.ndarray:
     """Use the production CorrectX10 geometry heuristic without changing voxels."""
-    affine: np.ndarray = image.affine.copy()
-    if correct:
-        spacing = nib.affines.voxel_sizes(affine)
-        reference = np.asarray(resolution)
-        qualifying = np.abs(spacing / reference - 10) < 0.5
-        factors = np.ones(3)
-        factors[qualifying] = 10
-        center = (np.asarray(image.shape) - 1) / 2
-        affine[:3, :3] /= factors
-        affine[:3, 3] = nib.affines.apply_affine(image.affine, center) - affine[:3, :3] @ center
-    return affine
+    from ..preprocessing.preprocessor import CorrectX10
+
+    if not correct:
+        return image.affine.copy()
+
+    correction = CorrectX10(reference_resolution=resolution)
+    return correction.corrected_affine(image)
 
 
 def write_draft_dataset(

@@ -74,6 +74,15 @@ cells with the same experiment settings. Recovery restarts the interrupted
 epoch from the last committed checkpoint; completed variants are reused. If
 no epoch has finished yet, that variant starts again from its initialization.
 
+The anisotropic x10 geometry correction is a separate fix. Eight D1 T2w inputs
+(`SUBJ_0089`, `SUBJ_0090`, `SUBJ_0091`, `SUBJ_0108` through `SUBJ_0112`) store
+`(1, 1, 3)` mm spacing. The older per-axis rule incorrectly left the third
+spacing at 3 mm, producing 1,110 slices. These scans now use `(0.1, 0.1, 0.3)` mm,
+giving 111 slices at the 0.1-mm target spacing. If a study used the older rule,
+select a fresh `STUDY_DIR` and set `RESUME_STUDY=False`: its saved patches and
+training geometry are obsolete. Keep its existing files for provenance. The
+loader rejects saved patch contracts with the old correction version.
+
 Validation lesion Dice supplies an exploratory ranking. Held-out tables contain
 native patch measurements separately from postprocessed full-volume ROI/brain
 Dice, IoU, HD95, ASSD, sensitivity, precision and volume measurements. Paired

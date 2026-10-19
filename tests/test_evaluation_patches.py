@@ -1,6 +1,7 @@
 """Check saved multi-patch coverage, pairing and independence from fitting seeds."""
 
 import json
+import hashlib
 from dataclasses import replace
 
 import nibabel as nib
@@ -86,6 +87,24 @@ def test_manifest_rejects_changes_and_missing_resume_samples(patch_data, tmp_pat
     payload['samples'][0]['center'][0] += 1
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match='modified'):
+        patch_data.save_evaluation_patches(path, resume=True)
+
+
+@pytest.mark.parametrize("version", [None, 1])
+def test_saved_crops_reject_the_old_unit_correction_policy(patch_data, tmp_path, version):
+    """Old oversized crop grids must fail before any model is fitted."""
+    path = tmp_path / "evaluation_patches.json"
+    patch_data.save_evaluation_patches(path)
+    payload = json.loads(path.read_text())
+    payload.pop("sha256")
+    payload["contract"].pop("unit_correction_version")
+    if version is not None:
+        payload["contract"]["unit_correction_version"] = version
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+    payload["sha256"] = digest
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="x10 unit-correction policy.*fresh run/study"):
         patch_data.save_evaluation_patches(path, resume=True)
 
 

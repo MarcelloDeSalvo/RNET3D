@@ -12,7 +12,7 @@ import nibabel as nib
 import numpy as np
 from scipy.stats import truncnorm
 
-from ..preprocessing.preprocessor import Flip, Preprocessor, RandomCropping
+from ..preprocessing.preprocessor import CorrectX10, Flip, Preprocessor, RandomCropping
 from ..utils.loader import SubjectKey
 
 if TYPE_CHECKING:
@@ -91,6 +91,8 @@ class EvaluationPatches:
             "correct_units": preprocessing.correct_units, "reference_sha256": reference_digest,
             "data": data.contract(),
         }
+        if preprocessing.correct_units:
+            contract["unit_correction_version"] = CorrectX10.geometry_version
         return json.loads(json.dumps(contract))
 
     @classmethod
@@ -165,7 +167,13 @@ class EvaluationPatches:
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
         if saved_digest != digest:
             raise ValueError("Saved evaluation patches were modified")
-        if payload["contract"] != cls.expected_contract(data):
+        expected = cls.expected_contract(data)
+        if payload["contract"].get("unit_correction_version") != expected.get("unit_correction_version"):
+            raise ValueError(
+                "Saved evaluation patches use a different x10 unit-correction policy. "
+                "Start a fresh run/study folder so training and evaluation use consistent geometry."
+            )
+        if payload["contract"] != expected:
             raise ValueError("Saved evaluation patch configuration or inputs differ")
 
         samples: list[EvaluationPatch] = []

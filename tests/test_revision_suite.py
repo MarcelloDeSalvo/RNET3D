@@ -18,6 +18,20 @@ from src.experiments import revision_suite as suite
 from src.experiments.revision_summary import export_suite_summary
 
 
+def test_draft_affine_uses_the_shared_anisotropic_unit_correction():
+    """Draft scans and full runs must use the same corrected physical geometry."""
+    from src.experiments.revision_draft import _corrected_affine
+    from src.preprocessing.preprocessor import CorrectX10
+
+    image = nib.Nifti1Image(np.zeros((8, 8, 4)), np.diag([1.0, 1.0, 3.0, 1.0]))
+    spacing = (0.1, 0.1, 0.1)
+    correction = CorrectX10(reference_resolution=spacing)
+    expected = correction.corrected_affine(image)
+    np.testing.assert_array_equal(_corrected_affine(image, spacing, True), expected)
+    np.testing.assert_allclose(nib.affines.voxel_sizes(expected), (0.1, 0.1, 0.3))
+    np.testing.assert_array_equal(_corrected_affine(image, spacing, False), image.affine)
+
+
 @pytest.fixture
 def revision_settings(tmp_path):
     """Small normalized cohorts with complete/partial anatomy and repeated rat scans."""
