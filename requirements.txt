@@ -39,6 +39,7 @@ jupyter_client==8.6.0
 jupyter_core==5.5.0
 jupyterlab-widgets==3.0.9
 k3d==2.16.0
+kaleido==0.2.1
 keras==2.10.0
 Keras-Preprocessing==1.1.2
 kiwisolver==1.4.5
