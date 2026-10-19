@@ -155,7 +155,10 @@ def test_missing_evaluation_still_allows_history_and_duplicate_measures_fail(tmp
 
 
 @pytest.mark.parametrize("with_validation_metric", [True, False])
-def test_plotting_notebook_runs_and_exports_interactive_figures_and_animal_data(tmp_path, monkeypatch, with_validation_metric):
+@pytest.mark.parametrize("validation_key", [None, "val_loss"])
+def test_plotting_notebook_runs_and_exports_interactive_figures_and_animal_data(
+    tmp_path, monkeypatch, with_validation_metric, validation_key,
+):
     """Exercise native Plotly displays and real offline exports without a model."""
     shown = []
     monkeypatch.setattr(go.Figure, "show", lambda figure, **options: shown.append((figure, options)))
@@ -191,13 +194,18 @@ def test_plotting_notebook_runs_and_exports_interactive_figures_and_animal_data(
         code = code.replace("RUN_DIR: Path | None = None", "RUN_DIR: Path | None = run_path")
         code = code.replace("EXPORT_RESULTS: bool = False", "EXPORT_RESULTS: bool = True")
         code = code.replace("HISTORY_METRIC: str | None = None", 'HISTORY_METRIC: str | None = "regions_logits_mean_dice"')
+        code = code.replace("FOLD_VALIDATION_KEY: str | None = None", f"FOLD_VALIDATION_KEY: str | None = {validation_key!r}")
         exec(compile(code, str(path), "exec"), context)
 
     export = context["export_dir"]
-    assert len(shown) == 3
+    overlay_expected = with_validation_metric or validation_key == "val_loss"
+    expected_figures = ["loss_curves", "metric_curves", "metric_boxplots"]
+    if overlay_expected:
+        expected_figures.append("fold_validation_curves")
+    assert len(shown) == len(expected_figures)
     assert all(options["renderer"] == "vscode" for _, options in shown)
     assert all(options["config"]["scrollZoom"] for _, options in shown)
-    for name in ("loss_curves", "metric_curves", "metric_boxplots"):
+    for name in expected_figures:
         assert (export / f"{name}.html").stat().st_size > 1_000_000
         payload = json.loads((export / f"{name}.json").read_text())
         assert payload["data"]
@@ -222,6 +230,20 @@ def test_plotting_notebook_runs_and_exports_interactive_figures_and_animal_data(
             assert trace.line.dash == "dash" and not trace.connectgaps
     else:
         assert not validation
+    if overlay_expected:
+        overlay = context["figures"]["fold_validation_curves"]
+        assert len(overlay.data) == 2
+        assert {trace.name for trace in overlay.data} == {"Fold 0", "Fold 1"}
+        assert all(trace.xaxis == "x" and trace.yaxis == "y" for trace in overlay.data)
+        assert overlay.layout.height == 360
+        for trace in overlay.data:
+            assert list(trace.x) == [1, 2] and not trace.connectgaps
+            if validation_key == "val_loss":
+                assert list(trace.y) == [1.0, 0.7]
+            else:
+                assert pd.isna(trace.y[0]) and trace.y[1] == 0.5
+    else:
+        assert "fold_validation_curves" not in context["figures"]
     epoch_metrics = pd.read_csv(export / "metric_history.csv")
     assert epoch_metrics.Fold.nunique() == 2
     assert "regions_logits_mean_dice" in epoch_metrics.Metric.unique()

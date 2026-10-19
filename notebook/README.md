@@ -112,7 +112,9 @@ The diagnostic notebooks are:
 - [plot_training_results.ipynb](plot_training_results.ipynb): choose a single-run
   or K-Fold folder, inspect interactive Plotly loss curves, choose an epoch metric
   with `HISTORY_METRIC` for training/validation curves, and plot a chosen
-  full-volume test metric by condition and modality. Hover shows normalized and
+  full-volume test metric by condition and modality. A compact K-Fold overlay
+  compares validation curves on one set of axes; `FOLD_VALIDATION_KEY` can select
+  `val_loss` or a saved validation metric. Hover shows normalized and
   original IDs plus strain (using saved protocol codes when strain is absent);
   legends toggle curves and conditions. Animal averages retain separate cohorts
   and evaluation roles. Exports offline HTML/JSON figures, raw/animal CSVs,
