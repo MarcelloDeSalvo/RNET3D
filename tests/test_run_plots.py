@@ -3,12 +3,10 @@
 from pathlib import Path
 import json
 
-import matplotlib
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import pytest
-
-matplotlib.use("Agg")
 
 from src.evaluation.run_plots import animal_metric_points, load_run_plot_data
 
@@ -119,8 +117,10 @@ def test_missing_evaluation_still_allows_history_and_duplicate_measures_fail(tmp
         load_run_plot_data(tmp_path)
 
 
-def test_plotting_notebook_runs_and_exports_vector_figures_and_animal_data(tmp_path):
-    """Exercise the actual plotting/export cells without a kernel or model."""
+def test_plotting_notebook_runs_and_exports_interactive_figures_and_animal_data(tmp_path, monkeypatch):
+    """Exercise native Plotly displays and real offline exports without a model."""
+    shown = []
+    monkeypatch.setattr(go.Figure, "show", lambda figure, **options: shown.append((figure, options)))
     run = tmp_path / "run"
     for fold in (0, 1):
         folder = run / f"fold_{fold}"
@@ -144,12 +144,32 @@ def test_plotting_notebook_runs_and_exports_vector_figures_and_animal_data(tmp_p
         exec(compile(code, str(path), "exec"), context)
 
     export = context["export_dir"]
-    assert (export / "loss_curves.pdf").stat().st_size > 1000
-    assert (export / "metric_boxplots.svg").stat().st_size > 1000
-    assert (export / "metric_boxplots.png").stat().st_size > 1000
+    assert len(shown) == 2
+    assert all(options["renderer"] == "vscode" for _, options in shown)
+    assert all(options["config"]["scrollZoom"] for _, options in shown)
+    for name in ("loss_curves", "metric_boxplots"):
+        assert (export / f"{name}.html").stat().st_size > 1_000_000
+        payload = json.loads((export / f"{name}.json").read_text())
+        assert payload["data"]
+        assert isinstance(context["figures"][name], go.Figure)
+
+    losses = context["figures"]["loss_curves"]
+    assert len(losses.data) == 4
+    assert all(trace.type == "scatter" for trace in losses.data)
+    assert {trace.line.dash for trace in losses.data if trace.name == "val_loss"} == {"dash"}
+    boxes = context["figures"]["metric_boxplots"]
+    assert all(trace.type == "box" and trace.boxpoints == "all" for trace in boxes.data)
+    subjects = {subject for trace in boxes.data for subject in trace.hovertext}
+    assert subjects == {row["Subject"] for row in rows}
+    assert boxes.layout.yaxis.matches is None
+    assert boxes.layout.yaxis2.matches == "y"
+    assert boxes.layout.yaxis3.matches is None
+    assert boxes.layout.yaxis4.matches == "y3"
     points = pd.read_csv(export / "animal_metric_points.csv")
     assert len(points) == 4
     assert set(points.Condition) == {"TBI", "SHAM"}
     settings = json.loads((export / "plot_settings.json").read_text())
     assert settings["metric"] == "Dice"
+    assert settings["plot_backend"] == "plotly"
+    assert settings["formats"] == ["html", "json"]
     assert len(settings["sources"]) == 3
