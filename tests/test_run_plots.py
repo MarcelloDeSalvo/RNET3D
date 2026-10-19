@@ -51,7 +51,10 @@ def test_animal_points_average_predictions_before_timepoints_and_keep_strata():
 def test_load_prefers_committed_epochs_and_one_aggregate_metric_export(tmp_path):
     fold = tmp_path / "fold_0"
     fold.mkdir()
-    state = {"history": {"loss": [0.9, 0.6], "val_loss": [1.2, 0.8]}}
+    state = {"history": {
+        "loss": [0.9, 0.6], "val_loss": [1.2, 0.8],
+        "brain_mask_mean_dice": [0.6, 0.8], "val_brain_mask_mean_dice": [None, 0.7],
+    }}
     (fold / "training_state.json").write_text(json.dumps(state))
     pd.DataFrame({"epoch": [0, 1, 2], "loss": [0.9, 0.6, 0.3]}).to_csv(fold / "training.csv", index=False)
     for folder in (tmp_path / "regions", tmp_path / "summary"):
@@ -65,6 +68,10 @@ def test_load_prefers_committed_epochs_and_one_aggregate_metric_export(tmp_path)
 
     result = load_run_plot_data(tmp_path)
     assert result.history.Epoch.max() == 2
+    assert result.metric_history.Epoch.max() == 2
+    assert set(result.metric_history.Metric) == {"brain_mask_mean_dice", "val_brain_mask_mean_dice"}
+    validation = result.metric_history.loc[result.metric_history.Metric.eq("val_brain_mask_mean_dice")]
+    assert pd.isna(validation.Value.iloc[0]) and validation.Value.iloc[1] == 0.7
     assert len(result.metrics) == 1
     assert result.metrics.SourceFile.str.contains("summary", regex=False).all()
     assert result.metrics.OriginalID.item() == "original_mouse_a"
@@ -108,6 +115,7 @@ def test_explicit_checkpoint_metrics_use_saved_contract_metadata(tmp_path):
     assert result.metrics.OriginalID.item() == "original_mouse_a"
     assert result.metrics.Strain.item() == "c52"
     assert result.history.empty
+    assert result.metric_history.empty
 
     contract[0]["metadata"]["strain"] = "declared-strain"
     (run / "data_contract.json").write_text(json.dumps(contract))
@@ -130,18 +138,24 @@ def test_explicit_checkpoint_metrics_use_saved_contract_metadata(tmp_path):
 def test_missing_evaluation_still_allows_history_and_duplicate_measures_fail(tmp_path):
     folder = tmp_path / "fold_0"
     folder.mkdir()
-    history = pd.DataFrame({"epoch": [0, 1, 1], "loss": [0.9, 0.8, 0.7]})
+    history = pd.DataFrame({
+        "epoch": [0, 1, 1], "loss": [0.9, 0.8, 0.7], "regions_mean_dice": [0.4, 0.5, 0.6],
+        "note": ["first", "uncommitted", "committed"],
+    })
     history.to_csv(folder / "training.csv", index=False)
     result = load_run_plot_data(tmp_path)
     assert result.metrics.empty
     assert result.history.Value.to_list() == [0.9, 0.7]
+    assert result.metric_history.Value.to_list() == [0.4, 0.6]
+    assert result.metric_history.Metric.to_list() == ["regions_mean_dice", "regions_mean_dice"]
 
     pd.DataFrame([measurement(), measurement()]).to_csv(tmp_path / "full_volume_metrics.csv", index=False)
     with pytest.raises(ValueError, match="duplicate scan/fold"):
         load_run_plot_data(tmp_path)
 
 
-def test_plotting_notebook_runs_and_exports_interactive_figures_and_animal_data(tmp_path, monkeypatch):
+@pytest.mark.parametrize("with_validation_metric", [True, False])
+def test_plotting_notebook_runs_and_exports_interactive_figures_and_animal_data(tmp_path, monkeypatch, with_validation_metric):
     """Exercise native Plotly displays and real offline exports without a model."""
     shown = []
     monkeypatch.setattr(go.Figure, "show", lambda figure, **options: shown.append((figure, options)))
@@ -149,7 +163,13 @@ def test_plotting_notebook_runs_and_exports_interactive_figures_and_animal_data(
     for fold in (0, 1):
         folder = run / f"fold_{fold}"
         folder.mkdir(parents=True)
-        pd.DataFrame({"loss": [0.9, 0.5], "val_loss": [1.0, 0.7]}).to_csv(folder / "history.csv", index=False)
+        history = {
+            "loss": [0.9, 0.5], "val_loss": [1.0, 0.7],
+            "brain_mask_mean_dice": [0.7, 0.9], "regions_logits_mean_dice": [0.4, 0.6],
+        }
+        if with_validation_metric:
+            history["val_regions_logits_mean_dice"] = [None, 0.5]
+        pd.DataFrame(history).to_csv(folder / "history.csv", index=False)
     rows = [
         measurement(), measurement(subject="D1/mouse_b", Value=0.8, Fold=1),
         measurement(subject="D1/sham", Condition="SHAM", Modality="T1w", Value=1.0),
@@ -170,13 +190,14 @@ def test_plotting_notebook_runs_and_exports_interactive_figures_and_animal_data(
         code = "".join(cell["source"])
         code = code.replace("RUN_DIR: Path | None = None", "RUN_DIR: Path | None = run_path")
         code = code.replace("EXPORT_RESULTS: bool = False", "EXPORT_RESULTS: bool = True")
+        code = code.replace("HISTORY_METRIC: str | None = None", 'HISTORY_METRIC: str | None = "regions_logits_mean_dice"')
         exec(compile(code, str(path), "exec"), context)
 
     export = context["export_dir"]
-    assert len(shown) == 2
+    assert len(shown) == 3
     assert all(options["renderer"] == "vscode" for _, options in shown)
     assert all(options["config"]["scrollZoom"] for _, options in shown)
-    for name in ("loss_curves", "metric_boxplots"):
+    for name in ("loss_curves", "metric_curves", "metric_boxplots"):
         assert (export / f"{name}.html").stat().st_size > 1_000_000
         payload = json.loads((export / f"{name}.json").read_text())
         assert payload["data"]
@@ -186,6 +207,24 @@ def test_plotting_notebook_runs_and_exports_interactive_figures_and_animal_data(
     assert len(losses.data) == 4
     assert all(trace.type == "scatter" for trace in losses.data)
     assert {trace.line.dash for trace in losses.data if trace.name == "val_loss"} == {"dash"}
+    curves = context["figures"]["metric_curves"]
+    training = [trace for trace in curves.data if trace.name == "regions_logits_mean_dice"]
+    validation = [trace for trace in curves.data if trace.name == "val_regions_logits_mean_dice"]
+    assert len(training) == 2
+    for trace in training:
+        assert list(trace.x) == [1, 2]
+        assert list(trace.y) == [0.4, 0.6]
+        assert trace.line.dash == "solid"
+    if with_validation_metric:
+        assert len(validation) == 2
+        for trace in validation:
+            assert pd.isna(trace.y[0]) and trace.y[1] == 0.5
+            assert trace.line.dash == "dash" and not trace.connectgaps
+    else:
+        assert not validation
+    epoch_metrics = pd.read_csv(export / "metric_history.csv")
+    assert epoch_metrics.Fold.nunique() == 2
+    assert "regions_logits_mean_dice" in epoch_metrics.Metric.unique()
     boxes = context["figures"]["metric_boxplots"]
     assert all(trace.type == "box" and trace.boxpoints == "all" for trace in boxes.data)
     subjects = {subject for trace in boxes.data for subject in trace.hovertext}
@@ -206,6 +245,7 @@ def test_plotting_notebook_runs_and_exports_interactive_figures_and_animal_data(
     assert set(points.Strain) == {"c52", "cd1"}
     settings = json.loads((export / "plot_settings.json").read_text())
     assert settings["metric"] == "Dice"
+    assert settings["history_metric"] == "regions_logits_mean_dice"
     assert settings["plot_backend"] == "plotly"
     assert settings["formats"] == ["html", "json"]
     assert len(settings["sources"]) == 3

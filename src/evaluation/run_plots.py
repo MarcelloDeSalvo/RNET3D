@@ -16,9 +16,10 @@ from .reporting import attach_scan_metadata
 
 @dataclass
 class RunPlotData:
-    """Saved loss observations, full-volume scan measurements and input paths."""
+    """Saved epoch losses/metrics, full-volume scan measurements and input paths."""
 
     history: pd.DataFrame
+    metric_history: pd.DataFrame
     metrics: pd.DataFrame
     sources: tuple[Path, ...]
 
@@ -32,8 +33,8 @@ def _fold_folders(run_dir: Path) -> list[Path]:
     return sorted(folders, key=lambda path: int(path.name[5:]))
 
 
-def _load_history(folder: Path) -> tuple[pd.DataFrame, Path | None]:
-    """Prefer committed recovery history; otherwise read saved CSV epochs."""
+def _load_history(folder: Path) -> tuple[pd.DataFrame, pd.DataFrame, Path | None]:
+    """Read committed epoch losses and numeric metrics, falling back to CSV."""
     state_file: Path = folder / "training_state.json"
     source: Path | None = None
     table: pd.DataFrame = pd.DataFrame()
@@ -50,7 +51,7 @@ def _load_history(folder: Path) -> tuple[pd.DataFrame, Path | None]:
                 break
 
     if table.empty:
-        return pd.DataFrame(), source
+        return pd.DataFrame(), pd.DataFrame(), source
 
     if "epoch" in table:
         table = table.drop_duplicates("epoch", keep="last").sort_values("epoch")
@@ -60,16 +61,23 @@ def _load_history(folder: Path) -> tuple[pd.DataFrame, Path | None]:
 
     keys: list[str] = []
     for column in table:
-        if column in ("loss", "val_loss") or column.endswith("_loss"):
+        if column in ("epoch", "Epoch") or column.startswith("Unnamed:"):
+            continue
+        loss_key: bool = column in ("loss", "val_loss") or column.endswith("_loss")
+        numeric: bool = pd.api.types.is_numeric_dtype(table[column])
+        if loss_key or numeric or table[column].isna().all():
             keys.append(column)
     if not keys:
-        return pd.DataFrame(), source
+        return pd.DataFrame(), pd.DataFrame(), source
 
-    history = table.melt(id_vars="Epoch", value_vars=keys, var_name="Loss", value_name="Value")
+    history = table.melt(id_vars="Epoch", value_vars=keys, var_name="Metric", value_name="Value")
     history["Value"] = pd.to_numeric(history["Value"], errors="raise")
     history["Fold"] = int(folder.name[5:])
     history["SourceFile"] = str(source)
-    return history, source
+    is_loss = history["Metric"].isin(("loss", "val_loss")) | history["Metric"].str.endswith("_loss")
+    losses = history.loc[is_loss].rename(columns={"Metric": "Loss"}).copy()
+    metrics = history.loc[~is_loss].copy()
+    return losses, metrics, source
 
 
 def load_run_plot_data(run_dir: Path, *, metrics_file: Path | None = None) -> RunPlotData:
@@ -77,7 +85,7 @@ def load_run_plot_data(run_dir: Path, *, metrics_file: Path | None = None) -> Ru
 
     An explicit metrics_file supports stopped-checkpoint evaluations. No latest
     run/evaluation is selected. Missing evaluations leave metrics empty, allowing
-    loss inspection while training is unfinished. Saved metadata supplies condition
+    loss/metric inspection while training is unfinished. Saved metadata supplies condition
     and modality; absent facts remain 'unknown'. Hover metadata retains original
     IDs and strain, using saved c52/cd1 protocol codes when strain is unspecified.
     """
@@ -87,11 +95,14 @@ def load_run_plot_data(run_dir: Path, *, metrics_file: Path | None = None) -> Ru
 
     folders = _fold_folders(run_dir)
     histories: list[pd.DataFrame] = []
+    metric_histories: list[pd.DataFrame] = []
     sources: list[Path] = []
     for folder in folders:
-        history, source = _load_history(folder)
+        history, metric_history, source = _load_history(folder)
         if not history.empty:
             histories.append(history)
+        if not metric_history.empty:
+            metric_histories.append(metric_history)
         if source is not None:
             sources.append(source)
 
@@ -124,12 +135,15 @@ def load_run_plot_data(run_dir: Path, *, metrics_file: Path | None = None) -> Ru
         sources.append(path)
 
     history = pd.DataFrame()
+    metric_history = pd.DataFrame()
     metrics = pd.DataFrame()
     if histories:
         history = pd.concat(histories, ignore_index=True)
+    if metric_histories:
+        metric_history = pd.concat(metric_histories, ignore_index=True)
     if not tables:
         source_files = tuple(sources)
-        return RunPlotData(history=history, metrics=metrics, sources=source_files)
+        return RunPlotData(history=history, metric_history=metric_history, metrics=metrics, sources=source_files)
 
     metrics = pd.concat(tables, ignore_index=True)
     required: set[str] = {"Subject", "Scan", "Dataset", "Region", "Metric", "Value", "Unit", "Status", "DatasetRole", "Fold"}
@@ -184,7 +198,7 @@ def load_run_plot_data(run_dir: Path, *, metrics_file: Path | None = None) -> Ru
         metrics.loc[brain, "Head"] = "brain_mask"
 
     source_files = tuple(sources)
-    return RunPlotData(history=history, metrics=metrics, sources=source_files)
+    return RunPlotData(history=history, metric_history=metric_history, metrics=metrics, sources=source_files)
 
 
 def _hover_metadata(values: pd.Series) -> str:

@@ -110,7 +110,8 @@ unstratified generation; saved/resumed folds remain unchanged.
 The diagnostic notebooks are:
 
 - [plot_training_results.ipynb](plot_training_results.ipynb): choose a single-run
-  or K-Fold folder, inspect interactive Plotly loss curves and plot a chosen
+  or K-Fold folder, inspect interactive Plotly loss curves, choose an epoch metric
+  with `HISTORY_METRIC` for training/validation curves, and plot a chosen
   full-volume test metric by condition and modality. Hover shows normalized and
   original IDs plus strain (using saved protocol codes when strain is absent);
   legends toggle curves and conditions. Animal averages retain separate cohorts
