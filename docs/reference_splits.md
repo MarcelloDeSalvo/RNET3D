@@ -1,13 +1,14 @@
 # Shared reference animal splits
 
-The mouse training, K-Fold, ablation, U-Net comparison and interpolation notebooks
-default to `DATA_ROOT.parent / "D1_splits_final.json"`:
+D1 training, K-Fold, ablation, U-Net comparison and interpolation notebooks,
+plus notebook 05, default to `DATA_ROOT.parent / "D1_splits_final.json"`:
 
 ```text
 D:/Other files/TESI_CNN/MANUSCRIPT_DATASET/D1_splits_final.json
 ```
 
-The sequential launcher uses the same file. The source JSON is read only. Shared
+The sequential launcher uses the same file. MouseFull notebooks 06/07f instead
+use the dedicated balanced plan described below. Source JSON files are read only. Shared
 parsing and cohort extension live in `src/experiments/splits.py`; the existing
 selection helpers apply pretraining checks before returning memberships.
 
@@ -36,6 +37,45 @@ annotation coverage, excluding lesion. Every D1 animal retains its role in
 every fold. The same helpers, seed and fraction produce identical notebook and
 launcher memberships. Rat splits remain separate and grouped by animal; D4
 remains independent. A D1 file cannot define rat or D4 animal memberships.
+
+## Balanced MouseFull reference for 06 and 07f
+
+```text
+D:/Other files/TESI_CNN/MANUSCRIPT_DATASET/MouseFull_5fold_balanced_splits.json
+```
+
+This separate three-role plan covers all 198 D1+D3 animals. It balances outer
+tests by **dataset and complete/partial anatomical annotation coverage**;
+background and lesion are excluded from the completeness definition. Completeness
+requires every selected anatomical annotation in every registered scan. The
+current inventory contains nine complete D1 animals and 79 complete D3 animals.
+
+| Fold | Train | Inner validation | Outer test | Complete D1 in outer test | Complete D3 in outer test |
+|---|---:|---:|---:|---:|---:|
+| 0 | 126 | 32 | 40 | 2 | 16 |
+| 1 | 126 | 32 | 40 | 2 | 15 |
+| 2 | 126 | 32 | 40 | 2 | 16 |
+| 3 | 127 | 32 | 39 | 2 | 16 |
+| 4 | 127 | 32 | 39 | 1 | 16 |
+
+Generation uses the shared `balanced_folds` helper, seed 42, and strata formed
+from dataset plus anatomy coverage. Inner validation is a seeded random 20%
+sample of each outer training pool; it is separate from fitting and outer tests.
+Every animal is an outer test animal exactly once. Companion `.metadata.json`,
+`.balance.csv` and `.membership.csv` files record settings, complete D1 IDs,
+hashes, all role counts and scan memberships.
+
+Notebook 06 loads all five folds with `FOLD_MODE="balanced"`. Notebook 07f
+defaults to fixed fold zero from this exact plan; `K_FOLD_COMPATIBLE=True`
+selects all five folds. All models start from scratch. Saved/resumed roles remain
+authoritative, so changing a reference does not relabel an existing model's tests.
+Use a fresh run/study for the new plan; 07f has a separate balanced study folder.
+
+The historical D1 plan is unchanged. Its complete D1 test counts are 3/2/2/1/1,
+so preserving those exact roles would not achieve the requested 2/2/2/2/1 balance.
+Notebook 05 and the launcher retain their existing defaults. To use this joint
+plan for the entire launcher, pass `--folds-file` with the new path and a fresh
+`--run-name`; its D1 experiments will then use the joint plan's D1 projection.
 
 ## Notebook settings
 
