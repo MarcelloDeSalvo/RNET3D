@@ -41,6 +41,23 @@ still supports historical two-role inputs, but preserves explicit three-role
 plans exactly, including order. Validation rejects repeated holdouts,
 overlapping roles and incomplete coverage.
 
+### Checkpoint selection and final test metrics
+
+Mouse K-Fold notebooks 02/06 and CV ablations already enable an explicit
+`ReduceLROnPlateau` monitoring inner `val_loss` (factor 0.5, patience 10,
+minimum LR 1e-7). The runner saves the lowest inner-validation-loss weights
+and reloads that checkpoint before native patch and full-volume outer-test
+evaluation. CV uses its configured epoch budget without early stopping by default.
+The launcher follows the same selection policy for its three-way CV jobs.
+
+This is grouped five-fold evaluation with an internal validation holdout, not
+nested CV. Freeze the experiment settings before inspecting outer-test results;
+use only training/inner validation for tuning, scheduling and checkpoint selection.
+Report those decisions and exact fold memberships. This addresses Reviewer 2's
+test-driven selection concern; nested CV or a separate fixed tuning set was
+described as the preferred design. Historical rat notebook 04 has no inner
+validation and therefore retains training-loss selection and a fixed LR.
+
 With the current inventory, reference fold zero has:
 
 | Task | Train animals | Validation animals | Test animals |

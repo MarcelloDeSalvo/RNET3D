@@ -105,6 +105,99 @@ def test_cv_runs_full_budget_without_implicit_early_stopping(experiment):
         run_cross_validation(data, folds=folds, callbacks=callbacks, resume_run=result.run_dir)
 
 
+def test_three_way_cv_reduces_lr_on_inner_validation_and_scores_selected_weights(tmp_path):
+    """Outer scores use the best validation epoch, even if training improves later."""
+    from src.evaluation.k_fold import EvaluationConfig, TrainingConfig, k_fold_loop
+
+    folds = [
+        FoldSplit(0, ['a'], ['b'], ['c']),
+        FoldSplit(1, ['b'], ['c'], ['a']),
+        FoldSplit(2, ['c'], ['a'], ['b']),
+    ]
+    final_learning_rates = []
+    evaluated = []
+
+    def dataset(subject_ids):
+        """Supply one deterministic batch for each fitting or validation animal."""
+        shape = (len(subject_ids), 1)
+        inputs = np.ones(shape, dtype=np.float32)
+        targets = np.zeros(shape, dtype=np.float32)
+        result = tf.data.Dataset.from_tensor_slices((inputs, targets)).batch(1)
+        options = tf.data.Options()
+        options.threading.private_threadpool_size = 1
+        return result.with_options(options)
+
+    def model():
+        """Use a single weight so the selected epoch is directly observable."""
+        result = tf.keras.Sequential([
+            tf.keras.layers.Input((1,)),
+            tf.keras.layers.Dense(1, use_bias=False, kernel_initializer='zeros'),
+        ])
+        optimizer = tf.keras.optimizers.SGD(learning_rate=0.01)
+        result.compile(optimizer=optimizer, loss='mse')
+        return result
+
+    class ControlledEpoch(tf.keras.callbacks.Callback):
+        """Give the three epochs distinct weights and conflicting loss curves."""
+
+        def on_epoch_end(self, epoch, logs=None):
+            weight = np.array([[epoch + 1.0]], dtype=np.float32)
+            self.model.layers[-1].set_weights([weight])
+            logs['loss'] = (0.9, 0.6, 0.1)[epoch]
+            logs['val_loss'] = (0.1, 0.3, 0.4)[epoch]
+
+        def on_train_end(self, logs=None):
+            rate = float(tf.keras.backend.get_value(self.model.optimizer.learning_rate))
+            final_learning_rates.append(rate)
+
+    def callbacks(context):
+        """Reduce only on inner validation; keep all three fitting epochs."""
+        reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
+            monitor='val_loss', mode='min', factor=0.5, patience=1, min_lr=1e-7,
+        )
+        return [ControlledEpoch(), reduce_lr]
+
+    class HoldoutEvaluator:
+        """Inspect the weights used by the actual post-fit evaluator entry point."""
+
+        def __init__(self, model, subject_ids, options):
+            assert options['dataset_role'] == 'holdout'
+            expected = folds[options['fold']].test_ids
+            assert list(subject_ids) == expected
+            self.subject_ids = list(subject_ids)
+            self.weight = float(model.get_weights()[0].item())
+            evaluated.append((options['fold'], self.subject_ids, self.weight))
+
+        def evaluate(self):
+            import pandas as pd
+
+            return pd.DataFrame({
+                'Subject': self.subject_ids, 'Metric': 'selected_weight', 'Value': self.weight,
+            })
+
+    config = TrainingConfig(
+        model_name='three_way_selection', output_dir=str(tmp_path), k=3, epochs=3,
+        monitor='val_loss', monitor_mode='min', default_callbacks=False,
+        save_model=False, fit_kwargs={'verbose': 0},
+    )
+    evaluation = EvaluationConfig(evaluate_validation=False)
+    result = k_fold_loop(
+        dataset, dataset, model, config, ['a', 'b', 'c'],
+        fold_splits=folds, callbacks_factory=callbacks,
+        fve_callbacks={'regions': HoldoutEvaluator}, evaluation=evaluation,
+    )
+
+    assert all(len(history['loss']) == 3 for history in result.histories)
+    assert final_learning_rates == pytest.approx([0.0025] * 3)
+    assert evaluated == [(0, ['c'], 1.0), (1, ['a'], 1.0), (2, ['b'], 1.0)]
+    for index, table in enumerate(result.evaluations['regions']):
+        assert table.DatasetRole.eq('holdout').all()
+        assert table.BestEpoch.eq(1).all()
+        state_file = result.run_dir / f'fold_{index}' / 'training_state.json'
+        state = json.loads(state_file.read_text())
+        assert state['selected_metric'] == pytest.approx(0.1)
+
+
 def test_study_forwards_same_explicit_list_and_records_settings(experiment, tmp_path, monkeypatch):
     from src.experiments import ablation
     from src.evaluation.k_fold import TrainingResult
