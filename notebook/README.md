@@ -101,6 +101,11 @@ unstratified generation; saved/resumed folds remain unchanged.
 
 The diagnostic notebooks are:
 
+- [plot_training_results.ipynb](plot_training_results.ipynb): choose a single-run
+  or K-Fold folder, inspect per-fold losses and plot a chosen full-volume test
+  metric by condition and modality. Animal averages retain separate cohorts and
+  evaluation roles. Exports PNG/PDF/SVG figures, raw/animal CSVs, coverage and
+  settings; an explicit metrics-file override supports stopped-checkpoint reports.
 - [check_interpolation_sensitiity.ipynb](check_interpolation_sensitiity.ipynb):
   a short D1 training comparison of MRI spline orders 0/1/2/3 with shared animals,
   seeds, evaluation patches and original model widths. Includes a grid audit,
