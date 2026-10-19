@@ -167,6 +167,13 @@ def test_configuration_cell_exposes_and_applies_the_switch(experiment, filename,
 
     exec(code, context)
 
+    if filename == "01_tbi_mouse_training.ipynb":
+        if enabled:
+            assert context["SPLIT_FILE"] is None
+        else:
+            baseline_file = experiment.data.root.parent / "D1_baseline_fold_0_split.json"
+            assert context["SPLIT_FILE"] == baseline_file
+
     if filename.startswith(("07_", "07f_", "08_")):
         expected = "fixed_split"
         if enabled:

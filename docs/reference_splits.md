@@ -65,6 +65,33 @@ D1 source checkpoints with notebook 01 in K-Fold mode or notebook 02, then use
 their matching folds for MouseFull. A changed default does not make old weights
 independent of previously seen animals.
 
+## Exported notebook 01 baseline
+
+The fixed-split file is available beside the dataset:
+
+```text
+D:/Other files/TESI_CNN/MANUSCRIPT_DATASET/D1_baseline_fold_0_split.json
+```
+
+It contains canonical `train`, `validation` and `test` arrays with 71, 18 and 23
+animals. Its companion `.metadata.json` records the source JSON digest, fold,
+seed, inner-validation fraction and compatibility scope. The original reference
+file remains unchanged.
+
+Notebook 01 loads this file by default with `K_FOLD_COMPATIBLE=False`. Start a
+new run with `RESUME_RUN=None`. After fitting, set `TBI_RUN` in notebook 05 or
+07f to that run's printed folder, with `TBI_FOLD=0` and `REFERENCE_FOLD=0`.
+The saved D1 source roles match the MouseFull fold-zero roles; source validation
+may be shared with downstream validation, while downstream tests are excluded
+from both source fitting and checkpoint selection.
+
+One D1 baseline cannot be independent for every downstream outer fold: every
+D1 animal is in an outer test set once. To initialize all five downstream folds,
+train all five corresponding source models using notebook 01 with
+`K_FOLD_COMPATIBLE=True` or notebook 02. Notebook 01 clears its fixed `SPLIT_FILE`
+in CV mode and uses the complete reference plan. For another fixed reference
+fold, set `SPLIT_FILE=None` and choose `REFERENCE_FOLD`.
+
 ## Sequential launcher
 
 The visible settings are `REFERENCE_SPLITS`, `REFERENCE_FOLD` and
