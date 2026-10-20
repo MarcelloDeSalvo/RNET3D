@@ -22,7 +22,10 @@ for notebook 05's separate final model.
 ## Modality and anatomy balance
 
 The 2026-10-20 regeneration stratifies by dataset, modality and complete/partial
-anatomical coverage, with seed 42. Completeness requires every selected anatomical
+anatomical coverage, with seed 42. Generated folds 0 and 1 are then exchanged
+so reference fold zero has six T2w test animals. All three roles move together;
+the recorded generation order is `[1, 0, 2, 3, 4]`.
+Completeness requires every selected anatomical
 annotation in every scan of the animal; background and lesion are excluded.
 There are nine complete D1 animals and 79 complete D3 animals.
 
@@ -35,8 +38,8 @@ The D1 inventory contains 86 T1w and 26 T2w animals:
 
 | Fold | Train T1w / T2w | Validation T1w / T2w | Test T1w / T2w | Complete D1 in test |
 |---|---:|---:|---:|---:|
-| 0 | 54 / 17 | 14 / 4 | 18 / 5 | 2 |
-| 1 | 55 / 16 | 14 / 4 | 17 / 6 | 2 |
+| 0 | 55 / 16 | 14 / 4 | 17 / 6 | 2 |
+| 1 | 54 / 17 | 14 / 4 | 18 / 5 | 2 |
 | 2 | 55 / 17 | 14 / 4 | 17 / 5 | 2 |
 | 3 | 55 / 17 | 14 / 4 | 17 / 5 | 2 |
 | 4 | 55 / 17 | 14 / 4 | 17 / 5 | 1 |
@@ -45,15 +48,15 @@ MouseFull adds 86 T1w SHAM animals, preserving every D1 assignment:
 
 | Fold | Train T1w / T2w | Validation T1w / T2w | Test T1w / T2w | Complete D3 in test |
 |---|---:|---:|---:|---:|
-| 0 | 108 / 17 | 28 / 4 | 36 / 5 | 16 |
-| 1 | 110 / 16 | 28 / 4 | 34 / 6 | 16 |
+| 0 | 110 / 16 | 28 / 4 | 34 / 6 | 16 |
+| 1 | 108 / 17 | 28 / 4 | 36 / 5 | 16 |
 | 2 | 110 / 17 | 28 / 4 | 34 / 5 | 16 |
 | 3 | 110 / 17 | 28 / 4 | 34 / 5 | 16 |
 | 4 | 110 / 17 | 28 / 4 | 34 / 5 | 15 |
 
 Every animal occurs in exactly one outer test. Training, validation and test are
 disjoint within each fold. The two fixed files match their corresponding fold
-zero exactly: D1 has 71/18/23 animals; MouseFull has 125/32/41 animals.
+zero exactly: D1 has 71/18/23 animals; MouseFull has 126/32/40 animals.
 
 Each CV file has `.metadata.json`, `.balance.csv` and `.membership.csv`
 companions recording generation settings, hashes, complete D1 IDs, per-role
@@ -69,7 +72,9 @@ byte-for-byte into:
 split_backups/modality_balanced_20261020_101808_358542/
 ```
 
-The backup manifest records their SHA-256 hashes. Earlier backup folders remain
+The subsequent fold swap backed up all twelve current reference/audit files to
+`split_backups/modality_balanced_20261020_102828_555561/` before replacement.
+Backup manifests record SHA-256 hashes. Earlier backup folders remain
 available. The new references intentionally replace historical memberships to
 improve modality balance; no previously saved model/run memberships are changed.
 

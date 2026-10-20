@@ -22,11 +22,13 @@ from src.evaluation.k_fold import FoldSplit
 from src.experiments.data import PreparedData, prepare_data
 from src.experiments.revision_config import RevisionSuiteConfig, experiment_configuration
 from src.experiments.revision_splits import make_suite_splits, split_membership
-from src.experiments.splits import select_animals, validate_folds
+from src.experiments.splits import reorder_folds, select_animals, validate_folds
 
 
 DATA_ROOT = Path("D:/Other files/TESI_CNN/MANUSCRIPT_DATASET/normalized")
 REFERENCE = REPOSITORY / "example/RARE/TBI_fm_19_49/Anat/TBI_fm_19_49_N4.nii.gz"
+# Keep the six-T2w outer test in fold zero for the shared fixed-split studies.
+FOLD_ORDER: tuple[int, ...] = (1, 0, 2, 3, 4)
 
 
 def json_bytes(payload: object) -> bytes:
@@ -37,7 +39,7 @@ def json_bytes(payload: object) -> bytes:
 
 def reference_files(
     data: PreparedData, folds: Sequence[FoldSplit], name: str, *, seed: int,
-    validation_fraction: float, created: str,
+    validation_fraction: float, created: str, generation_fold_order: Sequence[int] | None = None,
 ) -> tuple[dict[str, bytes], pd.DataFrame]:
     """Serialize a CV plan, its fixed fold zero, and scan-level balance audits."""
     validate_folds(folds, data.subjects.subject_ids)
@@ -55,11 +57,15 @@ def reference_files(
         cv_name = "MouseFull_5fold_balanced_splits"
         fixed_name = "MouseFull_fixed_split_from_kfold_fold_0"
     payload = [fold.to_dict() for fold in folds]
+    if generation_fold_order is None:
+        generation_fold_order = list(range(len(folds)))
+    reorder_folds(folds, generation_fold_order)
     cv_bytes = json_bytes(payload)
     fixed_bytes = json_bytes(payload[0])
     metadata = {
         "created": created, "generator": "scripts/regenerate_reference_splits.py",
         "seed": seed, "folds": len(folds), "validation_fraction": validation_fraction,
+        "generation_fold_order": list(generation_fold_order),
         "stratification": ["dataset", "anatomy_coverage", "modality"],
         "balance_policy": "Preserve cohort proportions; retain every animal; no oversampling",
         "include_lesion_in_completeness": False,
@@ -78,6 +84,7 @@ def reference_files(
         "source": cv_name + ".json", "source_sha256": metadata["sha256"],
         "reference_fold": 0, "seed": seed, "validation_fraction": validation_fraction,
         "stratification": metadata["stratification"],
+        "generation_fold_order": metadata["generation_fold_order"],
         "sha256": hashlib.sha256(fixed_bytes).hexdigest(),
     }
     files = {
@@ -168,9 +175,10 @@ def main() -> None:
     created = datetime.now(ZoneInfo("Europe/Rome")).isoformat()
     files: dict[str, bytes] = {}
     for data, folds, name in ((d1, splits.d1, "D1"), (mouse_full, splits.mouse_full, "MouseFull")):
+        folds = reorder_folds(folds, FOLD_ORDER)
         generated, balance = reference_files(
             data, folds, name, seed=args.seed,
-            validation_fraction=args.validation_fraction, created=created,
+            validation_fraction=args.validation_fraction, created=created, generation_fold_order=FOLD_ORDER,
         )
         files.update(generated)
         counts = balance.groupby(["Fold", "DatasetRole", "Modality"])["Animals"].sum().unstack(fill_value=0)

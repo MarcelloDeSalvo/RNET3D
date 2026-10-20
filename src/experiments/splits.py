@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import replace
@@ -69,6 +70,31 @@ def merge_folds(first: Sequence[FoldSplit], second: Sequence[FoldSplit]) -> list
     animals += second[0].train_ids + second[0].val_ids + second[0].test_ids
     validate_folds(result, animals)
     return result
+
+
+def reorder_folds(folds: Sequence[FoldSplit], order: Sequence[int]) -> list[FoldSplit]:
+    """Renumber a fold permutation without changing any animal's stored role."""
+    if any(type(index) is not int for index in order) or sorted(order) != list(range(len(folds))):
+        raise ValueError("Fold order must be a permutation of all source fold indexes")
+    return [replace(folds[source], index=index) for index, source in enumerate(order)]
+
+
+def reference_fold_order(path: Path, count: int) -> list[int]:
+    """Read the generation order so added cohorts follow a reordered reference."""
+    identity = list(range(count))
+    metadata_path = Path(path).with_suffix(".metadata.json")
+    if not metadata_path.is_file():
+        return identity
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    order = metadata.get("generation_fold_order")
+    if order is None:
+        return identity
+    if not isinstance(order, list) or any(type(index) is not int for index in order) or sorted(order) != identity:
+        raise ValueError("Reference generation_fold_order must be a permutation of all folds")
+    digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    if metadata.get("sha256") != digest:
+        raise ValueError("Reference fold-order metadata does not match the split file digest")
+    return order
 
 
 def _balanced_tests(animals: Sequence[str], groups: dict[str, str], k: int, seed: int) -> list[list[str]]:
@@ -288,4 +314,6 @@ def reference_folds(
         extra, k=len(loaded), seed=config.split_seed,
         validation_fraction=config.cv_validation_fraction, strata=strata,
     )
+    order = reference_fold_order(path, len(loaded))
+    extra_folds = reorder_folds(extra_folds, order)
     return merge_folds(loaded, extra_folds)

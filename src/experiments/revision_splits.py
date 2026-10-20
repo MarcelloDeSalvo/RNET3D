@@ -10,7 +10,8 @@ import pandas as pd
 
 from .data import PreparedData, SubjectSplit
 from .splits import (
-    balanced_folds, merge_folds, project_folds, read_selection, select_animals, validate_folds,
+    balanced_folds, merge_folds, project_folds, read_selection, reference_fold_order,
+    reorder_folds, select_animals, validate_folds,
 )
 from ..evaluation.k_fold import FoldSplit
 
@@ -68,6 +69,8 @@ def make_suite_splits(
             validate_folds(supplied, d1_ids)
             d1_folds = supplied
             extra = balanced_folds(sham, k=k, seed=seed, validation_fraction=validation_fraction)
+            order = reference_fold_order(selected_path, k)
+            extra = reorder_folds(extra, order)
             mouse_folds = merge_folds(d1_folds, extra)
         else:
             raise ValueError("Provided folds must cover exactly selected D1 or selected D1+D3 animals")
