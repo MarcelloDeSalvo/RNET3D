@@ -132,9 +132,12 @@ def test_missing_source_test_manifest_cannot_silently_change_roles(pretrained_da
         resolve_training_split(pretrained_data)
 
 
-def test_scratch_memberships_keep_the_original_sampling_policy(experiment):
+def test_scratch_memberships_use_modality_and_anatomy_strata(experiment):
+    from src.experiments.splits import modality_annotation_strata
+
     data = prepare_data(experiment)
-    expected = make_split(data.subjects, seed=experiment.split_seed)
+    strata = modality_annotation_strata(data)
+    expected = make_split(data.subjects, seed=experiment.split_seed, strata=strata)
     assert resolve_training_split(data) == expected
 
 

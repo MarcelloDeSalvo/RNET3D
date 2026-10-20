@@ -165,9 +165,9 @@ def resolve_training_selection(
 
 def make_split(
     index: SubjectIndex, *, seed: int, validation_fraction: float = 0.2,
-    test_fraction: float = 0.1,
+    test_fraction: float = 0.1, strata: Mapping[str, str] | None = None,
 ) -> SubjectSplit:
-    """Split animals using fractions of the complete cohort, without stratification.
+    """Split whole animals proportionally by cohort/modality or supplied strata.
 
     For longitudinal/small cohorts or matched manuscript experiments, load a
     scientifically selected split instead. The local RNG does not alter training.
@@ -179,18 +179,26 @@ def make_split(
     if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
         raise ValueError("Split seed must be a nonnegative integer")
 
-    ids = np.asarray(index.subject_ids)
-    rng = np.random.default_rng(seed)
-    shuffled = rng.permutation(ids)
+    from .splits import stratified_validation_ids
+
+    ids = index.subject_ids
     count: int = len(ids)
     n_validation: int = max(1, int(np.ceil(count * validation_fraction)))
     n_test: int = max(1, int(np.ceil(count * test_fraction)))
     if n_validation + n_test >= count:
         raise ValueError("Too few animals for the requested three-way split")
 
-    test = tuple(sorted(shuffled[:n_test].tolist()))
-    validation = tuple(sorted(shuffled[n_test:n_test + n_validation].tolist()))
-    train = tuple(sorted(shuffled[n_test + n_validation:].tolist()))
+    if strata is None:
+        manifest = index.manifest(ids)
+        strata = {}
+        for animal, scans in manifest.groupby("Subject"):
+            datasets = ",".join(sorted(scans["Dataset"].unique()))
+            modalities = ",".join(sorted(scans["Modality"].unique()))
+            strata[animal] = f"{datasets}|{modalities}"
+    test = tuple(stratified_validation_ids(ids, strata, n_test, seed))
+    remaining = sorted(set(ids) - set(test))
+    validation = tuple(stratified_validation_ids(remaining, strata, n_validation, seed + 1))
+    train = tuple(sorted(set(remaining) - set(validation)))
     split = SubjectSplit(train=train, validation=validation, test=test)
     split.validate(index)
     return split
@@ -250,9 +258,13 @@ def resolve_training_split(
     settings = config.fixed_split
     seed = config.split_seed
     if not inherited:
+        from .splits import modality_annotation_strata
+
+        strata = modality_annotation_strata(data)
         return make_split(
             data.subjects, seed=seed,
             validation_fraction=settings.validation_fraction, test_fraction=settings.test_fraction,
+            strata=strata,
         )
 
     groups: dict[str, list[str]] = {"train": [], "validation": [], "test": []}
@@ -341,7 +353,7 @@ def make_cv_splits(
 
     strata maps each selected animal to one group. Stratified folds distribute
     each group's available animals approximately evenly; they do not force a
-    50/50 group ratio or oversample animals. Inner validation remains random.
+    50/50 group ratio or oversample animals. Inner validation uses the same strata.
     """
     from sklearn.model_selection import KFold, StratifiedKFold
 
@@ -370,9 +382,15 @@ def make_cv_splits(
         validation_count = max(1, int(np.ceil(len(pool) * validation_fraction)))
         if validation_count >= len(pool):
             raise ValueError("Too few animals for separate training and checkpoint validation")
+        validation = sorted(shuffled[:validation_count].tolist())
+        if strata is not None:
+            from .splits import stratified_validation_ids
+
+            validation = stratified_validation_ids(pool.tolist(), strata, validation_count, seed + index)
+        train = sorted(set(pool.tolist()) - set(validation))
         fold = FoldSplit(
-            index=index, train_ids=sorted(shuffled[validation_count:].tolist()),
-            val_ids=sorted(shuffled[:validation_count].tolist()), test_ids=sorted(ids[test_indexes].tolist()),
+            index=index, train_ids=train,
+            val_ids=validation, test_ids=sorted(ids[test_indexes].tolist()),
         )
         fold.validate(set(subjects))
         folds.append(fold)

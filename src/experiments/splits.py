@@ -84,17 +84,83 @@ def _balanced_tests(animals: Sequence[str], groups: dict[str, str], k: int, seed
     return tests
 
 
+def modality_annotation_strata(data: PreparedData) -> dict[str, str]:
+    """Group whole animals by cohort, all acquisition modalities and anatomy coverage."""
+    coverage = {animal: "not_applicable" for animal in data.subjects.subject_ids}
+    if any(channel not in (0, 1) for channel in data.config.labels.mapping.values()):
+        coverage = data.annotation_groups(include_lesion=False)
+    groups: dict[str, str] = {}
+    for animal in data.subjects.subject_ids:
+        scans = [data.loader.get_subject(key) for key in data.subjects.scan_keys([animal])]
+        datasets = ",".join(sorted({scan.subject_group[0] for scan in scans}))
+        modalities = ",".join(sorted({scan.modality for scan in scans}))
+        groups[animal] = f"{datasets}|{coverage[animal]}|{modalities}"
+    return groups
+
+
+def stratified_validation_ids(
+    pool: Sequence[str], groups: Mapping[str, str], count: int, seed: int,
+) -> list[str]:
+    """Select an exact proportional holdout, retaining fitting examples when feasible.
+
+    Largest-remainder allocation handles strata smaller than the fold count.
+    Groups with at least two members receive validation and fitting examples
+    when the requested budget can cover them. Singleton groups stay in fitting
+    unless the holdout cannot otherwise reach its required size.
+    """
+    if len(set(pool)) != len(pool) or not 0 < count < len(pool):
+        raise ValueError("A stratified holdout needs unique animals and must leave fitting data")
+    if any(animal not in groups or not isinstance(groups[animal], str) or not groups[animal] for animal in pool):
+        raise ValueError("Strata must define every selected animal")
+    names = sorted({groups[animal] for animal in pool})
+    members = [sorted(animal for animal in pool if groups[animal] == name) for name in names]
+    sizes = np.asarray([len(values) for values in members])
+    quotas = count * sizes / len(pool)
+    lower = np.zeros(len(names), dtype=int)
+    eligible = sizes >= 2
+    if count >= int(eligible.sum()):
+        lower[eligible] = 1
+    upper = sizes - 1
+    if int(upper.sum()) < count:
+        upper = sizes.copy()
+    allocated = np.clip(np.floor(quotas).astype(int), lower, upper)
+    rng = np.random.default_rng(seed)
+    priority = rng.permutation(len(names)).tolist()
+
+    while int(allocated.sum()) < count:
+        candidates = [index for index in priority if allocated[index] < upper[index]]
+        selected = max(candidates, key=lambda index: quotas[index] - allocated[index])
+        allocated[selected] += 1
+    while int(allocated.sum()) > count:
+        candidates = [index for index in priority if allocated[index] > lower[index]]
+        selected = max(candidates, key=lambda index: allocated[index] - quotas[index])
+        allocated[selected] -= 1
+
+    validation: list[str] = []
+    for values, selected_count in zip(members, allocated):
+        shuffled = rng.permutation(values).tolist()
+        validation.extend(shuffled[:selected_count])
+    return sorted(validation)
+
+
 def balanced_folds(
     data: PreparedData, *, k: int, seed: int, validation_fraction: float,
     anchor: SubjectSplit | None = None, strata: Mapping[str, str] | None = None,
 ) -> list[FoldSplit]:
-    """Balance anatomy coverage; an optional fixed split remains exact in fold zero."""
+    """Balance modalities and anatomy in all roles; preserve an explicit fold-zero anchor."""
     animals = data.subjects.subject_ids
     if not 2 <= k <= len(animals):
         raise ValueError("Too few selected animals for the requested folds")
-    groups = data.annotation_groups(include_lesion=False)
-    if strata is not None:
+    if not np.isfinite(validation_fraction) or not 0 < validation_fraction < 1:
+        raise ValueError("Validation fraction must be between zero and one")
+    if strata is None:
+        groups = modality_annotation_strata(data)
+    else:
+        if any(animal not in strata for animal in animals):
+            raise ValueError("Strata must define every selected animal")
         groups = {animal: strata[animal] for animal in animals}
+        if any(not isinstance(group, str) or not group.strip() for group in groups.values()):
+            raise ValueError("Strata must contain nonempty group names")
     tests = _balanced_tests(animals, groups, k, seed)
     if anchor is not None:
         anchor.validate(data.subjects)
@@ -112,10 +178,8 @@ def balanced_folds(
             count = max(1, int(np.ceil(len(pool) * validation_fraction)))
             if count >= len(pool):
                 raise ValueError("Too few animals for separate fitting and inner validation")
-            rng = np.random.default_rng(seed + index)
-            shuffled = rng.permutation(pool).tolist()
-            validation = sorted(shuffled[:count])
-            train = sorted(shuffled[count:])
+            validation = stratified_validation_ids(pool, groups, count, seed + index)
+            train = sorted(set(pool) - set(validation))
         result.append(FoldSplit(index, train, validation, sorted(test)))
     validate_folds(result, animals)
     return result
@@ -199,7 +263,7 @@ def reference_folds(
 
     The same seed and inner fraction produce identical D1 roles for fixed
     training, CV and MouseFull ablations. Additional SHAM animals
-    are balanced by anatomy coverage unless explicit strata are supplied.
+    are balanced by modality and anatomy coverage unless explicit strata are supplied.
     """
     config = data.config
     loaded = read_selection(

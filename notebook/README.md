@@ -12,18 +12,19 @@ mode, recovery and the compact paper workbook with four sheets.
 
 Mouse training and study notebooks generally share `DATA_ROOT.parent / "D1_splits_final.json"`
 as their default animal plan. Fixed studies use reference fold zero; K-Fold uses
-all five folds. The JSON explicitly stores train/validation/test roles, keeping
-every historical held-out animal in test and drawing validation only from the
-original training pool. MouseFull adds SHAM folds while retaining every
+all five folds. The JSON explicitly stores train/validation/test roles, balancing
+T1w/T2w proportions and anatomical annotation coverage. Validation is drawn only
+from each outer training pool. MouseFull adds SHAM folds while retaining every
 D1 role. See the [reference split guide](../docs/reference_splits.md) for overrides
 and exact current counts. Rats retain separate animal folds; saved-model evaluation
 uses the checkpoint's saved memberships. Ablations default to fixed splits.
 
 MouseFull notebooks 06/07f use `MouseFull_5fold_balanced_splits.json` instead:
-the dedicated D1+D3 plan balances anatomy coverage within each cohort and places
+the dedicated D1+D3 plan balances modality and anatomy coverage within each cohort and places
 the nine complete D1 animals into outer tests as 2/2/2/2/1. Notebook 06 uses every
-fold; 07f defaults to its fixed fold zero, with full CV optional. The historical
-D1 outer test groups are unchanged. These models train from scratch, with a separate
+fold; 07f defaults to its fixed fold zero, with full CV optional. Its D1 roles
+match the updated D1 reference. Previous reference files are in `split_backups/`.
+These models train from scratch, with a separate
 07f study folder for the new memberships.
 
 MRI workflows share `example/RARE/TBI_fm_19_49/Anat/TBI_fm_19_49_N4.nii.gz`

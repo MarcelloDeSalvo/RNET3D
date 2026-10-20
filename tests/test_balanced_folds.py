@@ -2,12 +2,64 @@
 
 from collections import Counter
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
 from test_experiments import experiment
 from src.experiments.config import LabelConfig
 from src.experiments.data import fold_annotation_summary, make_cv_splits, prepare_data
+from src.experiments.splits import balanced_folds, modality_annotation_strata, stratified_validation_ids
+
+
+def test_modality_and_annotation_balance_in_all_three_roles():
+    """The real cohort proportions retain rare complete anatomy in every test fold."""
+    strata = {}
+    for modality, coverage, count in (
+        ("T1w", "complete", 4), ("T2w", "complete", 5),
+        ("T1w", "partial", 82), ("T2w", "partial", 21),
+    ):
+        for number in range(count):
+            animal = f"D1/{modality}_{coverage}_{number:03d}"
+            strata[animal] = f"D1|{coverage}|{modality}"
+    data = SimpleNamespace(subjects=SimpleNamespace(subject_ids=list(strata)))
+    folds = balanced_folds(data, k=5, seed=42, validation_fraction=0.2, strata=strata)
+    repeated = balanced_folds(data, k=5, seed=42, validation_fraction=0.2, strata=strata)
+    assert folds == repeated
+    assert sorted(animal for fold in folds for animal in fold.test_ids) == sorted(strata)
+    complete_counts = []
+    for fold in folds:
+        fold.validate(set(strata))
+        test_t2 = sum(strata[animal].endswith("T2w") for animal in fold.test_ids)
+        validation_t2 = sum(strata[animal].endswith("T2w") for animal in fold.val_ids)
+        assert test_t2 in (5, 6)
+        assert validation_t2 == 4
+        assert len(fold.val_ids) == 18
+        complete_counts.append(sum("|complete|" in strata[animal] for animal in fold.test_ids))
+    assert sorted(complete_counts) == [1, 2, 2, 2, 2]
+
+
+def test_stratified_holdout_retains_rare_fitting_examples_and_exact_size():
+    strata = {f"common_{index}": "common" for index in range(10)}
+    strata.update({"rare_a": "rare", "rare_b": "rare", "singleton": "singleton"})
+    pool = list(strata)
+    selected = stratified_validation_ids(pool, strata, count=3, seed=42)
+    assert selected == stratified_validation_ids(list(reversed(pool)), strata, count=3, seed=42)
+    assert len(selected) == len(set(selected)) == 3
+    assert "singleton" not in selected
+    assert sum(strata[animal] == "rare" for animal in selected) == 1
+
+    # Even a near-total holdout keeps its requested size without duplication.
+    large = stratified_validation_ids(pool, strata, count=len(pool) - 1, seed=42)
+    assert len(large) == len(set(large)) == len(pool) - 1
+
+
+def test_modality_strata_also_support_lesion_only_tasks(experiment):
+    labels = LabelConfig(mapping={0: 0, 1: 1}, names=("Background", "Lesion"))
+    data = prepare_data(replace(experiment, labels=labels))
+    groups = modality_annotation_strata(data)
+    assert set(groups) == set(data.subjects.subject_ids)
+    assert all("|not_applicable|T1w" in group for group in groups.values())
 
 
 def test_anatomy_groups_exclude_lesion_and_require_every_scan(experiment):

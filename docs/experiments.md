@@ -68,18 +68,20 @@ Explicit/resumed memberships are kept and audited. See
 with five grouped outer folds. Each remaining pool is split into training and
 checkpoint-selection validation; every CV animal is evaluated in one outer
 holdout. Its default `FOLD_MODE="balanced"` stratifies newly generated outer
-holdouts by complete versus partial anatomical annotation coverage, excluding
-lesion annotation from this balance. An animal is complete only when all selected
+holdouts and inner validation by dataset, modality and complete versus partial
+anatomical annotation coverage, excluding lesion annotation from this balance.
+An animal is complete only when all selected
 anatomical regions are available in every scan. SHAM animals with complete anatomy
-can therefore count as complete despite unavailable lesion annotations. Both
+can therefore count as complete regardless of lesion presence. Both
 groups are spread approximately evenly across folds, preserving their cohort
 ratio without oversampling. `FOLD_MODE="random"` retains unstratified outer folds;
-checkpoint-selection validation remains random in either mode. Saved or resumed
+checkpoint-selection validation is stratified in balanced mode. Saved or resumed
 folds are loaded unchanged and take priority over generation settings.
 Per-fold complete/partial animal counts and annotation coverage are displayed
 before fitting. Optional saved
 fixed-split cohorts reserve a separate shared test set, and saved folds support
-matched comparisons and resumption. Other cohort features are not stratified.
+matched comparisons and resumption. The saved D1 and MouseFull references share
+all D1 roles and preserve cohort proportions without dropping animals.
 
 `notebook/07_ablation.ipynb` defines a complete D1 reference configuration and
 single-setting residual, attention, multiscale, head-fusion and downsampling variants. Optional loss and training
