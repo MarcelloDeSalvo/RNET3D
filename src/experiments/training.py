@@ -191,6 +191,11 @@ def callback_configuration(callback_list: Sequence[Any]) -> list[dict[str, Any]]
     records: list[dict[str, Any]] = []
     for callback in callback_list:
         settings = {name: getattr(callback, name) for name in fields if hasattr(callback, name)}
+        if type(callback).__name__ == "LearningRateScheduler":
+            schedule = callback.schedule
+            if not hasattr(schedule, "get_config"):
+                raise ValueError("Use a configurable learning-rate schedule, such as CosineEpochSchedule")
+            settings["schedule"] = {"class": type(schedule).__name__, "config": schedule.get_config()}
         if hasattr(callback, "monitor_op"):
             settings["monitor_direction"] = callback.monitor_op.__name__
         record = {"class": type(callback).__name__, "module": type(callback).__module__, "settings": settings}
@@ -429,7 +434,8 @@ def run_training(
 ) -> TrainingResult:
     """Fit a fresh fixed-split experiment using the same implementation as K-Fold.
 
-    Test animals are evaluated only after restoring validation-selected weights.
+    Test animals are evaluated only after restoring the declared selected weights:
+    best validation epoch, or the final epoch of a completed fixed budget.
     Pass resume_run to recover completed epochs in an existing matching run.
     callbacks accepts the notebook's explicit list. Instances are copied for
     this fit; relative TensorBoard/CSV paths resolve inside fold_0. Disable
@@ -438,6 +444,10 @@ def run_training(
     config = data.config
     config.validate()
     split.validate(data.subjects)
+    if config.training.fixed_epochs and split.validation:
+        raise ValueError("Fixed-epoch fitting requires empty validation; resolve the split with that policy first")
+    if not config.training.fixed_epochs and not split.validation:
+        raise ValueError("Best-checkpoint fitting requires a separate validation set")
     if config.initialization_by_fold:
         raise ValueError("Fixed-split training uses initialization; initialization_by_fold is for CV")
     from .initialization import pretraining_audit
@@ -504,9 +514,8 @@ def run_cross_validation(
 ) -> TrainingResult:
     """Connect the same factories to existing grouped cross-validation.
 
-    By default each outer fold has separate training, selection-validation and
-    holdout animals. Old two-role split files remain diagnostic selection folds.
-    Fixed-epoch leave-one-out folds instead have only train/holdout animals and
+    Validation-selected folds separate training, inner validation and holdouts.
+    Fixed-epoch folds instead have only train/holdout animals and
     omit validation during fitting; every configured epoch must finish first.
     callbacks is copied separately for each fold; no early stopping is added
     implicitly. Relative log paths are resolved within each fold's directory.
@@ -565,14 +574,15 @@ def run_cross_validation(
 
 def run_development_refit(
     data: PreparedData, *, resume_run: Path | None = None,
+    callbacks: Sequence[Any] | None = None,
 ) -> TrainingResult:
     """Refit all development animals for an already fixed epoch budget.
 
     This is deployment fitting, not an independent performance experiment.
     There is no validation/test set, adaptive schedule or early stopping.
-    The existing fold runner supplies epoch recovery, training-loss checkpoint
-    selection and inference-model export. Set the duration from inner-validation
-    results before calling; external measurements must never determine it.
+    The existing runner supplies epoch recovery, the configured final-epoch or
+    training-loss selection, and inference-model export. Predetermine the duration
+    from development experiments; external measurements must never determine it.
     """
     config = data.config
     config.validate()
@@ -601,18 +611,24 @@ def run_development_refit(
         run_dir = settings.start_run()
         write_json(run_dir / "splits.json", {"train": ids, "validation": [], "test": []})
         save_provenance(config, data, run_dir)
+        selection_policy = "minimum training loss within the fixed budget"
+        if config.training.fixed_epochs:
+            selection_policy = "last epoch of the fixed budget"
         write_json(run_dir / "refit.json", {
             "purpose": "Deployment refit; no independent evaluation",
-            "epochs": settings.epochs, "selection": "minimum training loss within the fixed budget",
+            "epochs": settings.epochs, "selection": selection_policy,
         })
-    _callback_contract([], run_dir, resume=resume)
+    callback_list: Sequence[Any] = []
+    if callbacks is not None:
+        callback_list = callbacks
+    _callback_contract(callback_list, run_dir, resume=resume)
     _save_pretraining_audits({"0": audit}, run_dir, resume=resume)
     folder = run_dir / "fold_0"
     folder.mkdir(exist_ok=resume)
     split = FoldSplit(index=0, train_ids=ids, val_ids=[])
     checkpoint = folder / "best.weights.h5"
     context = FoldContext(split=split, output_dir=folder, config=settings, checkpoint_path=checkpoint)
-    factories = ExperimentFactories(data, callback_list=[], fixed_split=False)
+    factories = ExperimentFactories(data, callback_list=callback_list, fixed_split=False)
     metadata = ExperimentMetadata(
         experiment_name=settings.model_name, model_variant=config.model.architecture,
         dataset_name="+".join(dataset.name for dataset in config.data.datasets),

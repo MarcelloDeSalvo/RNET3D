@@ -1,10 +1,10 @@
 # Shared splits and optional pretraining
 
 All mouse training, cross-validation and ablations start from scratch on the
-same frozen animal memberships. Notebook 01 uses the derived fixed fold-zero
-file; mouse CV uses every explicit three-role fold of `D1_splits_final.json`.
-The D1 reference retains every historical outer test animal; validation comes
-only from the original training pools.
+registered cohorts. Notebook 01 uses the approximately 70/20/10 final-model
+file derived from original fold 4; mouse CV uses every original two-way fold
+of `D1_splits_final.json`. Its train/test assignments are unchanged. Optional
+validation comes only from development animals.
 See [reference splits](reference_splits.md) for filenames and exact counts.
 Sharing memberships does not share weights.
 
@@ -14,6 +14,12 @@ Rat notebooks 03/04 fine-tune an explicitly chosen D1 checkpoint. Their D2
 animals are independent of D1, so one mouse checkpoint can initialize every rat
 fold. Choose that source before inspecting rat test results. The sequential
 launcher uses the predefined `RAT_SOURCE_FOLD` of its D1 reference CV run.
+
+A source without validation animals is accepted when its saved configuration
+declares fixed-budget training and its recovery record confirms the completed
+epoch budget and final selected snapshot. An incomplete fixed-budget source is
+rejected. The recovery record is included in the provenance hashes; fitting
+animals and all initialization ancestors retain the same leakage checks.
 
 Notebook 05 alone retains optional TBI backbone initialization for a separate
 fixed-mode final MouseFull model:
@@ -83,17 +89,19 @@ Similar names do not prove biological identity or independent cohorts.
 `K_FOLD_COMPATIBLE=True` in notebooks 01/03/05 runs every outer fold. Mouse
 folds start fresh; rat folds reload their independent mouse source with a fresh
 optimizer. The same switch selects CV for studies 07/07f/08. Fixed ablations
-are the default, using reference fold zero. `SPLIT_FILE` applies to fixed mode;
+are the default, using original reference fold 4. `SPLIT_FILE` applies to fixed mode;
 `FOLD_FILE` applies to CV. Resume keeps exact saved memberships and rejects a
 mode mismatch. Use a fresh run when changing mode or initialization.
 
-Callback cells remain explicit. Fixed mode uses LR reduction, TensorBoard,
-early stopping and CSV logging; standard CV uses LR reduction only. Best and
-recovery checkpoints are managed in both modes. Viewers default to `test` in
+Callback cells remain explicit. `USE_VALIDATION_FOR_SELECTION=False` uses a
+preset cosine schedule and the final epoch, with no validation passes, early
+stopping or ReduceLROnPlateau. True enables separate validation, LR reduction
+and best-validation weights; fixed mode also enables early stopping. Selected
+weights and recovery checkpoints are managed in both modes. Viewers default to `test` in
 fixed mode and `holdout` in CV; override the role when inspecting older runs.
-Notebook 03's grouped CV has independent inner validation and outer holdouts.
+Notebook 03's grouped CV defaults to the same two-way fixed-budget protocol.
 Rat notebook 04 holds out every scan of one rat, with `fixed_epochs=True`, no
-per-epoch validation, no adaptive LR/early stopping, and final-epoch evaluation.
+per-epoch validation, preset cosine LR decay, no early stopping, and final-epoch evaluation.
 New runs save the omitted animal as `holdout`; older runs retain their saved
 `validation` role and original checkpoint policy.
 

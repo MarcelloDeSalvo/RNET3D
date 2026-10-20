@@ -56,6 +56,8 @@ class RevisionSuiteConfig:
     split_seed: int = 42
     folds: int = 5
     validation_fraction: float = 0.2
+    use_validation_for_selection: bool = False
+    minimum_learning_rate: float = 1e-7
 
     d1_ids: tuple[str, ...] | None = None
     sham_ids: tuple[str, ...] | None = None
@@ -127,6 +129,10 @@ class RevisionSuiteConfig:
             raise ValueError("External evaluation requires the final release stage")
         if not 0 < self.validation_fraction < 1:
             raise ValueError("validation_fraction must be between zero and one")
+        if not isinstance(self.use_validation_for_selection, bool):
+            raise ValueError("use_validation_for_selection must be boolean")
+        if not 0 < self.minimum_learning_rate <= self.learning_rate:
+            raise ValueError("minimum_learning_rate must be positive and no greater than learning_rate")
         counts = (
             self.folds, self.d1_epochs, self.mouse_full_epochs, self.rat_epochs,
             self.interpolation_epochs, self.batch_size, self.rat_batch_size,
@@ -235,10 +241,15 @@ def experiment_configuration(
     postprocessing = PostprocessingConfig(
         clean_brain_mask=True, split_ventricles=not is_mouse_full, use_centroids=True,
     )
+    fixed_epoch_training = not settings.use_validation_for_selection
+    checkpoint_monitor = "loss"
+    if settings.use_validation_for_selection:
+        checkpoint_monitor = "val_loss"
     training = TrainingConfig(
         model_name=task, k=settings.folds, epochs=epochs, batch_size=batch_size,
         data_multiplier=settings.data_multiplier, default_callbacks=False,
         output_dir=str(output_dir), fit_kwargs={"verbose": 1, "workers": 0},
+        monitor=checkpoint_monitor, fixed_epochs=fixed_epoch_training,
     )
     evaluation_patches = EvaluationPatchConfig(patches_per_scan=3)
     if is_rat:

@@ -4,6 +4,7 @@ import json
 import ast
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -225,7 +226,7 @@ def test_study_forwards_same_explicit_list_and_records_settings(experiment, tmp_
         ablation.run_ablation(data, variants, study_dir=folder, split=split, callbacks=callbacks, resume=True)
 
 
-def test_visible_notebook_lists_match_original_single_and_cv_policies():
+def test_visible_notebook_lists_expose_both_checkpoint_policies():
     root = Path(__file__).resolve().parents[1] / 'notebook'
     for path in root.glob('0*.ipynb'):
         cells = json.loads(path.read_text(encoding='utf-8'))['cells']
@@ -242,31 +243,29 @@ def test_visible_notebook_lists_match_original_single_and_cv_policies():
         config = configs[0]
         assert 'default_callbacks=False' in config
         source = next(source for source in sources if 'callbacks: list[tf.keras.callbacks.Callback]' in source)
-        namespace = {'MODE': 'fixed_split', 'K_FOLD_COMPATIBLE': False}
-        exec(source, namespace)
-        callbacks = namespace['callbacks']
-        if path.name.startswith('04_'):
-            assert callbacks == []
-            assert 'monitor="loss"' in config
-            assert 'fixed_epochs=True' in config
-        else:
-            assert callbacks[0].factor == 0.5 and callbacks[0].patience == 10 and callbacks[0].min_lr == 1e-7
-        if path.name.startswith(('02_', '06_')):
-            assert len(callbacks) == 1
-        elif not path.name.startswith('04_'):
-            assert [type(callback).__name__ for callback in callbacks] == [
-                'ReduceLROnPlateau', 'TensorBoard', 'EarlyStopping', 'CSVLogger',
-            ]
-            assert callbacks[1].histogram_freq == 1
-            assert callbacks[2].patience == 20
-        if path.name.startswith(('07_', '07f_', '08_')):
-            namespace['MODE'] = 'cross_validation'
+        assert 'USE_VALIDATION_FOR_SELECTION' in config
+        assert 'fixed_epochs=fixed_epoch_training' in config
+        for use_validation in (False, True):
+            namespace = {
+                'MODE': 'fixed_split', 'K_FOLD_COMPATIBLE': False,
+                'USE_VALIDATION_FOR_SELECTION': use_validation,
+                'MINIMUM_LEARNING_RATE': 1e-7,
+                'config': SimpleNamespace(learning_rate=0.001, training=SimpleNamespace(epochs=100)),
+            }
             exec(source, namespace)
-            assert len(namespace['callbacks']) == 1
-        if path.name.startswith(('01_', '03_', '05_')):
-            namespace['K_FOLD_COMPATIBLE'] = True
-            exec(source, namespace)
-            assert len(namespace['callbacks']) == 1
+            callbacks = namespace['callbacks']
+            names = [type(callback).__name__ for callback in callbacks]
+            if use_validation:
+                assert 'ReduceLROnPlateau' in names
+                assert 'LearningRateScheduler' not in names
+                assert callbacks[0].monitor == 'val_loss'
+            else:
+                assert 'LearningRateScheduler' in names
+                assert 'ReduceLROnPlateau' not in names and 'EarlyStopping' not in names
+                schedule = callbacks[0].schedule
+                assert schedule(0) == pytest.approx(0.001)
+                assert schedule(99) == pytest.approx(1e-7)
+            assert 'CSVLogger' in names
         calls = [source for source in sources if any(name in source for name in [
             'result = run_training(', 'result = run_cross_validation(',
             'study = run_ablation(', 'study = run_model_comparison(',
@@ -286,10 +285,17 @@ def test_rat_notebook_keeps_final_weights_without_using_loss_minima(tmp_path):
     tree = ast.parse(config_source)
     statement = next(node for node in tree.body if isinstance(node, ast.Assign)
                      and any(isinstance(target, ast.Name) and target.id == 'training' for target in node.targets))
-    namespace = {'TrainingConfig': TrainingConfig, 'TRAINING_SEED': 42, 'REPO_ROOT': tmp_path}
+    namespace = {
+        'TrainingConfig': TrainingConfig, 'TRAINING_SEED': 42, 'REPO_ROOT': tmp_path,
+        'checkpoint_monitor': 'loss', 'fixed_epoch_training': True,
+    }
     exec(compile(ast.Module(body=[statement], type_ignores=[]), str(notebook_path), 'exec'), namespace)
     assert namespace['training'].epochs == 100
     config = replace(namespace['training'], epochs=3)
+    namespace.update({
+        'USE_VALIDATION_FOR_SELECTION': False, 'MINIMUM_LEARNING_RATE': 1e-7,
+        'config': SimpleNamespace(learning_rate=0.001, training=config),
+    })
     callback_source = next(source for source in sources if 'callbacks: list[tf.keras.callbacks.Callback]' in source)
     exec(callback_source, namespace)
     assert config.fixed_epochs and config.monitor == 'loss' and not config.default_callbacks
@@ -301,9 +307,11 @@ def test_rat_notebook_keeps_final_weights_without_using_loss_minima(tmp_path):
             split=FoldSplit(index=index, train_ids=['rat_train'], val_ids=[], test_ids=['rat_held_out']),
             output_dir=folder, config=config, checkpoint_path=folder / 'best.weights.h5',
         )
-        callbacks = _build_callbacks(context, lambda context: namespace['callbacks'])
-        assert [type(callback).__name__ for callback in callbacks] == ['ModelCheckpoint']
-        assert not callbacks[0].save_best_only
+        callbacks = _build_callbacks(context, lambda context: _copy_callbacks(namespace['callbacks'], context))
+        assert [type(callback).__name__ for callback in callbacks] == [
+            'LearningRateScheduler', 'CSVLogger', 'ModelCheckpoint',
+        ]
+        assert not callbacks[-1].save_best_only
         model = tf.keras.Sequential([tf.keras.layers.Dense(1, use_bias=False, input_shape=(1,))])
         model.compile(optimizer=tf.keras.optimizers.SGD(0.001), loss='mse')
         model.stop_training = False
@@ -317,13 +325,17 @@ def test_rat_notebook_keeps_final_weights_without_using_loss_minima(tmp_path):
             logs = {'loss': training_loss, 'val_loss': validation_curve[epoch]}
             state.on_epoch_begin(epoch)
             for callback in callbacks:
+                callback.on_epoch_begin(epoch)
+            for callback in callbacks:
                 callback.on_epoch_end(epoch, logs)
             state.on_epoch_end(epoch, logs)
         selected_epochs.append(_selected_epoch(state.history, config))
         model.load_weights(str(context.checkpoint_path))
         np.testing.assert_array_equal(model.layers[0].get_weights()[0], [[3.0]])
-        assert float(tf.keras.backend.get_value(model.optimizer.learning_rate)) == pytest.approx(0.001)
+        assert float(tf.keras.backend.get_value(model.optimizer.learning_rate)) == pytest.approx(1e-7)
         assert state.record['selected_metric'] == 1.5
+        for callback in callbacks:
+            callback.on_train_end()
     assert selected_epochs == [2, 2]
 
 

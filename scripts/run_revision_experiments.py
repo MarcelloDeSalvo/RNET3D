@@ -20,7 +20,7 @@ from src.experiments.revision_suite import run_revision_suite
 DATA_ROOT: Path = Path("D:/Other files/TESI_CNN/MANUSCRIPT_DATASET/normalized")
 REFERENCE: Path = REPOSITORY / "example/RARE/TBI_fm_19_49/Anat/TBI_fm_19_49_N4.nii.gz"
 OUTPUT_ROOT: Path = REPOSITORY / "results/revision_suite"
-RUN_NAME: str = "revision_modality_balanced_v2"
+RUN_NAME: str = "revision_original_two_way_v1"
 
 # None selects all animals in that cohort. Use canonical animal IDs, not scans.
 D1_IDS: tuple[str, ...] | None = None
@@ -35,12 +35,14 @@ FOLDS_FILE: Path | None = None
 ANCHOR_SPLIT_FILE: Path | None = None
 RAT_FOLDS_FILE: Path | None = None
 REFERENCE_SPLITS: Path | None = DATA_ROOT.parent / "D1_splits_final.json"
-REFERENCE_FOLD: int = 0  # Fixed studies reuse this outer fold's train/validation/test roles.
+REFERENCE_FOLD: int = 4  # Original fold with eight T2w animals in its outer test.
 ABLATION_MODE: Literal["fixed_split", "cross_validation"] = "fixed_split"
 FOLDS: int = 5
 SPLIT_SEED: int = 42
 TRAINING_SEEDS: tuple[int, ...] = (42,)
 INNER_VALIDATION_FRACTION: float = 0.2
+USE_VALIDATION_FOR_SELECTION: bool = False
+MINIMUM_LEARNING_RATE: float = 1e-7  # Cosine schedule endpoint; independent of holdout results.
 
 # Full-study budgets. Validation/test always cover every selected sample.
 D1_EPOCHS: int = 100
@@ -96,6 +98,8 @@ def configuration() -> RevisionSuiteConfig:
         reference_splits=REFERENCE_SPLITS, reference_fold=REFERENCE_FOLD,
         ablation_mode=ABLATION_MODE,
         seeds=TRAINING_SEEDS, validation_fraction=INNER_VALIDATION_FRACTION,
+        use_validation_for_selection=USE_VALIDATION_FOR_SELECTION,
+        minimum_learning_rate=MINIMUM_LEARNING_RATE,
         d1_epochs=D1_EPOCHS, mouse_full_epochs=MOUSE_FULL_EPOCHS, rat_epochs=RAT_EPOCHS,
         interpolation_epochs=INTERPOLATION_EPOCHS, interpolation_steps=INTERPOLATION_STEPS,
         interpolation_orders=INTERPOLATION_ORDERS, data_multiplier=DATA_MULTIPLIER,
@@ -162,12 +166,11 @@ def main() -> None:
     # LR changes. Interpolation pilots and deployment refits use no LR callback.
     import tensorflow as tf
 
-    callbacks = [
-        tf.keras.callbacks.ReduceLROnPlateau(
-            monitor="val_loss", factor=0.5, patience=10, min_lr=1e-7, verbose=1,
-        ),
-        tf.keras.callbacks.CSVLogger(filename="training.csv", append=True),
-    ]
+    callbacks = [tf.keras.callbacks.CSVLogger(filename="training.csv", append=True)]
+    if USE_VALIDATION_FOR_SELECTION:
+        callbacks.append(tf.keras.callbacks.ReduceLROnPlateau(
+            monitor="val_loss", factor=0.5, patience=10, min_lr=MINIMUM_LEARNING_RATE, verbose=1,
+        ))
     plan_only: bool = args.plan_only or (not args.run and not args.quick)
     folder = run_revision_suite(
         settings, mode=mode, callbacks=callbacks, resume=args.resume, plan_only=plan_only,

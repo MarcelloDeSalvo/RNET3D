@@ -1,234 +1,100 @@
 # Experiment notebooks
 
-Each experiment has its own complete, editable configuration. Shared modules
-own data loading, preprocessing, splits, fitting, recovery and evaluation.
-Use the **rnet** kernel; new notebooks keep training disabled until enabled.
-Your executed TBI notebook retains its existing settings and outputs.
+Use the **rnet** kernel. Every training notebook exposes its complete configuration,
+actual Keras callbacks, data preview, recovery settings and evaluation options.
+Shared modules implement loading, preprocessing, training and reporting.
 
-For sequential execution without notebook cells, use
-[run_revision_experiments.py](../scripts/run_revision_experiments.py).
-The [suite guide](../docs/revision_suite.md) describes shared folds, a small draft
-mode, recovery and the compact paper workbook with four sheets.
+## Training and split policy
 
-Mouse training and study notebooks generally share `DATA_ROOT.parent / "D1_splits_final.json"`
-as their default animal plan. Fixed studies use reference fold zero; K-Fold uses
-all five folds. The JSON explicitly stores train/validation/test roles, balancing
-T1w/T2w proportions and anatomical annotation coverage. Validation is drawn only
-from each outer training pool. MouseFull adds SHAM folds while retaining every
-D1 role. See the [reference split guide](../docs/reference_splits.md) for overrides
-and exact current counts. Rats retain separate animal folds; saved-model evaluation
-uses the checkpoint's saved memberships. Ablations default to fixed splits.
+`USE_VALIDATION_FOR_SELECTION` is visible in every notebook that trains models:
 
-MouseFull notebooks 06/07f use `MouseFull_5fold_balanced_splits.json` instead:
-the dedicated D1+D3 plan balances modality and anatomy coverage within each cohort and places
-the nine complete D1 animals into outer tests as 2/2/2/2/1. Notebook 06 uses every
-fold; 07f defaults to its fixed fold zero, with full CV optional. Its D1 roles
-match the updated D1 reference. Previous reference files are in `split_backups/`.
-These models train from scratch, with a separate
-07f study folder for the new memberships.
+- **False:** train without validation passes, use a preset cosine learning-rate
+  schedule, and evaluate final-epoch weights after the entire configured budget.
+  ReduceLROnPlateau and early stopping are disabled. Test animals never select
+  epochs or learning rates.
+- **True:** reserve separate validation from development animals, reduce LR using
+  `val_loss`, and evaluate the best validation checkpoint. Fixed mode also enables
+  early stopping. The outer test never becomes fitting-time validation.
 
-MRI workflows share `example/RARE/TBI_fm_19_49/Anat/TBI_fm_19_49_N4.nii.gz`
-as their orientation reference. Its voxel axes are **R, I, A**: LR is axis 0,
-IS is axis 1, and AP is axis 2. Reorientation preserves world coordinates; it
-does not resize images to the reference shape. New configuration cells explicitly
-set flipping to 0.5 for D1 training/studies and rat fine-tuning/CV, and 0.0 for MouseFull.
-Validation/inference use no random flips. Ipsilateral/contralateral labels are
-relative to the lesion/craniotomy and retain their IDs under a paired reflection.
+`INITIAL_LEARNING_RATE`, `MINIMUM_LEARNING_RATE` and `training.epochs` define the
+cosine schedule. Its parameters are saved and checked on resume. Callback lists
+remain explicit; the runner additionally manages selected/recovery checkpoints.
+Recovery works every epoch, including in fixed-budget mode. Scientific test
+evaluation of that mode requires the complete budget.
 
-Every training/study notebook exposes actual Keras callbacks in a separate
-configuration cell and passes the list explicitly to training. Fixed-split runs
-use LR reduction, TensorBoard histograms, early stopping and CSV logging.
-Notebooks 01/03/05 also expose `K_FOLD_COMPATIBLE=False`: enable it to run every
-outer fold with the same complete configuration. Studies 07/07f/08 expose the
-same boolean to select CV. The corresponding callback cell then defaults to
-LR reduction only. Every mouse fold starts from scratch.
-Standard K-Fold uses only LR reduction by default, with no early stopping; study
-notebooks follow their selected `MODE`. Rat notebook 04 uses `fixed_epochs=True`:
-no fitting-time validation or adaptive callbacks, and final-epoch weights for its
-outer holdout. Edit the visible settings directly to change the protocol.
-Relative logging paths are scoped to each run/fold. Fresh callback copies prevent
-state sharing across folds/seeds/variants, and saved `callbacks.json` settings
-are checked on resume. The runner handles best/recovery checkpoints separately
-and restores best weights before evaluation, so EarlyStopping itself uses
-`restore_best_weights=False` to keep recovery weights and optimizer state aligned.
+D1 CV restores the exact memberships from the supplied original split. MouseFull
+extends them with D3 holdouts balanced for anatomy coverage. These defaults use
+only training/test animals. The final-model fixed files instead target 70/20/10,
+using a test subset of original fold 4. See [reference splits](../docs/reference_splits.md)
+for exact memberships, modality counts, annotation coverage, backups and filenames.
 
-| Notebook | Responsibility | Status |
-|---|---|---|
-| [01_tbi_mouse_training.ipynb](01_tbi_mouse_training.ipynb) | D1 fixed reference training and volume evaluation; source for independent rat fine-tuning, optional full CV | Implemented; `K_FOLD_COMPATIBLE` switch |
-| [02_tbi_mouse_kfold.ipynb](02_tbi_mouse_kfold.ipynb) | D1 grouped CV with separate checkpoint validation and outer holdouts | Implemented |
-| [03_rat_finetuning.ipynb](03_rat_finetuning.ipynb) | D2 fine-tuning and independent evaluation; optional grouped outer CV | Implemented; `K_FOLD_COMPATIBLE` switch |
-| [04_rat_kfold.ipynb](04_rat_kfold.ipynb) | Fixed 100-epoch leave-one-rat-out fine-tuning; final weights and independent longitudinal holdouts | Implemented |
-| [05_mouse_full_training.ipynb](05_mouse_full_training.ipynb) | D1+D3 training and volume evaluation, eleven classes and partial labels; optional full CV | Implemented; `K_FOLD_COMPATIBLE` switch |
-| [06_mouse_full_kfold.ipynb](06_mouse_full_kfold.ipynb) | D1+D3 grouped CV with anatomy-balanced outer folds and separate checkpoint validation | Implemented |
-| [07_ablation.ipynb](07_ablation.ipynb) | Matched residual, attention, multiscale, head-fusion and downsampling ablations; optional loss/training rows | Implemented |
-| [07f_ablation.ipynb](07f_ablation.ipynb) | MouseFull component/classifier ablations with eleven classes; optional v1/v3 loss comparison | Implemented |
-| [08_unet_comparison.ipynb](08_unet_comparison.ipynb) | Matched 3DR-Net and standard 3D U-Net runs | Implemented |
-| [09_inference_evaluation.ipynb](09_inference_evaluation.ipynb) | Stopped-checkpoint/export inference, physical metrics and interactive GT comparison | Implemented |
-| [10_revision_results.ipynb](10_revision_results.ipynb) | Animal uncertainty, native patch tables, costs, coverage/failure review and manuscript exports | Implemented; independent D4 manual-volume analysis deferred |
+## Main notebooks
 
-The inference notebook accepts a stopped/completed `RUN_DIR` and selects its
-saved best weights and cohort. Set `EVALUATION_ROLE="holdout"` for ordinary CV,
-or `"validation"` for historical rat CV. Explicit experiment/checkpoint files
-and external cohorts remain supported. Set `CHECKPOINT_KIND="model"` for an
-exported model, or `"weights"` for fitting weights, before enabling
-`RUN_EVALUATION`. Revision results consume explicit
-saved per-scan CSVs, preserving annotation availability and metric statuses.
-Set `METRIC_SOURCES` before enabling `RUN_ANALYSIS`; exports use a fresh folder.
-Both workflows preserve biological animal grouping and use native Plotly displays.
+| Notebook | Default role and split |
+|---|---|
+| [01_tbi_mouse_training.ipynb](01_tbi_mouse_training.ipynb) | D1 final model: 79 train / 22 validation / 11 test; validation selection enabled |
+| [02_tbi_mouse_kfold.ipynb](02_tbi_mouse_kfold.ipynb) | Original D1 five-fold CV: 89–90 train / 22–23 test; cosine schedule and final epoch |
+| [03_rat_finetuning.ipynb](03_rat_finetuning.ipynb) | D2 fixed fine-tuning: 3 train / 1 validation / 1 test rat; choose a mouse checkpoint first |
+| [04_rat_kfold.ipynb](04_rat_kfold.ipynb) | Leave one complete rat out: 4 train / 1 test; cosine schedule and final epoch |
+| [05_mouse_full_training.ipynb](05_mouse_full_training.ipynb) | MouseFull final model: 139 train / 39 validation / 20 test; validation selection enabled |
+| [06_mouse_full_kfold.ipynb](06_mouse_full_kfold.ipynb) | Original D1 plus balanced D3 CV: 158–159 train / 39–40 test; cosine schedule and final epoch |
+| [07_ablation.ipynb](07_ablation.ipynb) | D1 matched component ablations on original fold 4: 90 train / 22 test |
+| [07f_ablation.ipynb](07f_ablation.ipynb) | MouseFull component/classifier/masking controls on matching fold 4: 159 train / 39 test |
+| [08_unet_comparison.ipynb](08_unet_comparison.ipynb) | Matched 3DR-Net/U-Net comparison on original D1 fold 4 |
+| [09_inference_evaluation.ipynb](09_inference_evaluation.ipynb) | Explicit saved run/checkpoint; no new split or training |
+| [10_revision_results.ipynb](10_revision_results.ipynb) | Explicit saved metric, classifier, patch and timing sources; manuscript tables |
 
-The U-Net comparison reuses the study executor and the existing builders with
-matched widths, preprocessing, loss, splits and seeds. It supports fixed splits
-and grouped outer CV. Classifiers are disabled for both models because the
-existing U-Net does not support that head; neither model's dropout is changed.
+01/03/05 and studies 07/07f/08 expose `K_FOLD_COMPATIBLE`. Enabling it runs every
+outer fold. Mouse CV and ablations start from scratch; rat folds reload the same
+predefined independent mouse source. Notebook 05 alone retains optional TBI
+backbone initialization for its separate fixed-mode final model. This requires
+matching fixed memberships and the existing source/target leakage checks.
 
-Rat CV retains the old animal split: train on four rats and evaluate the fifth.
-New runs use a fixed LR and epoch budget, with no per-epoch validation or
-loss-based epoch selection. The final epoch is evaluated on the omitted rat,
-saved as `holdout`. Older runs retain their original roles and selection policy. Evaluation
-uses five saved center-biased patches per scan. Every fold starts from the same
-explicitly chosen mouse checkpoint and a fresh optimizer.
+Study mode `fixed_split` means one original reference CV fold; it does not use
+the smaller final-model test subset. All variants/seeds within a study reuse its
+animal memberships and deterministic evaluation patches.
 
-MouseFull preserves the old source-label/channel order and SHAM/TBI classifier.
-All mouse training, CV and ablations start from scratch on the shared reference
-memberships. Notebook 01 uses `D1_fixed_split_from_kfold_fold_0.json`; the
-five-fold source `D1_splits_final.json` is unchanged. Only notebook 05 retains
-optional TBI feature transfer for a separate fixed-mode final model:
-`USE_TBI_PRETRAINING=False`, `TBI_RUN`, `TBI_FOLD` and `FREEZE_BACKBONE`.
-Enabling it transfers features while initializing fresh output heads and a
-fresh optimizer; its run name gains `_tbi_pretrained`. It cannot be combined
-with CV. Source fitting must exclude target validation/test animals; source
-selection-validation can be shared with target validation but must exclude
-target tests. Source ancestry is audited too. See
-[pretraining splits](../docs/pretraining_splits.md). Rats retain mouse transfer;
-their independent D2 animals can share one predefined D1 checkpoint across folds.
-Unavailable classes follow normalized annotation metadata and use the corrected
-logits-based loss. Confirmed cross-cohort duplicates can be grouped explicitly;
-the notebook does not infer biological identity from similar original IDs.
-Notebook 06 defaults to balancing complete/partial anatomical coverage across
-new outer folds, excluding lesion availability. Set `FOLD_MODE="random"` for
-unstratified generation; saved/resumed folds remain unchanged.
+## Inspection and reporting
 
-The diagnostic notebooks are:
+| Notebook | Purpose and input |
+|---|---|
+| [plot_training_results.ipynb](plot_training_results.ipynb) | Plotly loss/metric curves, combined fold validation curves when available, condition/modality boxplots, hover IDs/strain, exports |
+| [check_interpolation_sensitiity.ipynb](check_interpolation_sensitiity.ipynb) | Matched D1 interpolation study on original reference fold 4; configurable orders and budget; no validation ranking when validation is disabled |
+| [check_preprocessing.ipynb](check_preprocessing.ipynb) | One scan, one preprocessing/augmentation per cell, editable combined pipeline |
+| [check_postprocessing.ipynb](check_postprocessing.ipynb) | Brain cleanup, ventricle splitting and restoration of original IDs on an explicit example |
+| [check_partial_label_loss_gradient.ipynb](check_partial_label_loss_gradient.ipynb) | Synthetic gradient/masking checks; no animal split |
+| [check_attention.ipynb](check_attention.ipynb) | Saved-model attention, classifier Grad-CAM and segmentation Grad-CAM |
+| [check_feature_space.ipynb](check_feature_space.ipynb) | Saved encoder features, animal/scan aggregation and PCA/optional UMAP |
+| [check_dataset_volumes.ipynb](check_dataset_volumes.ipynb) | Selected normalized cohort, native annotation volumes, SHAM ventricle ratios and lesion-volume corrections |
+| [check_inter_rater.ipynb](check_inter_rater.ipynb) | Explicit paired-reader masks, spatial metrics and volume agreement/ICC |
 
-- [plot_training_results.ipynb](plot_training_results.ipynb): choose a single-run
-  or K-Fold folder, inspect interactive Plotly loss curves, choose an epoch metric
-  with `HISTORY_METRIC` for training/validation curves, and plot a chosen
-  full-volume test metric by condition and modality. A compact K-Fold overlay
-  compares validation curves on one set of axes; `FOLD_VALIDATION_KEY` can select
-  `val_loss` or a saved validation metric. Hover shows normalized and
-  original IDs plus strain (using saved protocol codes when strain is absent);
-  legends toggle curves and conditions. Animal averages retain separate cohorts
-  and evaluation roles. Exports offline HTML/JSON figures, raw/animal CSVs,
-  coverage and settings; optional PNG/PDF/SVG needs Kaleido. An explicit metrics-file
-  override supports stopped-checkpoint reports.
-- [check_interpolation_sensitiity.ipynb](check_interpolation_sensitiity.ipynb):
-  a short D1 training comparison of MRI spline orders 0/1/2/3 with shared animals,
-  seeds, evaluation patches and original model widths. Includes a grid audit,
-  validation/test reports, T1w/T2w summaries and optional exports. Defaults to
-  ten epochs/four training batches per epoch, with training disabled. See the
-  [interpolation guide](../docs/interpolation_sensitivity.md).
-- [check_preprocessing.ipynb](check_preprocessing.ipynb): one random scan, one
-  preprocessing/augmentation per short cell, and an editable combined pipeline
-  at the end. MRI/ROI/brain overlays share the RIA reference; changes in shape,
-  spacing, intensities and categorical IDs are displayed after each operation.
-  Blur/noise use the corrected native grid with explicit units; the combined
-  example applies them before linear target resampling and affine augmentation.
-- [check_postprocessing.ipynb](check_postprocessing.ipynb): a visible synthetic
-  example by default, with normalized-scan and explicit-file options. Separate
-  cells demonstrate ventricle separation, brain hole filling, small-object removal
-  and restoration of original ROI IDs. The last cell uses the production helper.
-- [check_partial_label_loss_gradient.ipynb](check_partial_label_loss_gradient.ipynb):
-  version-2 foreground loss/gradient comparisons, missing-logit invariance,
-  background competition and known-negative false-positive penalties.
+Inspection notebooks do not define a training split. Saved-model exploration
+retains the selected model's provenance; it is not an independent test simply
+because a scan is displayed. Notebook 09 defaults to `test`; choose `holdout` for
+CV results. No saved run adopts newly generated reference memberships.
 
-Diagnostic plots use native Plotly zoom/hover. Set `VIEW_AXIS` and
-`VIEW_POSITION`, then rerun a step to view another slice. Before/after panels
-use the same relative position within their own grids; they do not imply a
-shared physical slice after cropping. These notebooks do not train models or
-overwrite dataset files. N4 is optional because normalized inputs already use N4.
+## Shared image and evaluation conventions
 
-Every full-volume workflow explicitly configures `PostprocessingConfig` and
-restores original annotation IDs. Brain masks use historical hole filling and
-small-object removal. D1/rat merged ventricles are separated before restoring
-contra/ipsi IDs 3/13; MouseFull keeps its predicted sides. Ground truth retains
-the selected source annotations. The settings are visible both in the complete
-training configuration and in the independent best-checkpoint cell. Notebook 09
-automatically recognizes the merged vocabulary and exposes the same controls.
-Exported `prediction_labels.json` tells the viewer which IDs and names to use;
-select an original annotation ID with `VIEW_REGION` or `CHECKPOINT_REGION`.
-Previously saved masks without that file still display their old model IDs;
-evaluate their checkpoint again for postprocessed original-ID exports.
+The orientation reference is
+`example/RARE/TBI_fm_19_49/Anat/TBI_fm_19_49_N4.nii.gz`, with R/I/A voxel axes.
+MRI uses linear interpolation; categorical masks use nearest neighbour. Paired
+spatial transforms keep MRI and masks aligned. D1/rats retain LR augmentation;
+MouseFull disables flipping. Training uses center-biased random crops; evaluation
+coordinates are deterministic and saved separately from the training multiplier.
 
-Training/study notebooks 01–08 end with a saved-prediction viewer: MRI, mapped
-ground truth and prediction share the reference orientation and class colors.
-Native Plotly menus select scans/planes, and a slider selects slices. Use the
-manifest row indices to load other animals, timepoints or folds; study notebooks
-also select a variant/seed. Missing annotations remain explicit. `VIEW_RUN` can
-inspect a matching existing run without fitting. Predictions must have been
-saved during evaluation; no inference is repeated. New rat CV displays independent
-outer holdouts; historical rat validation predictions remain available by role.
+Full-volume evaluation explicitly postprocesses and restores original annotation
+IDs. D1/rat merged ventricles use centroid splitting; MouseFull predicts its
+separate sides directly. Ground truth is never postprocessed from predictions.
+Thresholds and morphology settings remain visible in each configuration.
 
-The final **Evaluate the best checkpoint after stopping training** cell in each
-training/study notebook works independently of its interrupted `result`. Set
-`CHECKPOINT_RUN`, choose a fold and enable `RUN_CHECKPOINT_EVALUATION`. After a
-kernel restart, run only repository setup and that final cell. Saved settings
-and cohorts are loaded automatically; no fit or optimizer restoration occurs.
-Notebook 04 requires its complete fixed epoch budget before holdout evaluation.
-When available, the committed selected-weight snapshot is used instead of a
-possibly interrupted best-file overwrite. Predictions/metrics go to a fresh
-folder outside the training run; checkpoint history and completion state are
-unchanged. A saved epoch is required. Notebook 09 can reopen those outputs via
-`VIEW_EVALUATION_DIR` without running inference again.
+MouseFull uses gradient-fix loss v1 and available empty lesion targets for verified
+SHAM scans. Reports include native-patch and postprocessed full-volume metrics,
+brain/region summaries, anatomy-only coverage, condition/modality/timepoint
+subgroups and auxiliary-classifier confusion matrices when that head is active.
+No validation rows or curves are invented for two-way training.
 
-Checkpoint-only evaluation also explicitly uses the shared RARE reference,
-including older checkpoints, as requested. Older weights trained with another
-orientation receive a changed input convention; evaluation provenance records
-both references. Reopening saved results can change the viewing orientation
-without recomputing the stored metrics. Resume still requires the saved training
-configuration; changing reference/augmentation settings defines a new run.
-
-Validation/test patch coverage is configured separately from training repetitions
-with `EvaluationPatchConfig`. Saved coordinates are shared across epochs and study
-members. Each training notebook also exposes the three task loss weights. D1/rat
-full-volume evaluation and checkpoint cells use centroid ventricle separation;
-MouseFull preserves its already separate labels. Missing or small lesions retain
-the documented voxel-wise fallback.
-
-MouseFull 05/06/07f default to loss v1, with available empty SHAM lesion targets.
-07f exposes reference, variant-specific and fold-specific TBI sources.
-Architectural variants need matching source backbones; no-classifier can reuse
-the reference. Final result sections display native patch measurements and
-full-volume brain/region scores. Runs/studies export `evaluation_metrics.xlsx`
-with separate sheets, alongside CSV tables. Checkpoint cells and 09 provide the
-same measurements without fitting. See
-[the configuration, leakage and evaluation guide](../docs/reviewer_workflow_steps_1_3.md).
-
-Auxiliary classifier decisions are collected during the same full-volume pass.
-Run/study/checkpoint workbooks include animal-level rates, confidence intervals
-and confusion counts, plus independent SHAM lesion-volume diagnostics. Notebook
-10 reads explicit `CLASSIFIER_FILES` and displays a Plotly confusion matrix without
-retraining. Classifier decisions do not suppress lesions.
-See [classifier evaluation](../docs/classifier_evaluation.md).
-
-Revision notebook 10 also accepts explicit `PATCH_SOURCES` and `COST_SOURCES`.
-Its export combines CSVs and `revision_tables.xlsx`, retaining patch, full-volume
-and timing measurements as separate statistical units. Coverage and failure
-review tables preserve missing/empty statuses and never remove low-scoring
-animals. Input SHA256 hashes make the selected evidence auditable. The additional
-baseline experiments and independent D4 manual-volume analysis remain deferred.
-See [revision reporting](../docs/revision_reporting.md).
-
-New full-volume workbooks also separate anatomy-only versus lesion/brain-inclusive
-scores, condition-specific annotation coverage, acquisition/timepoint subgroups,
-participant/split counts and structure-size measurements. Notebook 10 displays
-these tables and a score-versus-GT-volume plot. Older result sources can attach
-an explicit metadata manifest; unknown metadata is not guessed.
-
-- [check_dataset_volumes.ipynb](check_dataset_volumes.ipynb): select any normalized
-  Dx folder for native annotated volumes, SHAM ventricle ratios, distributions,
-  and unclipped corrected/uncorrected lesion-volume exports.
-- [check_inter_rater.ipynb](check_inter_rater.ipynb): explicit paired-reader mask
-  manifests, spatial agreement and animal-level volume ICC, with the common RIA
-  reference for paired displays. Independent-reader masks are required.
-
-See [cohort and annotation reports](../docs/cohort_annotation_reports.md).
+For sequential execution use [run_revision_experiments.py](../scripts/run_revision_experiments.py).
+The [suite guide](../docs/revision_suite.md) explains planning, draft execution,
+recovery and compact paper exports. Existing user configuration edits and stored
+notebook outputs are retained; rerun configuration and selection cells for a fresh
+experiment after changing the protocol.

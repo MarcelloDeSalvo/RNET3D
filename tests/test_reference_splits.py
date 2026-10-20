@@ -43,6 +43,15 @@ def test_old_holdouts_are_preserved_and_inner_validation_uses_only_old_train(ref
     assert reference_file.read_bytes() == original
 
 
+def test_original_two_way_mode_keeps_every_training_and_test_assignment(reference_file):
+    saved = json.loads(reference_file.read_bytes())
+    folds = read_selection(reference_file, use_validation=False)
+    for previous, current in zip(saved, folds):
+        assert current.train_ids == [animal.replace("D1_", "D1/", 1) for animal in previous["train"]]
+        assert current.test_ids == [animal.replace("D1_", "D1/", 1) for animal in previous["val"]]
+        assert current.val_ids == []
+
+
 def test_explicit_three_role_export_preserves_resolved_roles_without_resplitting(reference_file, tmp_path):
     """Materializing the existing interpretation must not reduce outer tests."""
     original = json.loads(reference_file.read_bytes())

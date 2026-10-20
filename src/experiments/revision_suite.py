@@ -191,6 +191,7 @@ def prepare_suite(
     if selected_folds is not None:
         supplied = read_selection(
             selected_folds, seed=settings.split_seed, validation_fraction=settings.validation_fraction,
+            use_validation=settings.use_validation_for_selection,
         )
         if not isinstance(supplied, list):
             raise ValueError("folds_file requires outer CV folds")
@@ -199,6 +200,7 @@ def prepare_suite(
         data["d1"], data["mouse_full"], data.get("rats"), k=k, seed=settings.split_seed,
         validation_fraction=settings.validation_fraction, folds_file=selected_folds,
         anchor_split_file=settings.anchor_split_file, rat_folds_file=settings.rat_folds_file,
+        use_validation=settings.use_validation_for_selection,
     )
     if not 0 <= settings.rat_source_fold < len(splits.d1):
         raise ValueError("rat_source_fold must identify a source fold")
@@ -360,21 +362,39 @@ def _execute_job(plan: SuitePlan, job: SuiteJob, callbacks: Sequence[Any]) -> Pa
     resume_run: Path | None = None
     if (folder / "experiment.json").is_file():
         resume_run = folder
+    selected_callbacks = list(callbacks)
+    if job.group == "interpolation":
+        selected_callbacks = []
+    if job.kind == "refit" and not config.training.fixed_epochs:
+        selected_callbacks = []
+    if config.training.fixed_epochs:
+        import tensorflow as tf
+        from .schedules import CosineEpochSchedule
+
+        # All rates are determined by this job's epoch budget, never its holdout.
+        selected_callbacks = [
+            callback for callback in selected_callbacks
+            if not isinstance(callback, (tf.keras.callbacks.ReduceLROnPlateau, tf.keras.callbacks.EarlyStopping))
+        ]
+        schedule = CosineEpochSchedule(
+            initial_learning_rate=config.learning_rate,
+            minimum_learning_rate=plan.settings.minimum_learning_rate,
+            epochs=config.training.epochs,
+        )
+        scheduler = tf.keras.callbacks.LearningRateScheduler(schedule=schedule, verbose=1)
+        selected_callbacks.append(scheduler)
     if job.kind == "fixed_split":
         selected = getattr(plan.splits, job.task)[plan.settings.reference_fold]
         train_ids = tuple(selected.train_ids)
         validation_ids = tuple(selected.val_ids)
         test_ids = tuple(selected.test_ids)
         split = SubjectSplit(train=train_ids, validation=validation_ids, test=test_ids)
-        selected_callbacks = callbacks
-        if job.group == "interpolation":
-            selected_callbacks = []
         result = run_training(data, split, resume_run=resume_run, callbacks=selected_callbacks)
     elif job.kind == "refit":
-        result = run_development_refit(data, resume_run=resume_run)
+        result = run_development_refit(data, resume_run=resume_run, callbacks=selected_callbacks)
     else:
         folds = getattr(plan.splits, job.task)
-        result = run_cross_validation(data, folds=folds, resume_run=resume_run, callbacks=callbacks)
+        result = run_cross_validation(data, folds=folds, resume_run=resume_run, callbacks=selected_callbacks)
     return result.run_dir
 
 

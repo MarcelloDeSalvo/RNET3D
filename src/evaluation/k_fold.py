@@ -538,7 +538,7 @@ def load_fold_splits(path: str | Path, ids: list[str], k: int) -> list[FoldSplit
         if not isinstance(entry, dict):
             raise ValueError(f"Fold {index}: expected a JSON object")
         train_ids = entry.get("train", entry.get("train_ids"))
-        val_ids = entry.get("validation", entry.get("val_ids"))
+        val_ids = entry.get("validation", entry.get("val_ids", []))
         test_ids = entry.get("test", [])
         if not isinstance(train_ids, list) or not isinstance(val_ids, list):
             raise ValueError(f"Fold {index}: missing train/validation lists")

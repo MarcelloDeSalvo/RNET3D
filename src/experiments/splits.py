@@ -86,7 +86,9 @@ def reference_fold_order(path: Path, count: int) -> list[int]:
     if not metadata_path.is_file():
         return identity
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    order = metadata.get("generation_fold_order")
+    order = metadata.get("extension_fold_order")
+    if order is None:
+        order = metadata.get("generation_fold_order")
     if order is None:
         return identity
     if not isinstance(order, list) or any(type(index) is not int for index in order) or sorted(order) != identity:
@@ -126,6 +128,7 @@ def modality_annotation_strata(data: PreparedData) -> dict[str, str]:
 
 def stratified_validation_ids(
     pool: Sequence[str], groups: Mapping[str, str], count: int, seed: int,
+    *, retain_singletons: bool = False,
 ) -> list[str]:
     """Select an exact proportional holdout, retaining fitting examples when feasible.
 
@@ -133,6 +136,8 @@ def stratified_validation_ids(
     Groups with at least two members receive validation and fitting examples
     when the requested budget can cover them. Singleton groups stay in fitting
     unless the holdout cannot otherwise reach its required size.
+    retain_singletons=True instead samples a subset of an existing test pool,
+    preserving rare coverage without reserving fitting examples inside that pool.
     """
     if len(set(pool)) != len(pool) or not 0 < count < len(pool):
         raise ValueError("A stratified holdout needs unique animals and must leave fitting data")
@@ -144,10 +149,12 @@ def stratified_validation_ids(
     quotas = count * sizes / len(pool)
     lower = np.zeros(len(names), dtype=int)
     eligible = sizes >= 2
+    if retain_singletons:
+        eligible = sizes >= 1
     if count >= int(eligible.sum()):
         lower[eligible] = 1
     upper = sizes - 1
-    if int(upper.sum()) < count:
+    if retain_singletons or int(upper.sum()) < count:
         upper = sizes.copy()
     allocated = np.clip(np.floor(quotas).astype(int), lower, upper)
     rng = np.random.default_rng(seed)
@@ -172,6 +179,7 @@ def stratified_validation_ids(
 def balanced_folds(
     data: PreparedData, *, k: int, seed: int, validation_fraction: float,
     anchor: SubjectSplit | None = None, strata: Mapping[str, str] | None = None,
+    use_validation: bool = True,
 ) -> list[FoldSplit]:
     """Balance modalities and anatomy in all roles; preserve an explicit fold-zero anchor."""
     animals = data.subjects.subject_ids
@@ -201,10 +209,12 @@ def balanced_folds(
             validation = list(anchor.validation)
         else:
             pool = sorted(set(animals) - set(test))
-            count = max(1, int(np.ceil(len(pool) * validation_fraction)))
-            if count >= len(pool):
-                raise ValueError("Too few animals for separate fitting and inner validation")
-            validation = stratified_validation_ids(pool, groups, count, seed + index)
+            validation = []
+            if use_validation:
+                count = max(1, int(np.ceil(len(pool) * validation_fraction)))
+                if count >= len(pool):
+                    raise ValueError("Too few animals for separate fitting and inner validation")
+                validation = stratified_validation_ids(pool, groups, count, seed + index)
             train = sorted(set(pool) - set(validation))
         result.append(FoldSplit(index, train, validation, sorted(test)))
     validate_folds(result, animals)
@@ -213,12 +223,16 @@ def balanced_folds(
 
 def read_selection(
     path: Path, *, seed: int = 42, validation_fraction: float = 0.2,
+    use_validation: bool = True,
+    strata: Mapping[str, str] | None = None,
 ) -> list[FoldSplit] | SubjectSplit:
     """Read saved roles, converting historical two-role CV into independent tests.
 
     D1_SUBJ_0001 is normalized to D1/SUBJ_0001. In a train/val CV plan, val
     remains the outer holdout and inner validation is drawn only from train.
-    Explicit train/validation/test plans retain their memberships and order.
+    use_validation=False retains the full original fitting pool and empty
+    validation. True reserves inner validation when the plan has none, optionally
+    stratifying it, and preserves existing nonempty validation assignments.
     The input file is never modified.
     """
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -240,8 +254,13 @@ def read_selection(
 
     if isinstance(payload, dict):
         train_ids = tuple(role(payload, "train"))
-        validation_ids = tuple(role(payload, "validation"))
+        validation_ids: tuple[str, ...] = ()
+        if "validation" in payload:
+            validation_ids = tuple(role(payload, "validation"))
         test_ids = tuple(role(payload, "test"))
+        if not use_validation:
+            train_ids = tuple(sorted((*train_ids, *validation_ids)))
+            validation_ids = ()
         return SubjectSplit(train_ids, validation_ids, test_ids)
     if not isinstance(payload, list) or not payload:
         raise ValueError("Expected a fixed split object or a list of CV folds")
@@ -255,7 +274,9 @@ def read_selection(
             validation_name = "val"
             if "validation" in item:
                 raise ValueError("Use val or validation, not both")
-        validation = role(item, validation_name)
+        validation: list[str] = []
+        if validation_name in item:
+            validation = role(item, validation_name)
         test: list[str] = []
         if "test" in item:
             test = role(item, "test")
@@ -266,6 +287,11 @@ def read_selection(
             original = FoldSplit(index, train, validation)
             original.validate(set(train + validation))
             test = validation
+            validation = []
+        if not use_validation:
+            train = list(train) + validation
+            validation = []
+        elif not validation:
             pool = sorted(train)
             count = max(1, int(np.ceil(len(pool) * validation_fraction)))
             if count >= len(pool):
@@ -274,6 +300,9 @@ def read_selection(
             shuffled = rng.permutation(pool).tolist()
             train = sorted(shuffled[count:])
             validation = sorted(shuffled[:count])
+            if strata is not None:
+                validation = stratified_validation_ids(pool, strata, count, seed + index)
+                train = sorted(set(pool) - set(validation))
         folds.append(FoldSplit(index, train, validation, test))
     first = folds[0]
     animals = first.train_ids + first.val_ids + first.test_ids
@@ -292,8 +321,13 @@ def reference_folds(
     are balanced by modality and anatomy coverage unless explicit strata are supplied.
     """
     config = data.config
+    groups = strata
+    if groups is None:
+        groups = modality_annotation_strata(data)
     loaded = read_selection(
         path, seed=config.split_seed, validation_fraction=config.cv_validation_fraction,
+        use_validation=not config.training.fixed_epochs,
+        strata=groups,
     )
     if not isinstance(loaded, list):
         raise ValueError("Reference splits must contain a complete K-Fold plan")
@@ -313,6 +347,7 @@ def reference_folds(
     extra_folds = balanced_folds(
         extra, k=len(loaded), seed=config.split_seed,
         validation_fraction=config.cv_validation_fraction, strata=strata,
+        use_validation=not config.training.fixed_epochs,
     )
     order = reference_fold_order(path, len(loaded))
     extra_folds = reorder_folds(extra_folds, order)

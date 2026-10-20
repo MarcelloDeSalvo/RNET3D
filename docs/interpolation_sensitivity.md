@@ -23,9 +23,11 @@ cleans the brain head and exports original ROI IDs. Predictions need not be
 written: `SAVE_PREDICTIONS=False` retains metrics and checkpoints.
 
 The default pilot uses all D1 animals, ten epochs, four training batches per
-epoch, batch size eight, multiplier one and seed 42. Fixed learning rate and
-epoch count keep the optimizer budget matched. Callbacks are explicit in the
-notebook; best-validation and recovery checkpoints remain managed by the core.
+epoch, batch size eight, multiplier one and seed 42. A preset cosine learning
+rate schedule and fixed epoch count keep optimizer budgets matched without
+validation. Callbacks are explicit; the default evaluates the last epoch and
+retains recovery checkpoints. `USE_VALIDATION_FOR_SELECTION=True` enables a
+separate inner validation set and best-validation selection instead.
 Validation/test cover every saved deterministic evaluation patch and every
 selected full volume. `STEPS_PER_EPOCH=None` restores complete training epochs.
 Use a fresh study folder for changes to budget, orders, seeds or callbacks.

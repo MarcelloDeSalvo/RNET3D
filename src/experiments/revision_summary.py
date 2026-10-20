@@ -402,7 +402,8 @@ def export_suite_summary(suite_dir: Path, *, bootstrap_samples: int = 2000) -> P
         roles = ("holdout", "test")
         reference = "reference"
         if group == "interpolation":
-            roles = ("validation",)
+            if contract["settings"].get("use_validation_for_selection", True):
+                roles = ("validation",)
             reference = "interpolation_order_1"
         if reference not in set(metrics["Variant"]):
             reference = None
@@ -510,7 +511,8 @@ def export_suite_summary(suite_dir: Path, *, bootstrap_samples: int = 2000) -> P
     notes += (
         "Four manuscript tables only. Detailed metrics, native patches, intervals and comparison tests are in ../audit.\n"
         "Main scores: equal-weight fold means +/- fold SD. Anatomy excludes lesion, brain and background, and requires complete annotation.\n"
-        "SHAM/TBI, datasets and seeds stay separate. Missing GT is never scored. Interpolation uses validation results.\n"
+        "SHAM/TBI, datasets and seeds stay separate. Missing GT is never scored. "
+        "Interpolation uses its declared evaluation role; final-epoch test sensitivity does not select a model.\n"
         "Inspect ../audit/coverage.csv before claiming a completed study. No missing fold or experiment is invented.\n"
         "Ablation lesion differences are candidate minus reference; Holm correction includes the exported per-region/metric comparison family.\n"
         "Fixed ablations reuse only the chosen CV reference fold, with one-fold animal intervals and no fabricated fold SD.\n"

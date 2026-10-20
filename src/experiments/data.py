@@ -43,8 +43,8 @@ class SubjectSplit:
     def validate(self, index: SubjectIndex) -> None:
         """Require exact coverage of selected animals, without duplicated scans."""
         groups = (self.train, self.validation, self.test)
-        if any(not group for group in groups):
-            raise ValueError("Training, validation and test must each contain animals")
+        if not self.train or not self.test:
+            raise ValueError("Training and test must each contain animals")
 
         selected = [subject for group in groups for subject in group]
         if len(selected) != len(set(selected)):
@@ -65,7 +65,7 @@ class SubjectSplit:
         payload = json.loads(path.read_text(encoding="utf-8"))
         split = cls(
             train=tuple(payload["train"]),
-            validation=tuple(payload["validation"]),
+            validation=tuple(payload.get("validation", ())),
             test=tuple(payload["test"]),
         )
         split.validate(index)
@@ -247,6 +247,11 @@ def resolve_training_split(
         split.validate(data.subjects)
 
     if split is not None:
+        if config.training.fixed_epochs and split.validation:
+            if resume_run is not None:
+                raise ValueError("A fixed-epoch resumed run must already have empty validation")
+            train_ids = tuple(sorted((*split.train, *split.validation)))
+            split = SubjectSplit(train_ids, (), split.test)
         for animal in split.validation:
             if inherited.get(animal) == "train":
                 raise ValueError(f"Pretraining leakage: validation animal was fitted by the source: {animal}")
@@ -261,11 +266,15 @@ def resolve_training_split(
         from .splits import modality_annotation_strata
 
         strata = modality_annotation_strata(data)
-        return make_split(
+        generated = make_split(
             data.subjects, seed=seed,
             validation_fraction=settings.validation_fraction, test_fraction=settings.test_fraction,
             strata=strata,
         )
+        if config.training.fixed_epochs:
+            training_ids = tuple(sorted((*generated.train, *generated.validation)))
+            return SubjectSplit(training_ids, (), generated.test)
+        return generated
 
     groups: dict[str, list[str]] = {"train": [], "validation": [], "test": []}
     for animal, role in inherited.items():
@@ -303,6 +312,9 @@ def resolve_training_split(
     train_ids = tuple(sorted(groups["train"]))
     validation_ids = tuple(sorted(groups["validation"]))
     test_ids = tuple(sorted(groups["test"]))
+    if config.training.fixed_epochs:
+        train_ids = tuple(sorted((*train_ids, *validation_ids)))
+        validation_ids = ()
     split = SubjectSplit(train=train_ids, validation=validation_ids, test=test_ids)
     split.validate(data.subjects)
     return split
@@ -348,6 +360,7 @@ def annotation_values(scan: Rodent) -> set[int]:
 def make_cv_splits(
     subjects: list[str], *, k: int, seed: int, validation_fraction: float = 0.2,
     strata: Mapping[str, str] | None = None,
+    use_validation: bool = True,
 ) -> list[FoldSplit]:
     """Create outer holdouts with optional stratification of biological animals.
 
@@ -379,11 +392,13 @@ def make_cv_splits(
         pool = ids[pool_indexes]
         rng = np.random.default_rng(seed + index)
         shuffled = rng.permutation(pool)
-        validation_count = max(1, int(np.ceil(len(pool) * validation_fraction)))
-        if validation_count >= len(pool):
-            raise ValueError("Too few animals for separate training and checkpoint validation")
-        validation = sorted(shuffled[:validation_count].tolist())
-        if strata is not None:
+        validation: list[str] = []
+        if use_validation:
+            validation_count = max(1, int(np.ceil(len(pool) * validation_fraction)))
+            if validation_count >= len(pool):
+                raise ValueError("Too few animals for separate training and checkpoint validation")
+            validation = sorted(shuffled[:validation_count].tolist())
+        if use_validation and strata is not None:
             from .splits import stratified_validation_ids
 
             validation = stratified_validation_ids(pool.tolist(), strata, validation_count, seed + index)
@@ -451,6 +466,7 @@ def make_pretrained_cv_splits(
         return make_cv_splits(
             animals, k=config.training.k, seed=config.split_seed,
             validation_fraction=config.cv_validation_fraction, strata=strata,
+            use_validation=not config.training.fixed_epochs,
         )
 
     held_out = [animal for roles in inherited for animal, role in roles.items() if role == "test"]
@@ -468,6 +484,7 @@ def make_pretrained_cv_splits(
             extra_folds = make_cv_splits(
                 additional, k=config.training.k, seed=config.split_seed,
                 validation_fraction=config.cv_validation_fraction, strata=additional_strata,
+                use_validation=not config.training.fixed_epochs,
             )
         else:
             # Source roles already supply training and validation. Tiny additions
@@ -499,6 +516,9 @@ def make_pretrained_cv_splits(
         train.sort()
         validation.sort()
         test.sort()
+        if config.training.fixed_epochs:
+            train = sorted(train + validation)
+            validation = []
         fold = FoldSplit(index=index, train_ids=train, val_ids=validation, test_ids=test)
         fold.validate(set(animals))
         folds.append(fold)

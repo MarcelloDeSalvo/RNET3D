@@ -1,18 +1,20 @@
 # Experiment core and training notebooks
 
 Start with `notebook/01_tbi_mouse_training.ipynb` in the **rnet** environment. Review the
-configuration, animal splits and validation batch, then set `RUN_TRAINING = True`.
+configuration, animal splits and preview batches, then set `RUN_TRAINING = True`.
 The notebook defaults to normalized D1 and the historical four-class task:
 background, lesion, merged lateral ventricles, and third ventricle.
 `notebook/02_tbi_mouse_kfold.ipynb` uses the same factories for grouped K-Fold,
-with separate checkpoint-selection validation and independent outer holdout
-animals. Training is disabled until its configuration and split counts are reviewed.
+on the exact original D1 train/test folds. `USE_VALIDATION_FOR_SELECTION=False`
+omits validation passes, uses preset cosine LR decay, and evaluates the last epoch.
+True reserves a separate inner validation set and enables best-validation selection.
+Training is disabled until its configuration and split counts are reviewed.
 For fixed-protocol rat CV, use `notebook/04_rat_kfold.ipynb` and set
 `MOUSE_CHECKPOINT`. Its complete D2 configuration uses 112-cube patches, five folds,
 100 epochs, batch size four and training multiplier five. Each fold initializes
 from the same mouse weights, trains on four rats, and evaluates every available
-timepoint of the remaining rat. New notebook 04 runs use a fixed learning rate,
-an empty explicit callback list and `fixed_epochs=True`. No validation dataset
+timepoint of the remaining rat. New notebook 04 runs use preset cosine LR decay
+and `fixed_epochs=True`. No validation dataset
 is passed during fitting; metrics use the final epoch rather than a loss minimum.
 The remaining rat is an independent `holdout`, evaluated only after all 100
 epochs. Viewers, checkpoint evaluation and paper tables default to that role.
@@ -65,9 +67,10 @@ Explicit/resumed memberships are kept and audited. See
 [the shared split policy](pretraining_splits.md).
 
 `notebook/06_mouse_full_kfold.ipynb` uses the same complete MouseFull settings
-with five grouped outer folds. Each remaining pool is split into training and
-checkpoint-selection validation; every CV animal is evaluated in one outer
-holdout. Its default `FOLD_MODE="balanced"` stratifies newly generated outer
+with five grouped outer folds. By default the original D1 train/test roles are
+extended with balanced D3 holdouts; every CV animal is tested once. Optional
+validation selection reserves inner validation from development animals only.
+Its default `FOLD_MODE="balanced"` stratifies newly generated outer
 holdouts and inner validation by dataset, modality and complete versus partial
 anatomical annotation coverage, excluding lesion annotation from this balance.
 An animal is complete only when all selected

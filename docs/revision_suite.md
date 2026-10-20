@@ -59,8 +59,10 @@ committed epoch. The failed epoch does not replace committed recovery state.
 The launcher exposes animal selections, split files, seeds, epoch budgets,
 interpolation orders, selected ablations, source-fold choice, task switches,
 prediction saving and the exact LR/CSV callbacks. CV uses LR reduction driven by
-inner validation, without early stopping. Interpolation pilots use a fixed LR;
-release refits use a fixed duration and no adaptive callbacks. The full task
+inner validation only when `USE_VALIDATION_FOR_SELECTION=True`. The default is
+False: original two-way folds, no validation passes, preset cosine LR decay and
+final-epoch evaluation. Release refits use the same preset schedule and fixed
+duration. The full task
 defaults retain the original filter widths, v1 MouseFull loss, RIA reference,
 linear MRI interpolation and nearest-neighbour masks. Full-volume evaluation
 uses original labels and the configured historical postprocessing, with centroid
@@ -74,11 +76,11 @@ must still be described honestly; a new runner cannot erase their history.
 ## Shared splits and initialization
 
 The launcher defaults to `REFERENCE_SPLITS=DATA_ROOT.parent / "D1_splits_final.json"`
-and `REFERENCE_FOLD=0`. The [reference split guide](reference_splits.md) describes
-the explicit train/validation/test roles, exact memberships and overrides.
-All historical outer test animals are retained, with inner validation drawn
-only from their original training pools. The launcher reads the saved roles
-without resplitting or rewriting them. Set
+and `REFERENCE_FOLD=4`. The [reference split guide](reference_splits.md) describes
+the original train/test roles, final-model fixed files and exact counts.
+Every original D1 training and outer-test assignment is retained. MouseFull adds
+balanced D3 holdouts. Optional inner validation is drawn only from original
+training pools; it never uses the outer test. Set
 `REFERENCE_SPLITS=None` (or `--no-reference-splits`) to generate fresh folds.
 
 Use canonical animal IDs such as `D1/SUBJ_0001`. A selected rat includes all its
@@ -136,7 +138,7 @@ before starting. D4 IDs and image paths must be separate from development.
 
 The default one-seed, five-fold suite runs:
 
-1. Four fixed-split interpolation pilots, anchored to D1 fold zero. Linear remains
+1. Four fixed-split interpolation pilots, anchored to original D1 fold 4. Linear remains
    the frozen main-study setting; pilot scores never configure subsequent runs.
 2. Five scratch D1 reference folds, reused as main results and rat sources.
 3. Five MouseFull reference folds, then three fixed classifier/masking controls
@@ -153,11 +155,12 @@ change the displayed count. `experiment_plan.csv` gives the exact plan before
 execution. All variants share saved deterministic evaluation patches within
 their task. Random training augmentations are not guaranteed bitwise identical.
 
-Release durations are the ceiling of the median **inner-validation selected
-epoch counts** from the corresponding reference CV runs, for `RELEASE_SEED`.
-The all-development refits have no validation/test animals, no early stopping
-and no LR scheduler. The shared runner selects the minimum training-loss
-checkpoint within that fixed duration and exports an inference model. Their
+Release durations use the corresponding completed reference budgets for
+`RELEASE_SEED` in the default final-epoch protocol. With optional validation
+selection they use the ceiling of median selected epoch counts instead.
+All-development refits have no validation/test animals or early stopping. The
+default cosine schedule and final-epoch selection also apply to these refits.
+The runner exports an inference model. Their
 training scores are not independent performance evidence. The refit contract is
 explicitly recorded and recognized by initialization audits; ordinary source
 runs still require their selection-validation provenance.
@@ -223,7 +226,8 @@ The four sheets are:
 - **Ablations:** the same compact scores for component/supervision controls and
   interpolation. Lesion comparisons retain paired differences, intervals,
   contributing animals and Holm-adjusted p-values. Detailed per-region tests
-  remain in the audit. Interpolation reporting uses validation, explicitly.
+  remain in the audit. Interpolation reports the declared validation or final-test
+  role; sensitivity results never automatically change the frozen main-study order.
 - **Per region:** reference-model region/brain scores, physical boundary/volume
   metrics, annotation denominators and animal Dice intervals.
 - **Validation:** animal classifier rates/confusion information, SHAM lesion

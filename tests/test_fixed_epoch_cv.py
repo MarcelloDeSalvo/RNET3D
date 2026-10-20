@@ -15,6 +15,7 @@ from src.evaluation.k_fold import (
 )
 from src.evaluation.inference import best_checkpoint_settings
 from src.experiments.training import history_figure
+from src.experiments.schedules import CosineEpochSchedule
 
 
 def test_fixed_epoch_cv_uses_final_weights_without_validation_and_resumes(tmp_path):
@@ -78,8 +79,11 @@ def test_fixed_epoch_cv_uses_final_weights_without_validation_and_resumes(tmp_pa
         patch_calls.append((list(subject_ids), value))
         return pd.DataFrame({"Metric": ["selected_weight"], "Value": [value]})
 
+    schedule = CosineEpochSchedule(initial_learning_rate=0.001, minimum_learning_rate=0.0001, epochs=3)
     options = {
-        "fold_splits": folds, "callbacks_factory": lambda context: [ControlledEpoch()],
+        "fold_splits": folds, "callbacks_factory": lambda context: [
+            tf.keras.callbacks.LearningRateScheduler(schedule), ControlledEpoch(),
+        ],
         "evaluation": EvaluationConfig(evaluate_validation=False),
         "fve_callbacks": {"regions": Evaluator}, "patch_evaluator": patch_evaluator,
     }
@@ -98,6 +102,8 @@ def test_fixed_epoch_cv_uses_final_weights_without_validation_and_resumes(tmp_pa
     assert evaluations == patch_calls == [(["b"], 3.0), (["a"], 3.0)]
     assert len(builds) == 3
     assert all(len(history["loss"]) == 3 and "val_loss" not in history for history in result.histories)
+    for history in result.histories:
+        assert history["lr"] == pytest.approx([0.001, 0.00055, 0.0001])
     assert result.summaries["loss"] == 1.0
     assert result.patch_metrics.BestEpoch.eq(3).all()
     assert result.patch_metrics.DatasetRole.eq("holdout").all()

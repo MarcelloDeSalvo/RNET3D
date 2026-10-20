@@ -141,6 +141,25 @@ def test_scratch_memberships_use_modality_and_anatomy_strata(experiment):
     assert resolve_training_split(data) == expected
 
 
+def test_completed_two_way_source_is_accepted_without_validation_and_still_checks_leakage(experiment, tmp_path):
+    training = replace(experiment.training, epochs=3, monitor="loss", fixed_epochs=True)
+    data = prepare_data(replace(experiment, training=training))
+    settings = source_run(data, tmp_path / "fixed_source", ["D1/SUBJ_0000"], [])
+    state_path = settings.checkpoint.parent / "training_state.json"
+    state_path.write_text(json.dumps({
+        "completed_epochs": 2, "selected_checkpoint": "latest/selected_2.weights.h5",
+    }))
+    with pytest.raises(ValueError, match="completed budget"):
+        pretraining_audit(data, settings, ["D1/SUBJ_0002"])
+    state_path.write_text(json.dumps({
+        "completed_epochs": 3, "selected_checkpoint": "latest/selected_3.weights.h5",
+    }))
+    audit = pretraining_audit(data, settings, ["D1/SUBJ_0002"])
+    assert str(state_path) in audit["sha256"]
+    with pytest.raises(ValueError, match="Pretraining leakage"):
+        pretraining_audit(data, settings, ["D1/SUBJ_0000"])
+
+
 def cv_sources(data, folder):
     """Two source folds with one selection animal and two outer holdouts each."""
     roles = [

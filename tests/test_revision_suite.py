@@ -88,7 +88,7 @@ def revision_settings(tmp_path):
     reference = root / "D1" / "SUBJ_0000" / "N4.nii.gz"
     return RevisionSuiteConfig(
         data_root=root, reference=reference, output_root=tmp_path / "results",
-        folds=2, bootstrap_samples=100,
+        folds=2, bootstrap_samples=100, use_validation_for_selection=True,
         draft=DraftConfig(external_animals=3),
     )
 
@@ -168,6 +168,40 @@ def test_folds_balance_complete_tbi_and_preserve_every_pretraining_role(revision
         scans = plan.data["rats"].subjects.scan_keys(fold.test_ids)
         assert len(scans) == 2
     assert not plan.folder.exists()
+
+
+def test_two_way_jobs_use_cosine_and_never_forward_validation(revision_settings, monkeypatch):
+    """The public suite default must propagate its policy to CV and fixed studies."""
+    import tensorflow as tf
+    from types import SimpleNamespace
+    from src.experiments import training
+
+    settings = replace(revision_settings, use_validation_for_selection=False)
+    plan = suite.prepare_suite(settings)
+    assert all(not fold.val_ids for fold in plan.splits.d1 + plan.splits.mouse_full + plan.splits.rats)
+    observed = []
+
+    def inspect(data, split=None, **kwargs):
+        assert data.config.training.fixed_epochs
+        assert data.config.training.monitor == "loss"
+        if split is not None:
+            assert not split.validation
+        if "folds" in kwargs:
+            assert all(not fold.val_ids for fold in kwargs["folds"])
+        callbacks = kwargs["callbacks"]
+        assert not any(isinstance(item, tf.keras.callbacks.ReduceLROnPlateau) for item in callbacks)
+        scheduler = next(item for item in callbacks if isinstance(item, tf.keras.callbacks.LearningRateScheduler))
+        assert scheduler.schedule.epochs == data.config.training.epochs
+        observed.append(data.config.training.model_name)
+        return SimpleNamespace(run_dir=plan.folder)
+
+    monkeypatch.setattr(training, "run_training", inspect)
+    monkeypatch.setattr(training, "run_cross_validation", inspect)
+    adaptive = [tf.keras.callbacks.ReduceLROnPlateau()]
+    for name in ("d1_reference", "mouse_full_reference", "d1_no_attention", "mouse_full_no_classifier"):
+        job = next(job for job in plan.jobs if job.name == name)
+        suite._execute_job(plan, job, callbacks=adaptive)
+    assert len(observed) == 4
 
 
 def test_existing_d1_folds_are_inherited_without_regeneration(revision_settings, tmp_path):
@@ -336,6 +370,30 @@ def test_interrupted_cv_can_report_committed_folds_before_summary_csv_exists(rev
     table = pd.read_csv(paper / "main_results.csv")
     assert table["Folds"].tolist() == [1]
     assert table["Animals"].tolist() == [1]
+
+
+def test_two_way_interpolation_exports_test_results_without_validation(revision_settings):
+    settings = replace(revision_settings, use_validation_for_selection=False)
+    folder = suite.run_revision_suite(settings, plan_only=True)
+    contract = json.loads((folder / "suite.json").read_text())
+    animals = contract["splits"]["interpolation"]["test"]
+    for job in contract["jobs"]:
+        if job["group"] != "interpolation":
+            continue
+        output = folder / "experiments" / job["name"] / f"seed_{job['seed']}" / "summary"
+        output.mkdir(parents=True)
+        rows = [{
+            "Subject": animal, "Scan": animal.split("/")[-1], "Dataset": "D1",
+            "Condition": "TBI", "Head": "regions", "Region": "Lesion", "Label": 1,
+            "Metric": "Dice", "Value": 0.8, "Unit": "fraction", "Status": "ok",
+            "Seed": job["seed"], "Fold": 0, "DatasetRole": "test",
+        } for animal in animals]
+        pd.DataFrame(rows).to_csv(output / "full_volume_metrics.csv", index=False)
+    paper = export_suite_summary(folder, bootstrap_samples=100)
+    table = pd.read_csv(paper / "ablations.csv")
+    interpolation = table.loc[table["Task"].eq("interpolation")]
+    assert len(interpolation) == len(settings.interpolation_orders)
+    assert interpolation["DatasetRole"].eq("test").all()
 
 
 def test_complete_draft_fits_every_stage_and_resumes_without_fitting(revision_settings, monkeypatch, eager_tensorflow):

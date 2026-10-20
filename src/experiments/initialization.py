@@ -94,24 +94,40 @@ def load_pretraining_source(settings: InitializationConfig, *, include_test: boo
     if not split_file.is_file() or not manifest_file.is_file():
         raise ValueError("Pretraining requires source split.json and subjects.csv for the selected fold")
     split = json.loads(split_file.read_text(encoding="utf-8"))
+    source_config = ExperimentConfig.load(experiment_file)
     refit_file = run_dir / "refit.json"
     is_refit: bool = refit_file.is_file()
     if not isinstance(split, dict) or not split.get("train"):
         raise ValueError("Pretraining source must declare training and checkpoint-selection animals")
     if not split.get("validation"):
-        if not is_refit:
+        if is_refit:
+            refit = json.loads(refit_file.read_text(encoding="utf-8"))
+            valid_refit = (
+                refit.get("purpose") == "Deployment refit; no independent evaluation"
+                and source_config.training.monitor == "loss"
+                and not source_config.training.default_callbacks
+                and refit.get("epochs") == source_config.training.epochs
+                and not split.get("test")
+            )
+            if not valid_refit:
+                raise ValueError("Refit sources require a fixed-budget, training-only deployment contract")
+        elif source_config.training.fixed_epochs:
+            state_file = split_file.parent / "training_state.json"
+            state: dict[str, Any] = {}
+            if state_file.is_file():
+                state = json.loads(state_file.read_text(encoding="utf-8"))
+            expected_name = f"selected_{source_config.training.epochs}.weights.h5"
+            selected_name = Path(state.get("selected_checkpoint", "")).name
+            completed = state.get("completed_epochs") == source_config.training.epochs
+            valid_fixed = (
+                source_config.training.monitor == "loss"
+                and not source_config.training.default_callbacks
+                and completed and selected_name == expected_name
+            )
+            if not valid_fixed:
+                raise ValueError("Fixed-epoch pretraining requires the completed budget and final selected checkpoint")
+        else:
             raise ValueError("Pretraining source must declare training and checkpoint-selection animals")
-        refit = json.loads(refit_file.read_text(encoding="utf-8"))
-        refit_config = ExperimentConfig.load(experiment_file)
-        valid_refit = (
-            refit.get("purpose") == "Deployment refit; no independent evaluation"
-            and refit_config.training.monitor == "loss"
-            and not refit_config.training.default_callbacks
-            and refit.get("epochs") == refit_config.training.epochs
-            and not split.get("test")
-        )
-        if not valid_refit:
-            raise ValueError("Refit sources require a fixed-budget, training-only deployment contract")
 
     root_split = run_dir / "splits.json"
     if include_test and not split.get("test") and root_split != split_file and root_split.is_file():
@@ -161,7 +177,6 @@ def load_pretraining_source(settings: InitializationConfig, *, include_test: boo
     if set(manifest["Subject"]) != set(selected):
         raise ValueError("Pretraining source manifest does not cover declared animals")
 
-    source_config = ExperimentConfig.load(experiment_file)
     return PretrainingSource(
         run_dir=run_dir, fold=source_fold, split_file=split_file,
         manifest_file=manifest_file, config=source_config, roles=roles, manifest=manifest,
@@ -238,6 +253,9 @@ def pretraining_audit(
         validation_ids=validation_ids, ancestors=next_ancestors,
     )
     files = [checkpoint, split_file, manifest_file, experiment_file]
+    state_file = split_file.parent / "training_state.json"
+    if source_config.training.fixed_epochs and state_file.is_file():
+        files.append(state_file)
     refit_file = run_dir / "refit.json"
     if refit_file.is_file():
         files.append(refit_file)

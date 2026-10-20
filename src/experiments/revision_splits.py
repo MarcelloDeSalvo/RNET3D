@@ -11,7 +11,7 @@ import pandas as pd
 from .data import PreparedData, SubjectSplit
 from .splits import (
     balanced_folds, merge_folds, project_folds, read_selection, reference_fold_order,
-    reorder_folds, select_animals, validate_folds,
+    reorder_folds, select_animals, validate_folds, modality_annotation_strata,
 )
 from ..evaluation.k_fold import FoldSplit
 
@@ -42,6 +42,7 @@ def make_suite_splits(
     d1: PreparedData, mouse_full: PreparedData, rats: PreparedData | None, *,
     k: int, seed: int, validation_fraction: float, folds_file: Path | None = None,
     anchor_split_file: Path | None = None, rat_folds_file: Path | None = None,
+    use_validation: bool = True,
 ) -> SuiteSplits:
     """Generate or inherit a master plan and prove source/target compatibility."""
     d1_ids = d1.subjects.subject_ids
@@ -52,7 +53,11 @@ def make_suite_splits(
     supplied: list[FoldSplit] | SubjectSplit | None = None
     selected_path = folds_file or anchor_split_file
     if selected_path is not None:
-        supplied = read_selection(selected_path, seed=seed, validation_fraction=validation_fraction)
+        groups = modality_annotation_strata(mouse_full)
+        supplied = read_selection(
+            selected_path, seed=seed, validation_fraction=validation_fraction,
+            use_validation=use_validation, strata=groups,
+        )
         if folds_file is not None and not isinstance(supplied, list):
             raise ValueError("folds_file needs CV folds; use anchor_split_file for a fixed split")
         if anchor_split_file is not None and not isinstance(supplied, SubjectSplit):
@@ -68,7 +73,10 @@ def make_suite_splits(
         elif set(ids) == set(d1_ids):
             validate_folds(supplied, d1_ids)
             d1_folds = supplied
-            extra = balanced_folds(sham, k=k, seed=seed, validation_fraction=validation_fraction)
+            extra = balanced_folds(
+                sham, k=k, seed=seed, validation_fraction=validation_fraction,
+                use_validation=use_validation,
+            )
             order = reference_fold_order(selected_path, k)
             extra = reorder_folds(extra, order)
             mouse_folds = merge_folds(d1_folds, extra)
@@ -97,9 +105,11 @@ def make_suite_splits(
                 raise ValueError("Anchor must cover selected D1 or selected D1+D3 animals")
         d1_folds = balanced_folds(
             d1_for_balance, k=k, seed=seed, validation_fraction=validation_fraction, anchor=anchor_d1,
+            use_validation=use_validation,
         )
         sham_folds = balanced_folds(
             sham, k=k, seed=seed, validation_fraction=validation_fraction, anchor=anchor_sham,
+            use_validation=use_validation,
         )
         mouse_folds = merge_folds(d1_folds, sham_folds)
 
@@ -107,7 +117,10 @@ def make_suite_splits(
     if rats is not None:
         rat_ids = rats.subjects.subject_ids
         if rat_folds_file is not None:
-            loaded = read_selection(rat_folds_file, seed=seed, validation_fraction=validation_fraction)
+            loaded = read_selection(
+                rat_folds_file, seed=seed, validation_fraction=validation_fraction,
+                use_validation=use_validation,
+            )
             if not isinstance(loaded, list):
                 raise ValueError("Rat folds require an outer CV plan")
             rat_folds = loaded
@@ -115,6 +128,7 @@ def make_suite_splits(
         else:
             rat_folds = balanced_folds(
                 rats, k=len(rat_ids), seed=seed, validation_fraction=validation_fraction,
+                use_validation=use_validation,
             )
         if any(len(fold.test_ids) != 1 for fold in rat_folds):
             raise ValueError("Rat evaluation must leave exactly one complete animal out per fold")
